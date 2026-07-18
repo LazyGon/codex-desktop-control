@@ -1,0 +1,24 @@
+{
+  "name": "codex-discord-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private Discord control surface for Codex Desktop tasks",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "register": "node src/register-commands.mjs",
+    "check": "node scripts/check.mjs",
+    "test": "node --test",
+    "verify:discord": "node scripts/verify-discord-layout.mjs",
+    "verify:transcripts": "node scripts/verify-discord-transcripts.mjs"
+  },
+  "dependencies": {
+    "discord.js": "14.27.0"
+  },
+  "devDependencies": {
+    "ws": "8.21.1"
+  }
+}

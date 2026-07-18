@@ -1,0 +1,29 @@
+# Discord dependencies and local credentials
+discord-bridge/node_modules/
+discord-bridge/config/config.json
+discord-bridge/config/token.dpapi
+
+# Discord runtime state and logs
+discord-bridge/data/*
+!discord-bridge/data/.gitkeep
+discord-bridge/logs/*
+!discord-bridge/logs/.gitkeep
+
+# Generated shared-launcher artifacts
+launcher/CodexSharedLauncher.exe
+launcher/CodexSharedLauncher.ico
+launcher/cache/
+launcher/logs/
+launcher/state/
+
+# Controller and experiment runtime artifacts
+logs/
+state/
+experiments/
+
+# Local transient files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db

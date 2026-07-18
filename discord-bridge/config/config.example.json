@@ -1,0 +1,23 @@
+{
+  "applicationId": "DISCORD_APPLICATION_ID",
+  "guildId": "DISCORD_GUILD_ID",
+  "allowedUserIds": [
+    "DISCORD_USER_ID"
+  ],
+  "controlCategoryName": "Codex Control",
+  "archiveCategoryName": "Codex Archived",
+  "projectCategoryPrefix": "Codex - ",
+  "controlChannelName": "codex-remote",
+  "alertsChannelName": "codex-alerts",
+  "completionsChannelName": "codex-completions",
+  "completionMentionUserId": "DISCORD_USER_ID",
+  "defaultWatchLevel": "normal",
+  "taskListLimit": 20,
+  "initialSnapshotMessages": 16,
+  "liveUpdateIntervalMs": 2500,
+  "taskSyncIntervalMs": 30000,
+  "plainMessageInputEnabled": false,
+  "autoStartSharedDesktop": true,
+  "sharedLauncherPath": "..\\launcher\\CodexSharedLauncher.exe",
+  "appServerUrl": null
+}
