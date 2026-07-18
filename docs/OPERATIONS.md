@@ -86,6 +86,14 @@ automatically, and archived tasks move to `Codex Archived`. Installation,
 commands, approval routing, reconnection behavior, and credential rotation are
 documented in `discord-bridge\README.md` and `discord-bridge\docs-operations.md`.
 
+To create a Codex task from a phone, create a text channel inside the target
+project category and send its first ordinary message. The Bridge uses the
+category's stored project path for `thread/start`, derives the task name from
+the channel name, binds the existing channel, and delivers that message as the
+first turn. Rapid messages in the same channel are serialized, so only one task
+is created. Unbound channels in the control, archive, or unrelated categories
+are ignored rather than becoming tasks.
+
 For every subscribed task, user instructions entered in Codex Desktop are
 posted to the matching private Discord task channel as orange cards with
 `Task`, `Turn`, and `Message` identity fields. Project/category, task/channel,

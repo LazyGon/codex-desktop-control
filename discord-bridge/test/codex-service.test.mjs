@@ -27,6 +27,8 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   let peer;
   const resumedThreads = [];
   const listArchivedFilters = [];
+  const startedThreads = [];
+  const namedThreads = [];
   server.on('connection', (socket) => {
     peer = socket;
     socket.on('message', (data) => {
@@ -36,6 +38,14 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
       if (request.method === 'thread/resume') {
         resumedThreads.push(request.params.threadId);
         result = { thread: { id: request.params.threadId } };
+      }
+      if (request.method === 'thread/start') {
+        startedThreads.push(request.params);
+        result = { thread: { id: 'thread-new', cwd: request.params.cwd, status: { type: 'idle' } } };
+      }
+      if (request.method === 'thread/name/set') {
+        namedThreads.push(request.params);
+        result = {};
       }
       if (request.method === 'thread/read') {
         result = {
@@ -89,6 +99,12 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.deepEqual(allThreads.map((thread) => thread.id), ['thread-1', 'thread-2']);
   assert.deepEqual(listArchivedFilters, [true, true]);
   assert.deepEqual(resumedThreads, ['thread-1']);
+
+  const started = await service.startThread('C:\\new-work');
+  await service.setThreadName(started.thread.id, 'New work');
+  assert.equal(started.thread.id, 'thread-new');
+  assert.deepEqual(startedThreads, [{ cwd: 'C:\\new-work' }]);
+  assert.deepEqual(namedThreads, [{ threadId: 'thread-new', name: 'New work' }]);
 
   const notificationPromise = new Promise((resolve) => service.once('notification', resolve));
   peer.send(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'live-turn' } } }));

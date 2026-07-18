@@ -89,6 +89,12 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) and
 [discord-bridge/docs-operations.md](discord-bridge/docs-operations.md) for the
 phone and recovery workflows.
 
+To start a task from Discord, create a text channel inside an existing managed
+project category and post the first instruction there. The Bridge creates a
+Codex task with that project's working directory, names it from the channel,
+binds the same channel, and delivers the post. It does not create tasks from
+unbound channels in control, archive, or unrelated categories.
+
 ## Update and uninstall
 
 After pulling an update, rerun `Install.ps1` with the same Discord IDs. Existing

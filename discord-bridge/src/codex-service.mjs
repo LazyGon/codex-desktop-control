@@ -109,6 +109,19 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/resume', { threadId, excludeTurns: true }, 60_000);
   }
 
+  async startThread(cwd = null) {
+    this.#requireClient();
+    const params = cwd ? { cwd } : {};
+    const result = await this.client.call('thread/start', params, 60_000);
+    if (!result.thread?.id) throw new Error('thread/start did not return a task ID.');
+    return result;
+  }
+
+  async setThreadName(threadId, name) {
+    this.#requireClient();
+    return this.client.call('thread/name/set', { threadId, name }, 30_000);
+  }
+
   async unsubscribeThread(threadId) {
     if (!this.connected) return null;
     return this.client.call('thread/unsubscribe', { threadId }).catch((error) => {

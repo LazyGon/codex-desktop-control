@@ -14,7 +14,10 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
 
 1. Run `/codex status` in `codex-remote`.
 2. Open the project category and select the automatically synchronized task
-   channel. Archived tasks are under `Codex Archived`.
+   channel. To create a task, create a text channel in that project category
+   and send its first ordinary message. The channel name becomes the task name,
+   and the category selects the working directory. Archived tasks are under
+   `Codex Archived`.
 3. Review orange user cards, final assistant cards, and commentary cards captured
    while the task was live. `🟢` in the channel name means a turn is running;
    `⚫` means stopped.
@@ -35,6 +38,11 @@ Moving a task channel into `Codex Archived` archives the matching Codex task.
 Moving an archived channel back to its own project category unarchives it.
 Moving it to any unrelated category is rejected and immediately rolled back to
 its recorded category without changing the Codex task state.
+
+An unbound channel becomes a task only when it is inside a managed project
+category. The first valid post creates and binds one task before delivery;
+follow-up posts in that channel are processed in order. Control, archive, and
+unrelated categories do not create tasks from ordinary messages.
 
 When a turn completes, `codex-completions` starts by mentioning the configured
 user with `タスクが完了しました。`, puts a one-line final-answer summary on the

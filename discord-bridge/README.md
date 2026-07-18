@@ -10,6 +10,10 @@ outbound connection to Discord.
   completion channels.
 - Creates one private category per project and continuously synchronizes every
   top-level Codex task into its project category.
+- Treats the first ordinary message in an unbound text channel inside a managed
+  project category as a new task request. It starts the task in that project's
+  working directory, derives its title from the channel name, binds the same
+  channel, and serializes rapid follow-up messages to prevent duplicate tasks.
 - Moves archived Codex tasks into `Codex Archived` and returns unarchived tasks
   to their project category. Moving a task channel into `Codex Archived` archives
   the Codex task; moving it back to its own project category unarchives it. A move
@@ -46,11 +50,12 @@ outbound connection to Discord.
 - Reconciles active and archived task lists every 30 seconds, after reconnect,
   and immediately after task lifecycle notifications.
 - Treats ordinary messages from allowed users in bound task channels as Codex
-  `deliver` input. After app-server accepts the input, the bridge replaces the
-  original Discord message with the same orange user-card format used for
-  Desktop input. One image, or one text file up to 200 KB, can be attached to
-  an ordinary message. Slash commands remain available for explicit modes and
-  attachments.
+  `deliver` input. The same input in an unbound channel under a managed project
+  category first creates and binds a new task. After app-server accepts the
+  input, the bridge replaces the original Discord message with the same orange
+  user-card format used for Desktop input. One image, or one text file up to
+  200 KB, can be attached to an ordinary message. Slash commands remain
+  available for explicit modes and attachments.
 - Starts at Windows logon and can start the formal shared Desktop launcher when
   the app-server is absent.
 
@@ -173,9 +178,11 @@ time is deferred before execution.
   Send Messages, Embed Links, Attach Files, and Read Message History. Manage
   Roles is used only for private category permission overwrites.
 - Discord input becomes Codex turn text. There is no raw shell endpoint.
-- Ordinary-message input is accepted only in bound task channels, from the
-  configured guild and user allowlist. It requires Discord's privileged Message
-  Content Intent. Bot and webhook messages are ignored.
+- Ordinary-message input is accepted only in bound task channels or unbound
+  text channels inside a managed project category, from the configured guild
+  and user allowlist. Unbound control, archive, and unrelated channels never
+  create tasks. It requires Discord's privileged Message Content Intent. Bot
+  and webhook messages are ignored.
 - Mentions are disabled in general bot output. Completion notifications allow
   only the configured `completionMentionUserId`.
 - app-server remains loopback-only and is never tunneled to Discord or a LAN.

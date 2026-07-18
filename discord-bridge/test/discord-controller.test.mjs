@@ -193,6 +193,214 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.equal(new Set(turnRecords.get('thread-1:turn-1').assistantMessageIds).size, 2);
 });
 
+test('ordinary messages in an unbound managed-project channel create and reuse one Codex task', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const started = [];
+  const named = [];
+  const delivered = [];
+  codex.startThread = async (cwd) => {
+    started.push(cwd);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { thread: { id: 'thread-new', cwd, status: { type: 'idle' }, turns: [] } };
+  };
+  codex.setThreadName = async (threadId, name) => { named.push({ threadId, name }); };
+  codex.deliver = async (threadId, prompt, attachment) => {
+    const turnId = `turn-${delivered.length + 1}`;
+    const itemId = `user-item-${delivered.length + 1}`;
+    delivered.push({ threadId, prompt, attachment, turnId });
+    setImmediate(() => codex.emit('notification', {
+      method: 'item/started',
+      params: {
+        threadId,
+        turnId,
+        item: { type: 'userMessage', id: itemId, content: [{ type: 'text', text: prompt }] },
+      },
+    }));
+    return { mode: delivered.length === 1 ? 'send' : 'steer', turnId };
+  };
+
+  const bindings = new Map();
+  const turnRecords = new Map();
+  const stateStore = {
+    binding: (threadId) => bindings.has(threadId) ? { threadId, ...bindings.get(threadId) } : null,
+    bindingByChannel: (channelId) => {
+      const entry = [...bindings.entries()].find(([, binding]) => binding.channelId === channelId);
+      return entry ? { threadId: entry[0], ...entry[1] } : null;
+    },
+    projectCategories: () => [{
+      projectKey: 'project-key',
+      projectId: 'project-id',
+      path: 'C:\\work',
+      categoryIds: ['project-category'],
+    }],
+    setBinding: (threadId, patch) => bindings.set(threadId, { ...bindings.get(threadId), ...patch }),
+    removeBinding: (threadId) => bindings.delete(threadId),
+    turnRecord: (threadId, turnId) => turnRecords.get(`${threadId}:${turnId}`) ?? null,
+    setTurnRecord: (threadId, turnId, patch) => {
+      const key = `${threadId}:${turnId}`;
+      turnRecords.set(key, { ...turnRecords.get(key), ...patch });
+    },
+  };
+
+  const channelMessages = new Map();
+  const sent = [];
+  let nextBotMessage = 1;
+  const channel = {
+    id: 'new-channel',
+    name: 'draft-feature',
+    guildId: 'guild-1',
+    type: ChannelType.GuildText,
+    parentId: 'project-category',
+    topic: null,
+    permissionsLocked: false,
+    setName: async (name) => { channel.name = name; return channel; },
+    setTopic: async (topic) => { channel.topic = topic; return channel; },
+    lockPermissions: async () => { channel.permissionsLocked = true; return channel; },
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? channelMessages.get(value) ?? null
+        : Object.assign(new Map(channelMessages), {
+          last: () => [...channelMessages.values()].at(-1) ?? null,
+        })),
+    },
+    send: async (options) => {
+      const message = {
+        id: `bot-message-${nextBotMessage++}`,
+        author: { id: 'bot-user', bot: true },
+        content: options.content ?? '',
+        embeds: (options.embeds ?? []).map((embed) => embed.toJSON()),
+        attachments: new Map(),
+        edit: async (next) => {
+          message.content = next.content ?? message.content;
+          if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+          if (next.attachments?.length === 0) message.attachments.clear();
+          return message;
+        },
+        delete: async () => { channelMessages.delete(message.id); },
+      };
+      channelMessages.set(message.id, message);
+      sent.push(message);
+      return message;
+    },
+  };
+  client.channels = { fetch: async () => channel };
+
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      plainMessageInputEnabled: true,
+      guildId: 'guild-1',
+      allowedUserIds: ['user-1'],
+      defaultWatchLevel: 'normal',
+      liveUpdateIntervalMs: 100,
+    },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const makeMessage = (id, content) => {
+    const reactions = [];
+    const message = {
+      id,
+      guildId: 'guild-1',
+      channelId: channel.id,
+      channel,
+      webhookId: null,
+      author: { id: 'user-1', tag: 'user#0001', bot: false },
+      content,
+      attachments: new Map(),
+      reactions: { resolve: () => null },
+      react: async (reaction) => { reactions.push(reaction); },
+      reply: async () => {},
+      delete: async () => { channelMessages.delete(id); },
+    };
+    channelMessages.set(id, message);
+    return { message, reactions };
+  };
+  const first = makeMessage('user-message-1', 'implement the first part');
+  const second = makeMessage('user-message-2', 'then verify it');
+  client.emit('messageCreate', first.message);
+  client.emit('messageCreate', second.message);
+
+  for (let attempt = 0; attempt < 300 && !second.reactions.includes('✅'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(started, ['C:\\work']);
+  assert.deepEqual(named, [{ threadId: 'thread-new', name: 'draft feature' }]);
+  assert.deepEqual(delivered.map(({ threadId, prompt }) => ({ threadId, prompt })), [
+    { threadId: 'thread-new', prompt: 'implement the first part' },
+    { threadId: 'thread-new', prompt: 'then verify it' },
+  ]);
+  assert.deepEqual(first.reactions, ['⏳', '✅']);
+  assert.deepEqual(second.reactions, ['⏳', '✅']);
+  assert.equal(bindings.get('thread-new').channelId, channel.id);
+  assert.equal(bindings.get('thread-new').projectKey, 'project-key');
+  assert.equal(channel.name, '⚫-draft-feature');
+  assert.match(channel.topic, /Codex task: thread-new/);
+  assert.equal(channel.permissionsLocked, true);
+  assert.equal(channelMessages.has('user-message-1'), false);
+  assert.equal(channelMessages.has('user-message-2'), false);
+  assert.equal(sent.filter((message) => message.embeds[0]?.title === 'User message').length, 2);
+});
+
+test('ordinary messages in unmanaged channels do not create Codex tasks', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  let starts = 0;
+  codex.startThread = async () => { starts += 1; };
+  const stateStore = {
+    bindingByChannel: () => null,
+    projectCategories: () => [{
+      projectKey: 'project-key',
+      projectId: 'project-id',
+      path: 'C:\\work',
+      categoryIds: ['project-category'],
+    }],
+  };
+  const channel = {
+    id: 'unmanaged-channel',
+    type: ChannelType.GuildText,
+    parentId: 'other-category',
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      plainMessageInputEnabled: true,
+      guildId: 'guild-1',
+      allowedUserIds: ['user-1'],
+    },
+    logDir: directory,
+  });
+  controller.attach();
+  const reactions = [];
+  client.emit('messageCreate', {
+    id: 'message-1',
+    guildId: 'guild-1',
+    channelId: channel.id,
+    channel,
+    webhookId: null,
+    author: { id: 'user-1', bot: false },
+    content: 'do not create a task here',
+    attachments: new Map(),
+    react: async (reaction) => { reactions.push(reaction); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(starts, 0);
+  assert.deepEqual(reactions, []);
+});
+
 test('moving a task channel between its project and archive categories updates the Codex task', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -51,6 +51,11 @@ function channelMention(channelId) {
   return `<#${channelId}>`;
 }
 
+function taskTitleFromChannelName(channelName) {
+  const withoutStatus = String(channelName ?? '').replace(/^[🟢⚫]\s*-?\s*/u, '');
+  return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
+}
+
 function userInputField(id, label, { required = true, secret = false, value = null } = {}) {
   const field = new TextInputBuilder()
     .setCustomId(id)
@@ -79,6 +84,8 @@ export class DiscordController {
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
     this.notificationQueues = new Map();
+    this.discordMessageQueues = new Map();
+    this.pendingChannelBindings = new Map();
     this.internalChannelMoves = new Map();
     this.lastConnectionState = null;
     this.infrastructureReady = null;
@@ -86,14 +93,7 @@ export class DiscordController {
 
   attach() {
     this.client.on('interactionCreate', (interaction) => this.#handleInteraction(interaction));
-    this.client.on('messageCreate', (message) => this.#handleDiscordMessage(message).catch((error) => {
-      this.#log('plain-message-handler-error', {
-        messageId: message.id,
-        channelId: message.channelId,
-        userId: message.author?.id,
-        error: error.stack ?? error.message,
-      });
-    }));
+    this.client.on('messageCreate', (message) => this.#queueDiscordMessage(message));
     this.client.on('channelUpdate', (oldChannel, newChannel) => this.#handleChannelUpdate(oldChannel, newChannel).catch((error) => {
       this.#log('channel-archive-handler-error', {
         channelId: newChannel.id,
@@ -297,11 +297,107 @@ export class DiscordController {
     }
   }
 
+  #queueDiscordMessage(message) {
+    const channelId = message.channelId ?? '__unknown__';
+    const previous = this.discordMessageQueues.get(channelId) ?? Promise.resolve();
+    const queued = previous
+      .then(() => this.#handleDiscordMessage(message))
+      .catch((error) => {
+        this.#log('plain-message-handler-error', {
+          messageId: message.id,
+          channelId: message.channelId,
+          userId: message.author?.id,
+          error: error.stack ?? error.message,
+        });
+      });
+    this.discordMessageQueues.set(channelId, queued);
+    queued.finally(() => {
+      if (this.discordMessageQueues.get(channelId) === queued) this.discordMessageQueues.delete(channelId);
+    });
+  }
+
+  #managedProjectForChannel(channel) {
+    if (channel?.type !== ChannelType.GuildText || !channel.parentId) return null;
+    return this.stateStore.projectCategories()
+      .find((project) => (project.categoryIds ?? []).includes(channel.parentId)) ?? null;
+  }
+
+  async #createTaskBinding(channel, project) {
+    const existing = this.stateStore.bindingByChannel(channel.id);
+    if (existing) return existing;
+
+    // A sync that already listed tasks must finish before the new task exists.
+    if (this.taskSyncPromise) await this.taskSyncPromise;
+
+    const cwd = project.path === '(no project)' ? null : project.path;
+    const started = await this.codex.startThread(cwd);
+    const thread = started.thread;
+    if (!thread?.id) throw new Error('Codex did not return a task ID for the new task.');
+
+    // Bind immediately so lifecycle synchronization cannot create a second channel.
+    await this.#bindChannel(thread, channel, {
+      archived: false,
+      categoryId: channel.parentId,
+      projectKey: project.projectKey,
+      projectId: project.projectId,
+      subscribe: false,
+    });
+
+    const title = taskTitleFromChannelName(channel.name);
+    await this.codex.setThreadName(thread.id, title);
+    const namedThread = { ...thread, name: title };
+    this.stateStore.setBinding(thread.id, { name: title, cwd: thread.cwd ?? cwd });
+
+    const desiredName = taskChannelName(namedThread);
+    if (channel.name !== desiredName) await channel.setName(desiredName, 'Bind Discord channel to a new Codex task');
+    const desiredTopic = truncate(
+      `Codex project: ${project.projectId}\nCodex task: ${thread.id}\nProject: ${thread.cwd ?? cwd ?? '(none)'}\nState: active\nTurn: stopped`,
+      1024,
+      '',
+    );
+    if (channel.topic !== desiredTopic) await channel.setTopic(desiredTopic, 'Bind Discord channel to a new Codex task');
+    if (!channel.permissionsLocked) await channel.lockPermissions();
+
+    this.#log('discord-channel-created-task', {
+      channelId: channel.id,
+      categoryId: channel.parentId,
+      projectId: project.projectId,
+      threadId: thread.id,
+      cwd,
+      title,
+    });
+    this.#scheduleTaskSync('discord-channel-created-task');
+    return this.stateStore.binding(thread.id);
+  }
+
+  async #ensureTaskBinding(channel, project) {
+    const existing = this.stateStore.bindingByChannel(channel.id);
+    if (existing) return existing;
+    const pending = this.pendingChannelBindings.get(channel.id);
+    if (pending) return pending;
+
+    const creation = this.#createTaskBinding(channel, project);
+    this.pendingChannelBindings.set(channel.id, creation);
+    try {
+      return await creation;
+    } finally {
+      if (this.pendingChannelBindings.get(channel.id) === creation) {
+        this.pendingChannelBindings.delete(channel.id);
+      }
+    }
+  }
+
   async #handleDiscordMessage(message) {
     if (!this.config.plainMessageInputEnabled || message.author.bot || message.webhookId) return;
     if (message.guildId !== this.config.guildId || !this.config.allowedUserIds.includes(message.author.id)) return;
-    const binding = this.stateStore.bindingByChannel(message.channelId);
-    if (!binding) return;
+    let binding = this.stateStore.bindingByChannel(message.channelId);
+    let channel = null;
+    let project = null;
+    if (!binding) {
+      channel = message.channel ?? await this.client.channels.fetch(message.channelId).catch(() => null);
+      project = this.#managedProjectForChannel(channel);
+      if (!project) return;
+    }
 
     const content = message.content.trim();
     const attachments = [...message.attachments.values()];
@@ -316,6 +412,8 @@ export class DiscordController {
     let reservation = null;
     try {
       const attachment = attachments[0] ? await this.#prepareAttachment(attachments[0]) : null;
+      if (!binding) binding = await this.#ensureTaskBinding(channel, project);
+      if (!binding) throw new Error('Discord channel could not be bound to the new Codex task.');
       reservation = this.#reserveUserInput(
         binding.threadId,
         prompt,
@@ -816,6 +914,9 @@ export class DiscordController {
   }
 
   async #performTaskSync() {
+    if (this.pendingChannelBindings.size > 0) {
+      await Promise.allSettled([...this.pendingChannelBindings.values()]);
+    }
     const [activeThreads, archivedThreads] = await Promise.all([
       this.codex.listAllThreads({ archived: false }),
       this.codex.listAllThreads({ archived: true }),
