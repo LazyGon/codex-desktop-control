@@ -9,14 +9,20 @@ test('StateStore persists bindings atomically', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-'));
   try {
     const first = new StateStore(directory, '123456789012345');
-    first.setInfrastructure({ controlChannelId: 'control' });
-    first.setBinding('thread-1', { channelId: 'channel-1', watchLevel: 'normal' });
+    first.setInfrastructure({ controlChannelId: 'control', controlPanelMessageId: 'control-panel' });
+    first.setBinding('thread-1', {
+      channelId: 'channel-1',
+      watchLevel: 'normal',
+      controlPanelMessageId: 'task-panel',
+    });
 
     const second = new StateStore(directory, '123456789012345');
     assert.equal(second.binding('thread-1').channelId, 'channel-1');
     assert.equal(second.binding('thread-1').threadId, 'thread-1');
     assert.equal(second.bindingByChannel('channel-1').threadId, 'thread-1');
     assert.equal(second.snapshot().infrastructure.controlChannelId, 'control');
+    assert.equal(second.snapshot().infrastructure.controlPanelMessageId, 'control-panel');
+    assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
     second.setTurnRecord('thread-1', 'turn-1', {
       liveMessageId: 'message-live',
       userMessageIds: ['message-user'],

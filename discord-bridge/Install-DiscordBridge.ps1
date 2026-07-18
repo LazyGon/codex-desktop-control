@@ -68,7 +68,7 @@ try {
         Remove-Item Env:DISCORD_BOT_TOKEN -ErrorAction SilentlyContinue
         Pop-Location
     }
-    $permissions = '268561424'
+    $permissions = '2251800082246672'
     $invite = "https://discord.com/oauth2/authorize?client_id=$ApplicationId&permissions=$permissions&integration_type=0&scope=bot+applications.commands&guild_id=$GuildId&disable_guild_select=true"
     if (-not $diagnostic.targetVisible) {
         $visibleGuilds = @($diagnostic.guilds | ForEach-Object { "$($_.name) [$($_.id)]" }) -join ', '

@@ -95,10 +95,21 @@ Codex task with that project's working directory, names it from the channel,
 binds the same channel, and delivers the post. It does not create tasks from
 unbound channels in control, archive, or unrelated categories.
 
+`codex-remote` and every task channel contain a pinned control panel. Task
+panels provide delivery-mode and watch-level selects plus refresh, pending,
+archive/restore, and confirmed interrupt actions. The control panel provides
+status, full synchronization, pending requests, and task navigation. Renaming
+a task channel renames the Codex task; the Bridge then restores the channel's
+running/stopped status prefix.
+
 ## Update and uninstall
 
 After pulling an update, rerun `Install.ps1` with the same Discord IDs. Existing
 DPAPI credentials are reused when no new token is supplied.
+
+Bots installed before pinned panels were added need one OAuth
+re-authorization using the URL printed by the installer. Discord grants
+**Pin Messages** separately from **Manage Messages**.
 
 ```powershell
 .\Uninstall.ps1

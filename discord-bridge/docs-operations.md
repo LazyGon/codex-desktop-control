@@ -21,7 +21,9 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
 3. Review orange user cards, final assistant cards, and commentary cards captured
    while the task was live. `🟢` in the channel name means a turn is running;
    `⚫` means stopped.
-4. Use `/codex compose mode:auto` or `/codex deliver` to issue work.
+4. Use the pinned task panel's delivery-mode select, or post an ordinary
+   message for automatic delivery. Slash commands remain available for explicit
+   task IDs, search, and attachments.
    With `plainMessageInputEnabled`, an ordinary message in the task channel is
    equivalent to `deliver`. After app-server accepts it, the original message is
    replaced with an orange user card; `❌` includes an error reply. One image,
@@ -30,6 +32,12 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity.
 6. Respond to approval or input cards when they appear.
+
+The pinned `codex-remote` panel provides status, full sync, pending requests,
+and task navigation. Each pinned task panel provides delivery mode, watch
+level, refresh, task-scoped pending requests, archive/restore, and confirmed
+interrupt. Renaming the channel renames the Codex task. Moving it between its
+project and archive categories remains the direct channel-level archive UI.
 
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle

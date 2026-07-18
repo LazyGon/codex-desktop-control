@@ -258,7 +258,12 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
     parentId: 'project-category',
     topic: null,
     permissionsLocked: false,
-    setName: async (name) => { channel.name = name; return channel; },
+    setName: async (name) => {
+      const oldChannel = { ...channel };
+      channel.name = name;
+      client.emit('channelUpdate', oldChannel, { ...channel });
+      return channel;
+    },
     setTopic: async (topic) => { channel.topic = topic; return channel; },
     lockPermissions: async () => { channel.permissionsLocked = true; return channel; },
     messages: {
@@ -348,6 +353,100 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   assert.equal(channelMessages.has('user-message-1'), false);
   assert.equal(channelMessages.has('user-message-2'), false);
   assert.equal(sent.filter((message) => message.embeds[0]?.title === 'User message').length, 2);
+});
+
+test('renaming a bound task channel renames the Codex task', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const renamed = [];
+  codex.setThreadName = async (threadId, name) => { renamed.push({ threadId, name }); };
+  const binding = {
+    threadId: 'thread-1',
+    channelId: 'task-channel',
+    categoryId: 'project-category',
+    projectKey: 'project-key',
+    name: 'old task',
+    archived: false,
+  };
+  const stateStore = {
+    bindingByChannel: (channelId) => channelId === binding.channelId ? { ...binding } : null,
+    setBinding: (threadId, patch) => {
+      assert.equal(threadId, binding.threadId);
+      Object.assign(binding, patch);
+    },
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1' },
+    logDir: directory,
+  });
+  controller.attach();
+
+  client.emit('channelUpdate', {
+    id: binding.channelId,
+    guildId: 'guild-1',
+    type: ChannelType.GuildText,
+    parentId: 'project-category',
+    name: '⚫-old-task',
+  }, {
+    id: binding.channelId,
+    guildId: 'guild-1',
+    type: ChannelType.GuildText,
+    parentId: 'project-category',
+    name: 'renamed-task',
+  });
+  for (let attempt = 0; attempt < 100 && binding.name !== 'renamed task'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.deepEqual(renamed, [{ threadId: 'thread-1', name: 'renamed task' }]);
+  assert.equal(binding.name, 'renamed task');
+});
+
+test('task control panel delivery-mode select opens the compose modal', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const binding = { threadId: 'thread-1', channelId: 'task-channel', archived: false };
+  const stateStore = {
+    binding: (threadId) => threadId === binding.threadId ? { ...binding } : null,
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1', allowedUserIds: ['user-1'] },
+    logDir: directory,
+  });
+  controller.attach();
+
+  let shownModal = null;
+  client.emit('interactionCreate', {
+    guildId: 'guild-1',
+    channelId: binding.channelId,
+    user: { id: 'user-1' },
+    customId: `cx:ui:task:compose:${binding.threadId}`,
+    values: ['deliver'],
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => true,
+    isButton: () => false,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    showModal: async (modal) => { shownModal = modal.toJSON(); },
+  });
+  for (let attempt = 0; attempt < 100 && !shownModal; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(shownModal.custom_id, /^cx:compose:/);
+  assert.equal(shownModal.title, 'Codex deliver');
+  assert.equal(shownModal.components[0].components[0].custom_id, 'prompt');
 });
 
 test('ordinary messages in unmanaged channels do not create Codex tasks', async (context) => {

@@ -14,6 +14,10 @@ outbound connection to Discord.
   project category as a new task request. It starts the task in that project's
   working directory, derives its title from the channel name, binds the same
   channel, and serializes rapid follow-up messages to prevent duplicate tasks.
+- Pins one persistent control panel in `codex-remote` and one in every task
+  channel. The global panel exposes status, full sync, pending requests, and
+  task navigation. Task panels expose delivery mode, watch level, refresh,
+  task-scoped pending requests, archive/restore, and confirmed interrupt.
 - Moves archived Codex tasks into `Codex Archived` and returns unarchived tasks
   to their project category. Moving a task channel into `Codex Archived` archives
   the Codex task; moving it back to its own project category unarchives it. A move
@@ -38,6 +42,8 @@ outbound connection to Discord.
   explicit `final_answer`, instead of displaying a missing-text placeholder.
 - Synchronizes the Codex task name into its Discord channel name and prefixes
   it with `🟢` while a turn is running or `⚫` while stopped.
+- Synchronizes names in both directions: renaming a task channel renames the
+  Codex task, then reapplies the normalized status-prefixed channel name.
 - Routes command, file-change, additional-permission, user-input, and MCP
   elicitation requests to Discord buttons, selects, and modals.
 - Confirms `interrupt` before using app-server `turn/interrupt`; it does not
@@ -79,6 +85,11 @@ Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct
 color. Long user, past commentary, and final output remains one card; its full
 text is attached to that card.
+
+Slash commands remain supported for explicit task IDs, search, attachments,
+and recovery. Normal phone operation can use project/category navigation,
+ordinary task-channel messages, channel rename/move, and the pinned panels
+without entering a command.
 
 The state schema is the durable lookup table:
 
@@ -129,6 +140,10 @@ Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
 after the shared launcher has already been installed.
 
+Bots installed before pinned panels were added need one OAuth
+re-authorization using the URL printed by the installer. Discord grants
+**Pin Messages** separately from **Manage Messages**.
+
 The token is stored with Windows DPAPI for the current user and a restricted
 file ACL. The plaintext token exists only in the bridge child process
 environment.
@@ -174,9 +189,11 @@ time is deferred before execution.
 
 - Only the configured guild and explicit user IDs can invoke commands or
   components. Slash commands default to Discord administrators.
-- Bot permissions are limited to Manage Channels, Manage Roles, View Channels,
-  Send Messages, Embed Links, Attach Files, and Read Message History. Manage
-  Roles is used only for private category permission overwrites.
+- Bot permissions are limited to Manage Channels, Manage Roles, Manage
+  Messages, Pin Messages, View Channels, Send Messages, Embed Links, Attach
+  Files, and Read Message History. Manage Roles is used only for private
+  category permission overwrites; message management is used for durable cards
+  and pinned control panels.
 - Discord input becomes Codex turn text. There is no raw shell endpoint.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild

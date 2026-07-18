@@ -60,8 +60,10 @@ export class StateStore {
     for (const binding of Object.values(this.value.bindings ?? {})) {
       binding.snapshotInitialized ??= true;
       binding.turnMessages ??= {};
+      binding.controlPanelMessageId ??= null;
     }
     this.value.infrastructure.archiveCategoryIds ??= [];
+    this.value.infrastructure.controlPanelMessageId ??= null;
     this.value.projectCategories ??= {};
     delete this.value.autoCatchupProjects;
     this.#write();

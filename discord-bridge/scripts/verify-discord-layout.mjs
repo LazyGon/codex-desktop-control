@@ -11,10 +11,10 @@ if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const timeout = setTimeout(() => {
-  process.stderr.write('Discord layout verification timed out after 30 seconds.\n');
+  process.stderr.write('Discord layout verification timed out after 60 seconds.\n');
   client.destroy();
   process.exitCode = 1;
-}, 30_000);
+}, 60_000);
 
 try {
   await client.login(token);
@@ -42,6 +42,30 @@ try {
   const commandNames = command?.options.map((option) => option.name) ?? [];
   const removedCommands = ['autocatchup', 'catchup', 'bind', 'unbind'].filter((name) => commandNames.includes(name));
   const errors = [];
+  let taskPanels = 0;
+
+  const customIds = (message) => message.components
+    .flatMap((row) => row.components.map((component) => component.customId).filter(Boolean));
+  const verifyPanel = async (channel, messageId, marker, requiredIds) => {
+    if (!messageId) {
+      errors.push(`${channel?.name ?? '(unknown channel)'}: control panel message ID is missing.`);
+      return null;
+    }
+    const message = channel ? await channel.messages.fetch(messageId).catch(() => null) : null;
+    if (!message) {
+      errors.push(`${channel?.name ?? '(unknown channel)'}: control panel ${messageId} is unavailable.`);
+      return null;
+    }
+    if (!message.pinned) errors.push(`${channel.name}: control panel ${messageId} is not pinned.`);
+    if (!message.embeds.some((embed) => embed.footer?.text === marker)) {
+      errors.push(`${channel.name}: control panel ${messageId} has the wrong identity marker.`);
+    }
+    const ids = customIds(message);
+    for (const requiredId of requiredIds) {
+      if (!ids.includes(requiredId)) errors.push(`${channel.name}: control panel is missing ${requiredId}.`);
+    }
+    return message;
+  };
 
   if (!controlCategory) errors.push(`Missing control category: ${config.controlCategoryName}`);
   if (!controlChannel) errors.push(`Missing control channel: ${config.controlChannelName}`);
@@ -65,6 +89,37 @@ try {
   if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
     errors.push(`Task channel count ${taskChannels.size} does not match state bindings ${Object.keys(state.bindings ?? {}).length}.`);
   }
+  if (controlChannel) {
+    await verifyPanel(
+      controlChannel,
+      state.infrastructure.controlPanelMessageId,
+      'Codex Remote UI / control-panel',
+      [
+        'cx:ui:control:status',
+        'cx:ui:control:sync',
+        'cx:ui:control:pending',
+        ...(Object.keys(state.bindings ?? {}).length ? ['cx:ui:control:open'] : []),
+      ],
+    );
+  }
+  for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
+    const channel = textChannels.get(binding.channelId);
+    if (!channel) continue;
+    const panel = await verifyPanel(
+      channel,
+      binding.controlPanelMessageId,
+      `Codex Remote UI / task-panel / ${threadId}`,
+      [
+        `cx:ui:task:compose:${threadId}`,
+        `cx:ui:task:watch:${threadId}`,
+        `cx:ui:task:refresh:${threadId}`,
+        `cx:ui:task:pending:${threadId}`,
+        `cx:ui:task:archive:${threadId}`,
+        `cx:ui:task:interrupt:${threadId}`,
+      ],
+    );
+    if (panel) taskPanels += 1;
+  }
 
   process.stdout.write(`${JSON.stringify({
     ok: errors.length === 0,
@@ -72,6 +127,7 @@ try {
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
+    panels: { control: Boolean(state.infrastructure.controlPanelMessageId), tasks: taskPanels },
     commands: commandNames,
     errors,
   }, null, 2)}\n`);

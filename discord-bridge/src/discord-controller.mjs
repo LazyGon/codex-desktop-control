@@ -33,6 +33,12 @@ import {
   truncate,
 } from './util.mjs';
 import { commandPayload } from './commands.mjs';
+import {
+  CONTROL_PANEL_MARKER,
+  controlPanelPayload,
+  taskPanelMarker,
+  taskPanelPayload,
+} from './discord-panels.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -86,7 +92,10 @@ export class DiscordController {
     this.notificationQueues = new Map();
     this.discordMessageQueues = new Map();
     this.pendingChannelBindings = new Map();
+    this.panelSyncPromises = new Map();
     this.internalChannelMoves = new Map();
+    this.internalChannelNames = new Map();
+    this.canPinControlPanels = false;
     this.lastConnectionState = null;
     this.infrastructureReady = null;
   }
@@ -95,13 +104,15 @@ export class DiscordController {
     this.client.on('interactionCreate', (interaction) => this.#handleInteraction(interaction));
     this.client.on('messageCreate', (message) => this.#queueDiscordMessage(message));
     this.client.on('channelUpdate', (oldChannel, newChannel) => this.#handleChannelUpdate(oldChannel, newChannel).catch((error) => {
-      this.#log('channel-archive-handler-error', {
+      this.#log('channel-ui-handler-error', {
         channelId: newChannel.id,
         oldParentId: oldChannel.parentId,
         newParentId: newChannel.parentId,
+        oldName: oldChannel.name,
+        newName: newChannel.name,
         error: error.stack ?? error.message,
       });
-      this.#postAlert(`Discordカテゴリ移動によるタスク状態の更新に失敗しました: ${newChannel.id}\n${error.message}`, 'error').catch(() => {});
+      this.#postAlert(`Discordチャンネル操作によるタスク更新に失敗しました: ${newChannel.id}\n${error.message}`, 'error').catch(() => {});
     }));
     this.codex.on('notification', (message) => this.#queueCodexNotification(message));
     this.codex.on('serverRequest', (request) => this.#handleServerRequest(request));
@@ -120,6 +131,7 @@ export class DiscordController {
     this.infrastructureReady = this.#ensureInfrastructure();
     const infrastructure = await this.infrastructureReady;
     await infrastructure.guild.commands.set(commandPayload);
+    await this.#ensureControlPanel();
     const state = this.stateStore.snapshot();
     if (state.announcedVersion !== '2.0.0') {
       const embed = new EmbedBuilder()
@@ -239,7 +251,7 @@ export class DiscordController {
     };
   }
 
-  #privateCategoryPermissions(guild) {
+  #privateCategoryPermissions(guild, includePinMessages = false) {
     return [
       { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [PermissionFlagsBits.ViewChannel] },
       {
@@ -249,9 +261,11 @@ export class DiscordController {
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
           PermissionFlagsBits.EmbedLinks,
-           PermissionFlagsBits.AttachFiles,
-           PermissionFlagsBits.ReadMessageHistory,
-           PermissionFlagsBits.ManageChannels,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels,
+          PermissionFlagsBits.ManageMessages,
+          ...(includePinMessages ? [PermissionFlagsBits.PinMessages] : []),
         ],
       },
       ...this.config.allowedUserIds.map((userId) => ({
@@ -263,10 +277,18 @@ export class DiscordController {
   }
 
   async #configurePrivateCategory(category, guild) {
+    const includePinMessages = guild.members.me?.permissions.has(PermissionFlagsBits.PinMessages) ?? false;
     await category.permissionOverwrites.set(
-      this.#privateCategoryPermissions(guild),
+      this.#privateCategoryPermissions(guild, includePinMessages),
       'Restrict Codex Remote to the explicit allowlist',
     );
+    this.canPinControlPanels = includePinMessages;
+    if (!includePinMessages) {
+      this.#log('pin-messages-permission-missing', {
+        categoryId: category.id,
+        note: 'Control panels remain available but cannot be pinned until the bot is reauthorized.',
+      });
+    }
   }
 
   async #handleInteraction(interaction) {
@@ -349,7 +371,9 @@ export class DiscordController {
     this.stateStore.setBinding(thread.id, { name: title, cwd: thread.cwd ?? cwd });
 
     const desiredName = taskChannelName(namedThread);
-    if (channel.name !== desiredName) await channel.setName(desiredName, 'Bind Discord channel to a new Codex task');
+    if (channel.name !== desiredName) {
+      await this.#setTaskChannelName(channel, desiredName, 'Bind Discord channel to a new Codex task');
+    }
     const desiredTopic = truncate(
       `Codex project: ${project.projectId}\nCodex task: ${thread.id}\nProject: ${thread.cwd ?? cwd ?? '(none)'}\nState: active\nTurn: stopped`,
       1024,
@@ -447,7 +471,22 @@ export class DiscordController {
 
   async #handleChannelUpdate(oldChannel, newChannel) {
     if (newChannel.guildId !== this.config.guildId || newChannel.type !== ChannelType.GuildText) return;
-    if (oldChannel.parentId === newChannel.parentId) return;
+    const parentChanged = oldChannel.parentId !== newChannel.parentId;
+    let nameChanged = oldChannel.name !== newChannel.name;
+    if (!parentChanged && !nameChanged) return;
+
+    if (nameChanged) {
+      const internalName = this.internalChannelNames.get(newChannel.id);
+      if (internalName) {
+        this.internalChannelNames.delete(newChannel.id);
+        if (internalName === newChannel.name) nameChanged = false;
+      }
+    }
+
+    const binding = this.stateStore.bindingByChannel(newChannel.id);
+    if (!binding) return;
+    if (nameChanged) await this.#handleTaskChannelRename(binding, newChannel);
+    if (!parentChanged) return;
 
     const internalTarget = this.internalChannelMoves.get(newChannel.id);
     if (internalTarget) {
@@ -455,8 +494,6 @@ export class DiscordController {
       if (internalTarget === newChannel.parentId) return;
     }
 
-    const binding = this.stateStore.bindingByChannel(newChannel.id);
-    if (!binding) return;
     const state = this.stateStore.snapshot();
     const archiveCategoryIds = new Set(state.infrastructure.archiveCategoryIds ?? []);
     const projectCategoryIds = new Set(
@@ -518,6 +555,36 @@ export class DiscordController {
     });
   }
 
+  async #handleTaskChannelRename(binding, channel) {
+    const title = taskTitleFromChannelName(channel.name);
+    if (title === binding.name) {
+      this.#scheduleTaskSync('discord-channel-status-prefix-removed');
+      return;
+    }
+    await this.codex.setThreadName(binding.threadId, title);
+    this.stateStore.setBinding(binding.threadId, { name: title });
+    this.#log('discord-channel-renamed-task', {
+      threadId: binding.threadId,
+      channelId: channel.id,
+      title,
+    });
+    this.#scheduleTaskSync('discord-channel-renamed-task');
+  }
+
+  async #setTaskChannelName(channel, name, reason) {
+    this.internalChannelNames.set(channel.id, name);
+    try {
+      await channel.setName(name, reason);
+    } catch (error) {
+      if (this.internalChannelNames.get(channel.id) === name) this.internalChannelNames.delete(channel.id);
+      throw error;
+    }
+    const cleanupTimer = setTimeout(() => {
+      if (this.internalChannelNames.get(channel.id) === name) this.internalChannelNames.delete(channel.id);
+    }, 10_000);
+    cleanupTimer.unref?.();
+  }
+
   async #moveTaskChannel(channel, parentId, reason) {
     this.internalChannelMoves.set(channel.id, parentId);
     try {
@@ -567,6 +634,87 @@ export class DiscordController {
     await interaction.respond(choices);
   }
 
+  async #statusEmbed() {
+    const health = await this.codex.health();
+    const codex = this.codex.status();
+    const bindings = this.stateStore.bindings();
+    return new EmbedBuilder()
+      .setTitle('Codex Remote status')
+      .setColor(codex.connected ? COLORS.active : COLORS.error)
+      .addFields(
+        { name: 'Discord', value: `connected as ${this.client.user.tag}`, inline: true },
+        { name: 'app-server', value: codex.connected ? 'connected' : 'offline/retrying', inline: true },
+        { name: 'readyz', value: `${health.ready} (${health.status})`, inline: true },
+        { name: 'Endpoint', value: `\`${health.endpoint}\`\nsource: ${health.source}` },
+        { name: 'Active tasks', value: String(bindings.filter((binding) => !binding.archived).length), inline: true },
+        { name: 'Archived tasks', value: String(bindings.filter((binding) => binding.archived).length), inline: true },
+        { name: 'Project categories', value: String(this.stateStore.projectCategories().length), inline: true },
+        { name: 'Pending requests', value: String(this.pendingRequests.size), inline: true },
+      )
+      .setTimestamp();
+  }
+
+  #pendingContent(threadId = null) {
+    const records = [...this.pendingRequests.values()]
+      .filter((record) => !threadId || record.threadId === threadId);
+    return records.length
+      ? records.map((record) => `- ${record.method} / task \`${record.threadId}\` / ${channelMention(record.channelId)}`).join('\n')
+      : '未回答の承認・入力要求はありません。';
+  }
+
+  #syncResultText(result) {
+    return `全タスクを同期しました。未アーカイブ ${result.active} / アーカイブ ${result.archived} / 新規 ${result.created} / 移動 ${result.moved} / 失敗 ${result.failed}`;
+  }
+
+  async #showComposeModal(interaction, threadId, mode) {
+    if (!['deliver', 'send', 'steer'].includes(mode)) throw new Error(`Unknown delivery mode: ${mode}`);
+    const key = randomKey();
+    this.pendingActions.set(key, { type: 'compose', userId: interaction.user.id, threadId, mode, createdAt: Date.now() });
+    const modal = new ModalBuilder().setCustomId(`cx:compose:${key}`).setTitle(`Codex ${mode}`)
+      .addComponents(userInputField('prompt', 'Codexへの指示'));
+    await interaction.showModal(modal);
+  }
+
+  async #showInterruptConfirmation(interaction, threadId) {
+    const currentTurn = await this.codex.activeTurn(threadId);
+    if (!currentTurn) throw new Error('現在稼働中のターンはありません。');
+    const key = randomKey();
+    this.pendingActions.set(key, {
+      type: 'interrupt', userId: interaction.user.id, threadId, turnId: currentTurn.id, createdAt: Date.now(),
+    });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`cx:interrupt:${key}:yes`).setLabel('中断する').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`cx:interrupt:${key}:no`).setLabel('戻る').setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.reply(messageOptions(
+      `ターン \`${currentTurn.id}\` を中断しますか？プロセスkillではなくapp-serverの \`turn/interrupt\` を使います。`,
+      { components: [row], ephemeral: true },
+    ));
+  }
+
+  #assertControlPanelInteraction(interaction) {
+    const controlChannelId = this.stateStore.snapshot().infrastructure.controlChannelId;
+    if (interaction.channelId !== controlChannelId) throw new Error('この操作はCodex制御チャンネルでのみ利用できます。');
+  }
+
+  #assertTaskPanelInteraction(interaction, threadId) {
+    const binding = this.stateStore.binding(threadId);
+    if (!binding || binding.channelId !== interaction.channelId) {
+      throw new Error('この操作パネルは現在のタスクチャンネルに紐付いていません。');
+    }
+    return binding;
+  }
+
+  #threadFromBinding(binding) {
+    return {
+      id: binding.threadId,
+      name: binding.name,
+      cwd: binding.cwd,
+      status: { type: binding.taskStatus ?? 'unknown' },
+      turns: [],
+    };
+  }
+
   async #handleCommand(interaction) {
     await this.infrastructureReady;
     const subcommand = interaction.options.getSubcommand();
@@ -577,24 +725,7 @@ export class DiscordController {
 
     if (subcommand === 'status') {
       await interaction.deferReply({ ephemeral: true });
-      const health = await this.codex.health();
-      const codex = this.codex.status();
-      const bindings = this.stateStore.bindings();
-      const embed = new EmbedBuilder()
-        .setTitle('Codex Remote status')
-        .setColor(codex.connected ? COLORS.active : COLORS.error)
-        .addFields(
-          { name: 'Discord', value: `connected as ${this.client.user.tag}`, inline: true },
-          { name: 'app-server', value: codex.connected ? 'connected' : 'offline/retrying', inline: true },
-          { name: 'readyz', value: `${health.ready} (${health.status})`, inline: true },
-          { name: 'Endpoint', value: `\`${health.endpoint}\`\nsource: ${health.source}` },
-          { name: 'Active tasks', value: String(bindings.filter((binding) => !binding.archived).length), inline: true },
-          { name: 'Archived tasks', value: String(bindings.filter((binding) => binding.archived).length), inline: true },
-          { name: 'Project categories', value: String(this.stateStore.projectCategories().length), inline: true },
-          { name: 'Pending requests', value: String(this.pendingRequests.size), inline: true },
-        )
-        .setTimestamp();
-      await interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [await this.#statusEmbed()] });
       return;
     }
 
@@ -655,30 +786,13 @@ export class DiscordController {
     if (subcommand === 'compose') {
       const threadId = this.#resolveThreadId(interaction);
       const mode = interaction.options.getString('mode', true);
-      const key = randomKey();
-      this.pendingActions.set(key, { type: 'compose', userId: interaction.user.id, threadId, mode, createdAt: Date.now() });
-      const modal = new ModalBuilder().setCustomId(`cx:compose:${key}`).setTitle(`Codex ${mode}`)
-        .addComponents(userInputField('prompt', 'Codexへの指示'));
-      await interaction.showModal(modal);
+      await this.#showComposeModal(interaction, threadId, mode);
       return;
     }
 
     if (subcommand === 'interrupt') {
       const threadId = this.#resolveThreadId(interaction);
-      const currentTurn = await this.codex.activeTurn(threadId);
-      if (!currentTurn) throw new Error('現在稼働中のターンはありません。');
-      const key = randomKey();
-      this.pendingActions.set(key, {
-        type: 'interrupt', userId: interaction.user.id, threadId, turnId: currentTurn.id, createdAt: Date.now(),
-      });
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`cx:interrupt:${key}:yes`).setLabel('中断する').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(`cx:interrupt:${key}:no`).setLabel('戻る').setStyle(ButtonStyle.Secondary),
-      );
-      await interaction.reply(messageOptions(
-        `ターン \`${currentTurn.id}\` を中断しますか？プロセスkillではなくapp-serverの \`turn/interrupt\` を使います。`,
-        { components: [row], ephemeral: true },
-      ));
+      await this.#showInterruptConfirmation(interaction, threadId);
       return;
     }
 
@@ -693,20 +807,14 @@ export class DiscordController {
     }
 
     if (subcommand === 'pending') {
-      const records = [...this.pendingRequests.values()];
-      const content = records.length
-        ? records.map((record) => `- ${record.method} / task \`${record.threadId}\` / ${channelMention(record.channelId)}`).join('\n')
-        : '未回答の承認・入力要求はありません。';
-      await interaction.reply(messageOptions(content, { ephemeral: true }));
+      await interaction.reply(messageOptions(this.#pendingContent(), { ephemeral: true }));
       return;
     }
 
     if (subcommand === 'sync') {
       await interaction.deferReply({ ephemeral: true });
       const result = await this.#syncAllTasks();
-      await interaction.editReply(
-        `全タスクを同期しました。未アーカイブ ${result.active} / アーカイブ ${result.archived} / 新規 ${result.created} / 移動 ${result.moved} / 失敗 ${result.failed}`,
-      );
+      await interaction.editReply(this.#syncResultText(result));
       return;
     }
 
@@ -739,6 +847,40 @@ export class DiscordController {
   }
 
   async #handleSelect(interaction) {
+    const uiParts = interaction.customId.split(':');
+    if (uiParts[0] === 'cx' && uiParts[1] === 'ui') {
+      if (uiParts[2] === 'control' && uiParts[3] === 'open') {
+        this.#assertControlPanelInteraction(interaction);
+        await interaction.deferUpdate();
+        const threadId = interaction.values[0];
+        const result = await this.codex.threadMetadata(threadId);
+        const channel = await this.#openTaskChannel(result.thread);
+        await interaction.followUp(messageOptions(`開きました: ${channelMention(channel.id)}`, { ephemeral: true }));
+        return;
+      }
+      if (uiParts[2] === 'task') {
+        const action = uiParts[3];
+        const threadId = uiParts[4];
+        const binding = this.#assertTaskPanelInteraction(interaction, threadId);
+        if (action === 'compose') {
+          await this.#showComposeModal(interaction, threadId, interaction.values[0]);
+          return;
+        }
+        if (action === 'watch') {
+          const level = interaction.values[0];
+          if (!['quiet', 'normal', 'verbose'].includes(level)) throw new Error(`Unknown watch level: ${level}`);
+          await interaction.deferUpdate();
+          this.stateStore.setBinding(threadId, { watchLevel: level });
+          const result = await this.codex.threadMetadata(threadId).catch(() => null);
+          const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+          await this.#ensureTaskPanel(result?.thread ?? this.#threadFromBinding({ ...binding, watchLevel: level }), channel, binding.archived);
+          await interaction.followUp(messageOptions(`通知レベルを **${level}** に設定しました。`, { ephemeral: true }));
+          return;
+        }
+      }
+      return;
+    }
+
     if (interaction.customId === 'cx:open') {
       await interaction.deferUpdate();
       const threadId = interaction.values[0];
@@ -770,6 +912,67 @@ export class DiscordController {
   async #handleButton(interaction) {
     const parts = interaction.customId.split(':');
     if (parts[0] !== 'cx') return;
+    if (parts[1] === 'ui') {
+      const surface = parts[2];
+      const action = parts[3];
+      if (surface === 'control') {
+        this.#assertControlPanelInteraction(interaction);
+        if (action === 'status') {
+          await interaction.deferReply({ ephemeral: true });
+          await interaction.editReply({ embeds: [await this.#statusEmbed()] });
+          return;
+        }
+        if (action === 'sync') {
+          await interaction.deferReply({ ephemeral: true });
+          await interaction.editReply(this.#syncResultText(await this.#syncAllTasks()));
+          return;
+        }
+        if (action === 'pending') {
+          await interaction.reply(messageOptions(this.#pendingContent(), { ephemeral: true }));
+          return;
+        }
+        return;
+      }
+      if (surface === 'task') {
+        const threadId = parts[4];
+        const binding = this.#assertTaskPanelInteraction(interaction, threadId);
+        if (action === 'refresh') {
+          await interaction.deferReply({ ephemeral: true });
+          const result = await this.codex.readThread(threadId);
+          const latest = [...(result.thread.turns ?? [])].reverse()[0];
+          const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+          await this.#ensureTaskPanel(result.thread, channel, binding.archived);
+          await interaction.editReply({ embeds: [this.#threadEmbed(result.thread, latest)] });
+          return;
+        }
+        if (action === 'pending') {
+          await interaction.reply(messageOptions(this.#pendingContent(threadId), { ephemeral: true }));
+          return;
+        }
+        if (action === 'interrupt') {
+          await this.#showInterruptConfirmation(interaction, threadId);
+          return;
+        }
+        if (action === 'archive') {
+          await interaction.deferReply({ ephemeral: true });
+          if (binding.archived) {
+            await this.codex.unarchiveThread(threadId);
+            await this.codex.resumeThread(threadId);
+            this.stateStore.setBinding(threadId, { archived: false });
+          } else {
+            await this.codex.archiveThread(threadId);
+            await this.codex.unsubscribeThread(threadId);
+            this.stateStore.setBinding(threadId, { archived: true });
+          }
+          await this.#syncAllTasks();
+          const updated = this.stateStore.binding(threadId);
+          await interaction.editReply(`${binding.archived ? '復元' : 'アーカイブ'}しました: ${channelMention(updated.channelId)}`);
+          return;
+        }
+        return;
+      }
+      return;
+    }
     if (parts[1] === 'interrupt') {
       const action = this.pendingActions.get(parts[2]);
       if (!action || action.userId !== interaction.user.id || action.type !== 'interrupt') {
@@ -970,6 +1173,7 @@ export class DiscordController {
       await syncThreads(threads, isArchived);
     }
     result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
+    await this.#ensureControlPanel();
     this.#log('task-sync', result);
     return result;
   }
@@ -982,6 +1186,101 @@ export class DiscordController {
     await channel.send(messageOptions(
       `全タスク同期を更新しました。新規 ${result.created} / 移動 ${result.moved} / 失敗 ${result.failed}${links ? `\n${links}` : ''}`,
     ));
+  }
+
+  #panelMarker(message) {
+    return message?.embeds?.map((embed) => embed.footer?.text).find(Boolean) ?? null;
+  }
+
+  #panelMessageMatches(message, payload) {
+    const normalizeEmbed = (embed) => {
+      const value = typeof embed?.toJSON === 'function' ? embed.toJSON() : embed ? { ...embed } : null;
+      if (!value) return value;
+      delete value.type;
+      delete value.content_scan_version;
+      value.fields = value.fields?.map((field) => {
+        if (field.inline !== false) return field;
+        const normalized = { ...field };
+        delete normalized.inline;
+        return normalized;
+      });
+      return value;
+    };
+    const componentData = (component) => (typeof component?.toJSON === 'function' ? component.toJSON() : component);
+    return message.content === (payload.content ?? '')
+      && isDeepStrictEqual((message.embeds ?? []).map(normalizeEmbed), (payload.embeds ?? []).map(normalizeEmbed))
+      && isDeepStrictEqual((message.components ?? []).map(componentData), (payload.components ?? []).map(componentData));
+  }
+
+  async #ensurePanelMessage({ key, channel, storedId, marker, payload, persist }) {
+    const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      let message = storedId ? await channel.messages.fetch(storedId).catch(() => null) : null;
+      if (message && this.#panelMarker(message) !== marker) message = null;
+      if (!message && typeof channel.messages.fetchPinned === 'function') {
+        const pinned = await channel.messages.fetchPinned().catch(() => null);
+        message = pinned
+          ? [...pinned.values()].find((candidate) => candidate.author.id === this.client.user.id
+            && this.#panelMarker(candidate) === marker) ?? null
+          : null;
+      }
+      if (!message) {
+        const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+        message = recent
+          ? [...recent.values()].find((candidate) => candidate.author.id === this.client.user.id
+            && this.#panelMarker(candidate) === marker) ?? null
+          : null;
+      }
+      if (!message) message = await channel.send(payload);
+      else if (!this.#panelMessageMatches(message, payload)) await message.edit(payload);
+      if (this.canPinControlPanels && !message.pinned && typeof message.pin === 'function') {
+        await message.pin('Keep Codex Remote controls available').catch((error) => {
+          this.#log('control-panel-pin-failed', { channelId: channel.id, messageId: message.id, error: error.message });
+        });
+      }
+      if (storedId !== message.id) persist(message.id);
+      return message;
+    });
+    this.panelSyncPromises.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.panelSyncPromises.get(key) === operation) this.panelSyncPromises.delete(key);
+    }
+  }
+
+  async #ensureControlPanel() {
+    const infrastructure = await this.infrastructureReady;
+    const state = this.stateStore.snapshot();
+    const payload = controlPanelPayload({
+      bindings: this.stateStore.bindings(),
+      connected: this.codex.connected,
+      pendingCount: this.pendingRequests.size,
+      projectCount: this.stateStore.projectCategories().length,
+    });
+    return this.#ensurePanelMessage({
+      key: 'control',
+      channel: infrastructure.control,
+      storedId: state.infrastructure.controlPanelMessageId,
+      marker: CONTROL_PANEL_MARKER,
+      payload,
+      persist: (messageId) => this.stateStore.setInfrastructure({ controlPanelMessageId: messageId }),
+    });
+  }
+
+  async #ensureTaskPanel(thread, channel, archived = false) {
+    const binding = this.stateStore.binding(thread.id);
+    if (!binding) return null;
+    const effectiveBinding = { ...binding, archived };
+    const payload = taskPanelPayload({ thread, binding: effectiveBinding });
+    return this.#ensurePanelMessage({
+      key: `task:${thread.id}`,
+      channel,
+      storedId: binding.controlPanelMessageId,
+      marker: taskPanelMarker(thread.id),
+      payload,
+      persist: (messageId) => this.stateStore.setBinding(thread.id, { controlPanelMessageId: messageId }),
+    });
   }
 
   #projectCategoryName(descriptor) {
@@ -1138,7 +1437,7 @@ export class DiscordController {
         await this.#moveTaskChannel(channel, target.category.id, 'Reconcile Codex task category');
         moved = true;
       }
-      if (channel.name !== desiredName) await channel.setName(desiredName, 'Refresh Codex task name');
+      if (channel.name !== desiredName) await this.#setTaskChannelName(channel, desiredName, 'Refresh Codex task name');
       if (channel.topic !== desiredTopic) await channel.setTopic(desiredTopic, 'Refresh Codex task metadata');
     }
     if (!channel.permissionsLocked) await channel.lockPermissions();
@@ -1153,6 +1452,7 @@ export class DiscordController {
     if (created || existingBinding?.transcriptVersion !== 10) {
       await this.#reconcileThreadTranscript(thread.id, { channel, archived });
     }
+    await this.#ensureTaskPanel(thread, channel, archived);
     return { channel, created, moved };
   }
 
@@ -1678,6 +1978,7 @@ export class DiscordController {
   async #cleanupLegacyTranscriptMessages(channel, messages, protectedIds) {
     for (const message of [...messages.values()]) {
       if (message.author.id !== this.client.user.id || protectedIds.has(message.id)) continue;
+      if (this.#panelMarker(message)?.startsWith('Codex Remote UI /')) continue;
       const legacyEmbed = message.embeds.some((embed) => {
         const fieldNames = new Set(embed.fields?.map((field) => field.name) ?? []);
         const hasCurrentIdentity = fieldNames.has('Task') && fieldNames.has('Turn');
@@ -2331,6 +2632,9 @@ export class DiscordController {
         createdAt: Date.now(),
       };
       this.pendingRequests.set(key, record);
+      this.#ensureControlPanel().catch((error) => {
+        this.#log('control-panel-pending-update-failed', { error: error.message });
+      });
       const payload = this.#serverRequestMessage(record);
       const channel = await this.client.channels.fetch(binding.channelId);
       const posted = await channel.send({ ...payload, allowedMentions: { parse: [] } });
@@ -2529,6 +2833,9 @@ export class DiscordController {
 
   async #resolvePending(record, note, userId) {
     this.pendingRequests.delete(record.key);
+    this.#ensureControlPanel().catch((error) => {
+      this.#log('control-panel-pending-update-failed', { error: error.message });
+    });
     const channel = await this.client.channels.fetch(record.channelId).catch(() => null);
     const message = channel && record.messageId ? await channel.messages.fetch(record.messageId).catch(() => null) : null;
     if (message) await message.edit({ content: `Resolved: ${note}${userId ? ` by <@${userId}>` : ''}`, components: [], allowedMentions: { parse: [] } });
@@ -2546,6 +2853,9 @@ export class DiscordController {
         status: state === 'connected' ? 'online' : 'idle',
       });
     }
+    this.#ensureControlPanel().catch((error) => {
+      this.#log('control-panel-connection-update-failed', { error: error.message });
+    });
     if (previous && (state === 'connected' || state === 'disconnected')) {
       await this.#postAlert(state === 'connected'
         ? `app-serverへ再接続しました: \`${status.endpoint}\``

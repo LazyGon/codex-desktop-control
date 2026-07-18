@@ -33,6 +33,7 @@ try {
       PermissionFlagsBits.ManageChannels,
       PermissionFlagsBits.ManageRoles,
       PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.PinMessages,
       PermissionFlagsBits.ViewChannel,
       PermissionFlagsBits.SendMessages,
       PermissionFlagsBits.EmbedLinks,

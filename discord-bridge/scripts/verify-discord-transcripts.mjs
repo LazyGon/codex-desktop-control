@@ -101,7 +101,13 @@ try {
 
     const messages = await fetchHistory(channel);
     const { thread } = await codex.call('thread/read', { threadId, includeTurns: true }, 60_000);
+    if (thread.name && binding.name !== thread.name) {
+      errors.push(`${threadId}: binding name ${binding.name} does not match Codex task name ${thread.name}.`);
+    }
     const turnsById = new Map((thread.turns ?? []).map((turn) => [turn.id, turn]));
+    const activeTurnIds = new Set((thread.turns ?? [])
+      .filter((turn) => turn.status === 'inProgress')
+      .map((turn) => turn.id));
     stats.messages += messages.size;
     const cardIds = new Set();
     const assistantCardIds = new Set();
@@ -169,7 +175,8 @@ try {
       const commentaryById = new Map((turn?.items ?? [])
         .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text)
         .map((item) => [item.id, item]));
-      for (const [itemId, entry] of Object.entries(record.assistantEntries ?? {})) {
+      if (record.status !== 'inProgress') {
+        for (const [itemId, entry] of Object.entries(record.assistantEntries ?? {})) {
         const item = commentaryById.get(itemId)
           ?? (entry.text ? { id: itemId, phase: entry.phase ?? 'commentary', text: entry.text } : null);
         if (!item) {
@@ -192,36 +199,35 @@ try {
         if (!identity || identity.task !== threadId || identity.turn !== turnId || identity.item !== itemId) {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card identity is invalid.`);
         }
-        const live = record.liveMessageId === messageId;
-        const expectedTitle = live ? 'Codex running' : 'Codex message';
+        const expectedTitle = 'Codex message';
         if (card.embeds[0]?.title !== expectedTitle) {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card title is not ${expectedTitle}.`);
         }
         const value = String(item.text).trim() || '(empty)';
-        if (!live && card.embeds[0]?.description !== truncate(value, 3900)) {
+        if (card.embeds[0]?.description !== truncate(value, 3900)) {
           errors.push(`${threadId}/${turnId}/${itemId}: past assistant card does not match app-server state.`);
         }
         const attachmentNames = [...card.attachments.values()].map((attachment) => attachment.name);
         const fullTextName = `codex-turn-${turnId}-${itemId}-assistant.txt`;
         const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
-        if (!live && value.length > 3900 && fullTextAttachments !== 1) {
+        if (value.length > 3900 && fullTextAttachments !== 1) {
           errors.push(`${threadId}/${turnId}/${itemId}: long assistant card has ${fullTextAttachments} full-text attachments.`);
         }
-        if (!live && value.length <= 3900 && card.attachments.size) {
+        if (value.length <= 3900 && card.attachments.size) {
           errors.push(`${threadId}/${turnId}/${itemId}: short assistant card has an unexpected attachment.`);
         }
-        if (live && card.attachments.size) {
-          errors.push(`${threadId}/${turnId}/${itemId}: live assistant card has an unexpected attachment.`);
         }
       }
-      const ledgerAssistantIds = [...new Set(Object.values(record.assistantEntries ?? {})
-        .flatMap((entry) => entry.messageIds ?? []))].sort();
-      const indexedAssistantIds = [...new Set(record.assistantMessageIds ?? [])].sort();
-      if (JSON.stringify(ledgerAssistantIds) !== JSON.stringify(indexedAssistantIds)) {
-        errors.push(`${threadId}/${turnId}: assistantMessageIds does not match assistantEntries.`);
-      }
-      if (ledgerAssistantIds.length !== Object.keys(record.assistantEntries ?? {}).length) {
-        errors.push(`${threadId}/${turnId}: assistant entries do not have one unique Discord card each.`);
+      if (record.status !== 'inProgress') {
+        const ledgerAssistantIds = [...new Set(Object.values(record.assistantEntries ?? {})
+          .flatMap((entry) => entry.messageIds ?? []))].sort();
+        const indexedAssistantIds = [...new Set(record.assistantMessageIds ?? [])].sort();
+        if (JSON.stringify(ledgerAssistantIds) !== JSON.stringify(indexedAssistantIds)) {
+          errors.push(`${threadId}/${turnId}: assistantMessageIds does not match assistantEntries.`);
+        }
+        if (ledgerAssistantIds.length !== Object.keys(record.assistantEntries ?? {}).length) {
+          errors.push(`${threadId}/${turnId}: assistant entries do not have one unique Discord card each.`);
+        }
       }
       if (!record.cardMessageId) {
         errors.push(`${threadId}/${turnId}: cardMessageId is missing.`);
@@ -315,7 +321,7 @@ try {
           errors.push(`${threadId}: duplicate assistant cards for ${key}: ${assistantIdentities.get(key)}, ${message.id}.`);
         }
         assistantIdentities.set(key, message.id);
-        if (!assistantCardIds.has(message.id)) {
+        if (!assistantCardIds.has(message.id) && !activeTurnIds.has(identity.turn)) {
           errors.push(`${threadId}: assistant card ${message.id} is absent from the turn ledger.`);
         }
         const fieldNames = identity.embed.fields.map((field) => field.name);
@@ -334,7 +340,9 @@ try {
         stats.turnCards += 1;
         channelLiveCards += 1;
         stats.liveCards += 1;
-        if (!cardIds.has(message.id)) errors.push(`${threadId}: live card ${message.id} is absent from the turn ledger.`);
+        if (!cardIds.has(message.id) && !activeTurnIds.has(identity.turn)) {
+          errors.push(`${threadId}: live card ${message.id} is absent from the turn ledger.`);
+        }
         if (identity.item && assistantCardIds.has(message.id)) {
           stats.assistantCards += 1;
           const key = `${identity.turn}:${identity.item}`;

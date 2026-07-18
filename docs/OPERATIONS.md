@@ -94,6 +94,13 @@ first turn. Rapid messages in the same channel are serialized, so only one task
 is created. Unbound channels in the control, archive, or unrelated categories
 are ignored rather than becoming tasks.
 
+Use the pinned panel in `codex-remote` for connection status, full sync,
+pending requests, and task navigation. Every task channel has its own pinned
+panel for delivery mode, watch level, refresh, pending requests,
+archive/restore, and confirmed interrupt. Rename a task channel to rename the
+Codex task. The next sync normalizes the channel name and restores its status
+emoji prefix.
+
 For every subscribed task, user instructions entered in Codex Desktop are
 posted to the matching private Discord task channel as orange cards with
 `Task`, `Turn`, and `Message` identity fields. Project/category, task/channel,
