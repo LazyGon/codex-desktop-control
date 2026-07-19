@@ -94,12 +94,23 @@ first turn. Rapid messages in the same channel are serialized, so only one task
 is created. Unbound channels in the control, archive, or unrelated categories
 are ignored rather than becoming tasks.
 
-Use the pinned panel in `codex-remote` for connection status, full sync,
-pending requests, and task navigation. Every task channel has its own pinned
-panel for delivery mode, watch level, refresh, pending requests,
-archive/restore, and confirmed interrupt. Rename a task channel to rename the
+Use the pinned panel in `codex-remote` for connection status, account usage,
+read-only Codex resource inventory, full sync, pending requests, and task
+navigation. Every task channel has its own pinned panel for delivery mode,
+watch level, detailed status, pending requests, the task control center,
+archive/restore, and confirmed interrupt. The control center uses app-server
+catalogs for model, reasoning, permissions, and Plan/Default mode. Its More
+menu exposes Fast/service tier, personality, memory, goal, compact, fork,
+review, and background terminals. Rename a task channel to rename the
 Codex task. The next sync normalizes the channel name and restores its status
 emoji prefix.
+
+Permission changes, compact, fork, goal removal, and background-terminal
+termination require an explicit confirmation. Terminal termination is limited
+to processes returned by `thread/backgroundTerminals/list`; there is no raw
+PID kill or arbitrary shell endpoint. Task deletion, filesystem mutation,
+global config mutation, and deprecated rollback are intentionally absent from
+the Discord control surface.
 
 For every subscribed task, user instructions entered in Codex Desktop are
 posted to the matching private Discord task channel as orange cards with

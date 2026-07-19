@@ -32,9 +32,22 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
 
   const components = [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('cx:ui:control:status').setLabel('Status').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('cx:ui:control:usage').setLabel('Usage').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('cx:ui:control:sync').setLabel('Sync').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('cx:ui:control:pending').setLabel('Pending').setStyle(ButtonStyle.Secondary),
   )];
+  components.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('cx:ui:control:resources')
+      .setPlaceholder('Codexリソースを表示')
+      .addOptions(
+        new StringSelectMenuOptionBuilder().setLabel('MCP servers').setValue('mcp'),
+        new StringSelectMenuOptionBuilder().setLabel('Skills').setValue('skills'),
+        new StringSelectMenuOptionBuilder().setLabel('Plugins').setValue('plugins'),
+        new StringSelectMenuOptionBuilder().setLabel('Hooks').setValue('hooks'),
+        new StringSelectMenuOptionBuilder().setLabel('Experimental features').setValue('features'),
+      ),
+  ));
   const tasks = [...bindings]
     .sort((left, right) => Number(left.archived) - Number(right.archived)
       || String(left.name ?? left.threadId).localeCompare(String(right.name ?? right.threadId)))
@@ -88,6 +101,7 @@ export function taskPanelPayload({ thread, binding }) {
   const actions = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`cx:ui:task:refresh:${thread.id}`).setLabel('Refresh').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`cx:ui:task:pending:${thread.id}`).setLabel('Pending').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`cx:ui:task:controls:${thread.id}`).setLabel('Controls').setStyle(ButtonStyle.Primary).setDisabled(archived),
     new ButtonBuilder()
       .setCustomId(`cx:ui:task:archive:${thread.id}`)
       .setLabel(archived ? 'Restore' : 'Archive')

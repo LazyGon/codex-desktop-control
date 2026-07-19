@@ -449,6 +449,114 @@ test('task control panel delivery-mode select opens the compose modal', async (c
   assert.equal(shownModal.components[0].components[0].custom_id, 'prompt');
 });
 
+test('task Controls button opens catalog-backed UI and confirms permission changes', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const binding = {
+    threadId: 'thread-1', channelId: 'task-channel', archived: false, cwd: 'C:\\work', runtimeSettings: {},
+  };
+  const stateStore = {
+    binding: (threadId) => threadId === binding.threadId ? structuredClone(binding) : null,
+    setBinding: (threadId, patch) => {
+      assert.equal(threadId, binding.threadId);
+      Object.assign(binding, patch);
+    },
+  };
+  const settingsUpdates = [];
+  codex.resumeThread = async () => ({
+    thread: { id: binding.threadId, name: 'Task one', cwd: binding.cwd, status: { type: 'idle' } },
+    cwd: binding.cwd,
+    model: 'gpt-test',
+    reasoningEffort: 'high',
+    activePermissionProfile: { id: ':workspace' },
+  });
+  codex.listModels = async () => [{
+    id: 'gpt-test', model: 'gpt-test', displayName: 'GPT Test', description: 'Test', hidden: false,
+    defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Deep' }],
+    serviceTiers: [], supportsPersonality: true,
+  }];
+  codex.listPermissionProfiles = async () => [
+    { id: ':workspace', allowed: true },
+    { id: ':danger-full-access', allowed: true },
+  ];
+  codex.listCollaborationModes = async () => [{ name: 'Default', mode: 'default', model: null, reasoning_effort: null }];
+  codex.getGoal = async () => ({ goal: null });
+  codex.listBackgroundTerminals = async () => [];
+  codex.updateThreadSettings = async (threadId, patch) => { settingsUpdates.push({ threadId, patch }); };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1', allowedUserIds: ['user-1'] },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const emitInteraction = async (interaction) => {
+    client.emit('interactionCreate', interaction);
+    for (let attempt = 0; attempt < 100 && !interaction.lastReply; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(interaction.lastReply);
+    return interaction.lastReply;
+  };
+  const base = {
+    guildId: 'guild-1',
+    channelId: binding.channelId,
+    user: { id: 'user-1' },
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferred: false,
+    replied: false,
+    deferReply: async function deferReply() { this.deferred = true; },
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+    reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+  };
+
+  const controls = await emitInteraction({
+    ...base,
+    customId: `cx:ui:task:controls:${binding.threadId}`,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.deepEqual(controls.components.map((row) => row.toJSON().components[0].custom_id), [
+    'cx:ctl:model:thread-1',
+    'cx:ctl:effort:thread-1',
+    'cx:ctl:permission:thread-1',
+    'cx:ctl:mode:thread-1',
+    'cx:ctl:more:thread-1',
+  ]);
+
+  const permissionInteraction = {
+    ...base,
+    customId: `cx:ctl:permission:${binding.threadId}`,
+    values: [':danger-full-access'],
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+  };
+  const confirmation = await emitInteraction(permissionInteraction);
+  assert.equal(settingsUpdates.length, 0);
+  const confirmId = confirmation.components[0].toJSON().components[0].custom_id;
+  assert.match(confirmId, /^cx:confirm:[^:]+:yes$/);
+
+  await emitInteraction({
+    ...base,
+    customId: confirmId,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.deepEqual(settingsUpdates, [{
+    threadId: binding.threadId,
+    patch: { permissions: ':danger-full-access' },
+  }]);
+});
+
 test('ordinary messages in unmanaged channels do not create Codex tasks', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

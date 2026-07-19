@@ -109,6 +109,118 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/resume', { threadId, excludeTurns: true }, 60_000);
   }
 
+  async updateThreadSettings(threadId, patch) {
+    this.#requireClient();
+    await this.client.call('thread/settings/update', { threadId, ...patch }, 60_000);
+    return { threadId, patch };
+  }
+
+  async listModels() {
+    this.#requireClient();
+    return this.#collectPages('model/list', { includeHidden: false }, 100);
+  }
+
+  async listPermissionProfiles(cwd = null) {
+    this.#requireClient();
+    return this.#collectPages('permissionProfile/list', cwd ? { cwd } : {}, 100);
+  }
+
+  async listCollaborationModes() {
+    this.#requireClient();
+    const result = await this.client.call('collaborationMode/list', {}, 30_000);
+    return result.data ?? [];
+  }
+
+  async compactThread(threadId) {
+    this.#requireClient();
+    await this.client.call('thread/compact/start', { threadId }, 60_000);
+    return { threadId };
+  }
+
+  async forkThread(threadId, lastTurnId = null) {
+    this.#requireClient();
+    const params = { threadId, excludeTurns: true };
+    if (lastTurnId) params.lastTurnId = lastTurnId;
+    return this.client.call('thread/fork', params, 60_000);
+  }
+
+  async getGoal(threadId) {
+    this.#requireClient();
+    return this.client.call('thread/goal/get', { threadId }, 30_000);
+  }
+
+  async setGoal(threadId, objective, tokenBudget = null) {
+    this.#requireClient();
+    const params = { threadId, objective };
+    if (tokenBudget !== null) params.tokenBudget = tokenBudget;
+    return this.client.call('thread/goal/set', params, 30_000);
+  }
+
+  async clearGoal(threadId) {
+    this.#requireClient();
+    return this.client.call('thread/goal/clear', { threadId }, 30_000);
+  }
+
+  async startReview(threadId, target, delivery = 'inline') {
+    this.#requireClient();
+    return this.client.call('review/start', { threadId, target, delivery }, 60_000);
+  }
+
+  async listBackgroundTerminals(threadId) {
+    this.#requireClient();
+    return this.#collectPages('thread/backgroundTerminals/list', { threadId }, 100);
+  }
+
+  async terminateBackgroundTerminal(threadId, processId) {
+    this.#requireClient();
+    return this.client.call('thread/backgroundTerminals/terminate', { threadId, processId }, 30_000);
+  }
+
+  async setMemoryMode(threadId, mode) {
+    this.#requireClient();
+    if (!['enabled', 'disabled'].includes(mode)) throw new Error(`Unknown memory mode: ${mode}`);
+    await this.client.call('thread/memoryMode/set', { threadId, mode }, 30_000);
+    return { threadId, mode };
+  }
+
+  async accountRateLimits() {
+    this.#requireClient();
+    return this.client.call('account/rateLimits/read', undefined, 30_000);
+  }
+
+  async accountUsage() {
+    this.#requireClient();
+    return this.client.call('account/usage/read', undefined, 30_000);
+  }
+
+  async listMcpServers(threadId = null) {
+    this.#requireClient();
+    return this.#collectPages('mcpServerStatus/list', {
+      detail: 'toolsAndAuthOnly',
+      ...(threadId ? { threadId } : {}),
+    }, 100);
+  }
+
+  async listSkills(cwds = []) {
+    this.#requireClient();
+    return this.client.call('skills/list', cwds.length ? { cwds } : {}, 60_000);
+  }
+
+  async listHooks(cwds = []) {
+    this.#requireClient();
+    return this.client.call('hooks/list', cwds.length ? { cwds } : {}, 60_000);
+  }
+
+  async listPlugins(cwds = []) {
+    this.#requireClient();
+    return this.client.call('plugin/list', cwds.length ? { cwds } : {}, 60_000);
+  }
+
+  async listExperimentalFeatures(threadId = null) {
+    this.#requireClient();
+    return this.#collectPages('experimentalFeature/list', threadId ? { threadId } : {}, 100);
+  }
+
   async startThread(cwd = null) {
     this.#requireClient();
     const params = cwd ? { cwd } : {};
@@ -220,6 +332,22 @@ export class CodexService extends EventEmitter {
     this.client?.close();
   }
 
+  async #collectPages(method, initialParams, limit) {
+    const data = [];
+    const seenCursors = new Set();
+    let cursor = null;
+    do {
+      const params = { ...initialParams, limit };
+      if (cursor) params.cursor = cursor;
+      const result = await this.client.call(method, params, 60_000);
+      data.push(...(result.data ?? []));
+      cursor = result.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) throw new Error(`${method} repeated cursor: ${cursor}`);
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return data;
+  }
+
   async #connectLoop() {
     while (!this.stopping) {
       const endpoint = this.discoverEndpoint(this.config);
@@ -272,7 +400,7 @@ export class CodexService extends EventEmitter {
     for (const binding of this.stateStore.bindings()) {
       if (binding.archived) continue;
       try {
-        await this.resumeThread(binding.threadId);
+        const runtime = await this.resumeThread(binding.threadId);
         const result = await this.readThread(binding.threadId);
         const thread = result.thread;
         const completed = [...(thread.turns ?? [])].reverse().find((turn) => turn.status !== 'inProgress');
@@ -286,6 +414,7 @@ export class CodexService extends EventEmitter {
         this.emit('subscriptionRestored', {
           binding,
           thread,
+          runtime,
           missedCompletion: completed && (needsCompletionMessage || needsCompletionNotice)
             ? { turn: completed, finalText, needsCompletionMessage, needsCompletionNotice }
             : null,

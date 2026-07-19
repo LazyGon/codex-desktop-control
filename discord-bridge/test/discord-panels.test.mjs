@@ -14,7 +14,7 @@ function json(payload) {
   };
 }
 
-test('control panel exposes status, sync, pending, and task navigation UI', () => {
+test('control panel exposes status, usage, resources, sync, pending, and task navigation UI', () => {
   const payload = json(controlPanelPayload({
     connected: true,
     pendingCount: 2,
@@ -27,11 +27,16 @@ test('control panel exposes status, sync, pending, and task navigation UI', () =
   assert.equal(payload.embeds[0].footer.text, CONTROL_PANEL_MARKER);
   assert.deepEqual(payload.components[0].components.map((component) => component.custom_id), [
     'cx:ui:control:status',
+    'cx:ui:control:usage',
     'cx:ui:control:sync',
     'cx:ui:control:pending',
   ]);
-  assert.equal(payload.components[1].components[0].custom_id, 'cx:ui:control:open');
+  assert.equal(payload.components[1].components[0].custom_id, 'cx:ui:control:resources');
   assert.deepEqual(payload.components[1].components[0].options.map((option) => option.value), [
+    'mcp', 'skills', 'plugins', 'hooks', 'features',
+  ]);
+  assert.equal(payload.components[2].components[0].custom_id, 'cx:ui:control:open');
+  assert.deepEqual(payload.components[2].components[0].options.map((option) => option.value), [
     'thread-active',
     'thread-archived',
   ]);
@@ -58,11 +63,13 @@ test('task panel exposes mode and watch selects plus safe task actions', () => {
   assert.deepEqual(active.components[2].components.map((component) => component.custom_id), [
     `cx:ui:task:refresh:${thread.id}`,
     `cx:ui:task:pending:${thread.id}`,
+    `cx:ui:task:controls:${thread.id}`,
     `cx:ui:task:archive:${thread.id}`,
     `cx:ui:task:interrupt:${thread.id}`,
   ]);
-  assert.equal(active.components[2].components[2].label, 'Archive');
-  assert.equal(active.components[2].components[3].disabled, false);
+  assert.equal(active.components[2].components[2].label, 'Controls');
+  assert.equal(active.components[2].components[3].label, 'Archive');
+  assert.equal(active.components[2].components[4].disabled, false);
 
   const archived = json(taskPanelPayload({
     thread: { ...thread, status: { type: 'idle' } },
@@ -70,6 +77,7 @@ test('task panel exposes mode and watch selects plus safe task actions', () => {
   }));
   assert.equal(archived.components[0].components[0].disabled, true);
   assert.equal(archived.components[1].components[0].options.find((option) => option.default).value, 'quiet');
-  assert.equal(archived.components[2].components[2].label, 'Restore');
-  assert.equal(archived.components[2].components[3].disabled, true);
+  assert.equal(archived.components[2].components[2].disabled, true);
+  assert.equal(archived.components[2].components[3].label, 'Restore');
+  assert.equal(archived.components[2].components[4].disabled, true);
 });

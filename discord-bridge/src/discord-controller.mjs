@@ -39,6 +39,16 @@ import {
   taskPanelMarker,
   taskPanelPayload,
 } from './discord-panels.mjs';
+import {
+  accountUsageEmbed,
+  goalPayload,
+  resourceInventoryEmbed,
+  reviewPayload,
+  secondarySettingsPayload,
+  taskControlPayload,
+  taskStatusEmbed,
+  terminalPayload,
+} from './codex-control-ui.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -313,9 +323,10 @@ export class DiscordController {
       if (interaction.isModalSubmit()) await this.#handleModal(interaction);
     } catch (error) {
       this.#log('interaction-error', { customId: interaction.customId, error: error.stack ?? error.message });
-      const options = messageOptions(`失敗しました: ${truncate(error.message, 1800)}`, { ephemeral: true });
-      if (interaction.deferred || interaction.replied) await interaction.followUp(options).catch(() => {});
-      else await interaction.reply(options).catch(() => {});
+      const content = `失敗しました: ${truncate(error.message, 1800)}`;
+      if (interaction.deferred) await interaction.editReply(messageOptions(content, { components: [] })).catch(() => {});
+      else if (interaction.replied) await interaction.followUp(messageOptions(content, { ephemeral: true })).catch(() => {});
+      else await interaction.reply(messageOptions(content, { ephemeral: true })).catch(() => {});
     }
   }
 
@@ -626,6 +637,36 @@ export class DiscordController {
     }
     const focused = interaction.options.getFocused(true);
     const query = focused.value.trim();
+    if (focused.name === 'model') {
+      const models = await this.codex.listModels();
+      const choices = models
+        .filter((model) => !model.hidden && (!query
+          || model.model.toLowerCase().includes(query.toLowerCase())
+          || model.displayName.toLowerCase().includes(query.toLowerCase())))
+        .slice(0, 25)
+        .map((model) => ({
+          name: truncate(`${model.displayName} - ${model.description}`, 100, ''),
+          value: model.model,
+        }));
+      await interaction.respond(choices);
+      return;
+    }
+    if (focused.name === 'profile') {
+      const threadId = interaction.options.getString('task')
+        ?? this.stateStore.bindingByChannel(interaction.channelId)?.threadId
+        ?? null;
+      const cwd = threadId ? this.stateStore.binding(threadId)?.cwd : null;
+      const profiles = await this.codex.listPermissionProfiles(cwd);
+      const choices = profiles
+        .filter((profile) => profile.allowed && (!query || profile.id.toLowerCase().includes(query.toLowerCase())))
+        .slice(0, 25)
+        .map((profile) => ({
+          name: truncate(`${profile.id}${profile.description ? ` - ${profile.description}` : ''}`, 100, ''),
+          value: profile.id,
+        }));
+      await interaction.respond(choices);
+      return;
+    }
     const result = await this.codex.listThreads({ limit: 20, search: query || null });
     const choices = result.data.slice(0, 25).map((thread) => ({
       name: truncate(`${threadStatusEmoji(thread.status)} ${thread.name ?? thread.preview ?? thread.id}`, 100, ''),
@@ -715,6 +756,206 @@ export class DiscordController {
     };
   }
 
+  #runtimeSettingsFromResume(runtime, existing = {}) {
+    return {
+      ...existing,
+      model: runtime?.model ?? existing.model ?? null,
+      effort: runtime?.reasoningEffort ?? existing.effort ?? null,
+      serviceTier: runtime?.serviceTier ?? existing.serviceTier ?? null,
+      approvalPolicy: runtime?.approvalPolicy ?? existing.approvalPolicy ?? null,
+      approvalsReviewer: runtime?.approvalsReviewer ?? existing.approvalsReviewer ?? null,
+      sandbox: runtime?.sandbox ?? existing.sandbox ?? null,
+      activePermissionProfile: runtime?.activePermissionProfile ?? existing.activePermissionProfile ?? null,
+    };
+  }
+
+  #persistRuntime(threadId, runtime) {
+    const binding = this.stateStore.binding(threadId);
+    if (!binding) return;
+    this.stateStore.setBinding(threadId, {
+      runtimeSettings: this.#runtimeSettingsFromResume(runtime, binding.runtimeSettings),
+      cwd: runtime.cwd ?? binding.cwd,
+      name: runtime.thread?.name ?? binding.name,
+      taskStatus: runtime.thread?.status?.type ?? binding.taskStatus,
+    });
+  }
+
+  async #controlContext(threadId) {
+    const runtime = await this.codex.resumeThread(threadId);
+    let binding = this.stateStore.binding(threadId);
+    if (!binding) {
+      await this.#openTaskChannel(runtime.thread);
+      binding = this.stateStore.binding(threadId);
+    }
+    if (!binding) throw new Error('タスクのDiscord bindingを作成できませんでした。');
+    this.#persistRuntime(threadId, runtime);
+    binding = this.stateStore.binding(threadId);
+    const [models, profiles, modes, goalResult, terminals] = await Promise.all([
+      this.codex.listModels(),
+      this.codex.listPermissionProfiles(runtime.cwd ?? binding.cwd),
+      this.codex.listCollaborationModes(),
+      this.codex.getGoal(threadId),
+      this.codex.listBackgroundTerminals(threadId),
+    ]);
+    return {
+      thread: runtime.thread,
+      binding,
+      runtime,
+      models,
+      profiles,
+      modes,
+      goal: goalResult.goal ?? null,
+      terminals,
+    };
+  }
+
+  async #showTaskControls(interaction, threadId) {
+    const context = await this.#controlContext(threadId);
+    await interaction.editReply(taskControlPayload(context));
+  }
+
+  async #showTaskStatus(interaction, threadId) {
+    const context = await this.#controlContext(threadId);
+    const activeTurn = await this.codex.activeTurn(threadId);
+    await interaction.editReply({ embeds: [taskStatusEmbed({ ...context, activeTurn })], components: [] });
+  }
+
+  async #applyThreadSettings(threadId, patch) {
+    await this.codex.updateThreadSettings(threadId, patch);
+    const binding = this.stateStore.binding(threadId);
+    if (!binding) return;
+    const stored = { ...binding.runtimeSettings };
+    if (Object.hasOwn(patch, 'model')) stored.model = patch.model;
+    if (Object.hasOwn(patch, 'effort')) stored.effort = patch.effort;
+    if (Object.hasOwn(patch, 'serviceTier')) stored.serviceTier = patch.serviceTier;
+    if (Object.hasOwn(patch, 'collaborationMode')) stored.collaborationMode = patch.collaborationMode;
+    if (Object.hasOwn(patch, 'personality')) stored.personality = patch.personality;
+    if (Object.hasOwn(patch, 'permissions')) stored.activePermissionProfile = { id: patch.permissions, extends: null };
+    this.stateStore.setBinding(threadId, { runtimeSettings: stored });
+  }
+
+  async #applyCollaborationMode(threadId, modeKind) {
+    const [runtime, modes] = await Promise.all([
+      this.codex.resumeThread(threadId),
+      this.codex.listCollaborationModes(),
+    ]);
+    const preset = modes.find((mode) => mode.mode === modeKind);
+    if (!preset) throw new Error(`app-serverがcollaboration mode ${modeKind} を提供していません。`);
+    const collaborationMode = {
+      mode: modeKind,
+      settings: {
+        model: preset.model ?? runtime.model,
+        reasoning_effort: preset.reasoning_effort ?? null,
+        developer_instructions: null,
+      },
+    };
+    await this.#applyThreadSettings(threadId, { collaborationMode });
+    return collaborationMode;
+  }
+
+  async #accountUsageResponse() {
+    const [usage, rateLimits] = await Promise.all([
+      this.codex.accountUsage(),
+      this.codex.accountRateLimits(),
+    ]);
+    return accountUsageEmbed({ usage, rateLimits });
+  }
+
+  #resourceCwds(threadId = null) {
+    if (threadId) {
+      const cwd = this.stateStore.binding(threadId)?.cwd;
+      return cwd ? [cwd] : [];
+    }
+    return [...new Set(this.stateStore.bindings().map((binding) => binding.cwd).filter(Boolean))];
+  }
+
+  async #resourceResponse(kind, threadId = null) {
+    const cwds = this.#resourceCwds(threadId);
+    let result;
+    if (kind === 'mcp') result = await this.codex.listMcpServers(threadId);
+    else if (kind === 'skills') result = await this.codex.listSkills(cwds);
+    else if (kind === 'plugins') result = await this.codex.listPlugins(cwds);
+    else if (kind === 'hooks') result = await this.codex.listHooks(cwds);
+    else if (kind === 'features') result = await this.codex.listExperimentalFeatures(threadId);
+    else throw new Error(`Unknown resource kind: ${kind}`);
+    return resourceInventoryEmbed(kind, result);
+  }
+
+  #reviewTarget(kind, value = null) {
+    if (kind === 'uncommitted') return { type: 'uncommittedChanges' };
+    if (!value?.trim()) throw new Error(`${kind} reviewにはvalueが必要です。`);
+    if (kind === 'base') return { type: 'baseBranch', branch: value.trim() };
+    if (kind === 'commit') return { type: 'commit', sha: value.trim(), title: null };
+    if (kind === 'custom') return { type: 'custom', instructions: value.trim() };
+    throw new Error(`Unknown review target: ${kind}`);
+  }
+
+  async #startReview(threadId, kind, value, delivery) {
+    const result = await this.codex.startReview(threadId, this.#reviewTarget(kind, value), delivery);
+    let channel = null;
+    if (delivery === 'detached' && result.reviewThreadId !== threadId) {
+      const reviewThread = await this.codex.threadMetadata(result.reviewThreadId);
+      channel = await this.#openTaskChannel(reviewThread.thread);
+    }
+    return {
+      ...result,
+      channel,
+      text: channel
+        ? `レビューを新しいタスクで開始しました: ${channelMention(channel.id)} / turn \`${result.turn?.id ?? 'pending'}\``
+        : `レビューを開始しました: turn \`${result.turn?.id ?? 'pending'}\``,
+    };
+  }
+
+  async #showConfirmation(interaction, action, description, confirmLabel) {
+    const key = randomKey();
+    this.pendingActions.set(key, {
+      ...action,
+      userId: interaction.user.id,
+      createdAt: Date.now(),
+    });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`cx:confirm:${key}:yes`).setLabel(confirmLabel).setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`cx:confirm:${key}:no`).setLabel('戻る').setStyle(ButtonStyle.Secondary),
+    );
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(messageOptions(description, { components: [row] }));
+    } else {
+      await interaction.reply(messageOptions(description, { components: [row], ephemeral: true }));
+    }
+  }
+
+  async #showGoalModal(interaction, threadId) {
+    const key = randomKey();
+    this.pendingActions.set(key, { type: 'goalset', userId: interaction.user.id, threadId, createdAt: Date.now() });
+    const budget = new TextInputBuilder()
+      .setCustomId('budget')
+      .setLabel('Token budget (optional)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(12);
+    const modal = new ModalBuilder()
+      .setCustomId(`cx:goal:${key}`)
+      .setTitle('Codex goal')
+      .addComponents(
+        userInputField('objective', 'Goal objective'),
+        new ActionRowBuilder().addComponents(budget),
+      );
+    await interaction.showModal(modal);
+  }
+
+  async #showReviewModal(interaction, threadId, kind, delivery) {
+    const key = randomKey();
+    this.pendingActions.set(key, {
+      type: 'review', userId: interaction.user.id, threadId, kind, delivery, createdAt: Date.now(),
+    });
+    const labels = { base: 'Base branch', commit: 'Commit SHA', custom: 'Review instructions' };
+    const modal = new ModalBuilder()
+      .setCustomId(`cx:review:${key}`)
+      .setTitle('Codex review')
+      .addComponents(userInputField('value', labels[kind] ?? 'Review target'));
+    await interaction.showModal(modal);
+  }
+
   async #handleCommand(interaction) {
     await this.infrastructureReady;
     const subcommand = interaction.options.getSubcommand();
@@ -725,7 +966,11 @@ export class DiscordController {
 
     if (subcommand === 'status') {
       await interaction.deferReply({ ephemeral: true });
-      await interaction.editReply({ embeds: [await this.#statusEmbed()] });
+      const explicit = interaction.options.getString('task');
+      const channelBinding = this.stateStore.bindingByChannel(interaction.channelId);
+      const threadId = explicit ?? channelBinding?.threadId ?? null;
+      if (threadId) await this.#showTaskStatus(interaction, threadId);
+      else await interaction.editReply({ embeds: [await this.#statusEmbed()] });
       return;
     }
 
@@ -828,6 +1073,152 @@ export class DiscordController {
       return;
     }
 
+    if (['model', 'reasoning', 'permissions', 'mode'].includes(subcommand)) {
+      const threadId = this.#resolveThreadId(interaction);
+      const optionNames = { model: 'model', reasoning: 'effort', permissions: 'profile', mode: 'mode' };
+      const value = interaction.options.getString(optionNames[subcommand]);
+      if (!value) {
+        await interaction.deferReply({ ephemeral: true });
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      if (subcommand === 'permissions') {
+        await this.#showConfirmation(
+          interaction,
+          { type: 'permission', threadId, profile: value },
+          `権限プロファイルを **${value}** に変更しますか？以降のターンのfilesystem、network、approval境界が変わる可能性があります。`,
+          '権限を変更',
+        );
+        return;
+      }
+      await interaction.deferReply({ ephemeral: true });
+      if (subcommand === 'model') await this.#applyThreadSettings(threadId, { model: value });
+      else if (subcommand === 'reasoning') await this.#applyThreadSettings(threadId, { effort: value === '__default__' ? null : value });
+      else await this.#applyCollaborationMode(threadId, value);
+      await this.#showTaskControls(interaction, threadId);
+      return;
+    }
+
+    if (subcommand === 'memory') {
+      const threadId = this.#resolveThreadId(interaction);
+      const mode = interaction.options.getString('mode');
+      if (!mode) {
+        await interaction.deferReply({ ephemeral: true });
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      await interaction.deferReply({ ephemeral: true });
+      await this.codex.setMemoryMode(threadId, mode);
+      this.stateStore.setBinding(threadId, { memoryMode: mode });
+      await this.#showTaskControls(interaction, threadId);
+      return;
+    }
+
+    if (subcommand === 'usage') {
+      await interaction.deferReply({ ephemeral: true });
+      await interaction.editReply({ embeds: [await this.#accountUsageResponse()] });
+      return;
+    }
+
+    if (subcommand === 'resources') {
+      await interaction.deferReply({ ephemeral: true });
+      const kind = interaction.options.getString('kind', true);
+      const explicit = interaction.options.getString('task');
+      const threadId = explicit ?? this.stateStore.bindingByChannel(interaction.channelId)?.threadId ?? null;
+      await interaction.editReply({ embeds: [await this.#resourceResponse(kind, threadId)] });
+      return;
+    }
+
+    if (subcommand === 'goal') {
+      const threadId = this.#resolveThreadId(interaction);
+      const action = interaction.options.getString('action', true);
+      if (action === 'view') {
+        await interaction.deferReply({ ephemeral: true });
+        const result = await this.codex.getGoal(threadId);
+        await interaction.editReply(goalPayload(threadId, result.goal ?? null));
+        return;
+      }
+      if (action === 'clear') {
+        await this.#showConfirmation(
+          interaction,
+          { type: 'goalclear', threadId },
+          'このタスクのgoalを解除しますか？',
+          'Goalを解除',
+        );
+        return;
+      }
+      const objective = interaction.options.getString('objective');
+      if (!objective) {
+        await this.#showGoalModal(interaction, threadId);
+        return;
+      }
+      await interaction.deferReply({ ephemeral: true });
+      const budget = interaction.options.getInteger('token-budget');
+      const result = await this.codex.setGoal(threadId, objective, budget);
+      await interaction.editReply(goalPayload(threadId, result.goal));
+      return;
+    }
+
+    if (subcommand === 'compact') {
+      const threadId = this.#resolveThreadId(interaction);
+      await this.#showConfirmation(
+        interaction,
+        { type: 'compact', threadId },
+        'このタスクのcontextをcompactしますか？処理はapp-serverの `thread/compact/start` で行います。',
+        'Compact',
+      );
+      return;
+    }
+
+    if (subcommand === 'fork') {
+      const threadId = this.#resolveThreadId(interaction);
+      const lastTurnId = interaction.options.getString('last-turn');
+      await this.#showConfirmation(
+        interaction,
+        { type: 'fork', threadId, lastTurnId },
+        `このタスクをforkしますか？${lastTurnId ? ` turn \`${lastTurnId}\` までを含めます。` : ''}`,
+        'Fork',
+      );
+      return;
+    }
+
+    if (subcommand === 'review') {
+      const threadId = this.#resolveThreadId(interaction);
+      const kind = interaction.options.getString('target', true);
+      const value = interaction.options.getString('value');
+      const delivery = interaction.options.getString('delivery') ?? 'inline';
+      if (kind !== 'uncommitted' && !value) {
+        await this.#showReviewModal(interaction, threadId, kind, delivery);
+        return;
+      }
+      await interaction.deferReply({ ephemeral: true });
+      const result = await this.#startReview(threadId, kind, value, delivery);
+      await interaction.editReply(result.text);
+      return;
+    }
+
+    if (subcommand === 'terminals') {
+      const threadId = this.#resolveThreadId(interaction);
+      const action = interaction.options.getString('action', true);
+      await interaction.deferReply({ ephemeral: true });
+      const terminals = await this.codex.listBackgroundTerminals(threadId);
+      if (action === 'list') {
+        await interaction.editReply(terminalPayload(threadId, terminals));
+        return;
+      }
+      const processId = interaction.options.getString('process');
+      if (!processId) throw new Error('terminateにはprocessを指定してください。listまたはControlsからprocess IDを確認できます。');
+      const terminal = terminals.find((candidate) => candidate.processId === processId);
+      if (!terminal) throw new Error(`背景ターミナル ${processId} が見つかりません。`);
+      await this.#showConfirmation(
+        interaction,
+        { type: 'terminal', threadId, processId },
+        `app-server管理の背景ターミナル \`${processId}\` (PID ${terminal.osPid ?? 'unknown'}) を終了しますか？\n${truncate(terminal.command, 1200)}`,
+        'Terminalを終了',
+      );
+      return;
+    }
+
     if (subcommand === 'help') {
       const content = [
         '**基本操作**',
@@ -839,6 +1230,10 @@ export class DiscordController {
         '`/codex sync` 全タスクとカテゴリを今すぐ再同期',
         '`/codex watch` 通知量を変更',
         '`/codex interrupt` 確認後にapp-server経由で中断',
+        '`/codex status` タスクチャンネルではモデル・権限・goal等も表示',
+        '`/codex model|reasoning|permissions|mode|memory` タスク設定',
+        '`/codex compact|fork|review|terminals` app-serverのタスク操作',
+        '`/codex usage|resources` 使用量とCodexリソースの参照',
         '',
         'app-serverはPCのloopbackから外へ公開しません。Discord Botだけが外向き接続します。',
       ].join('\n');
@@ -848,6 +1243,116 @@ export class DiscordController {
 
   async #handleSelect(interaction) {
     const uiParts = interaction.customId.split(':');
+    if (uiParts[0] === 'cx' && uiParts[1] === 'ctl') {
+      const action = uiParts[2];
+      const threadId = uiParts[3];
+      this.#assertTaskPanelInteraction(interaction, threadId);
+      const selected = interaction.values[0];
+      if (selected === '__unavailable__') return;
+      if (action === 'model' || action === 'effort' || action === 'tier' || action === 'personality') {
+        await interaction.deferUpdate();
+        const patch = action === 'model' ? { model: selected }
+          : action === 'effort' ? { effort: selected === '__default__' ? null : selected }
+            : action === 'tier' ? { serviceTier: selected === '__default__' ? null : selected }
+              : { personality: selected };
+        await this.#applyThreadSettings(threadId, patch);
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      if (action === 'mode') {
+        await interaction.deferUpdate();
+        await this.#applyCollaborationMode(threadId, selected);
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      if (action === 'memory') {
+        await interaction.deferUpdate();
+        await this.codex.setMemoryMode(threadId, selected);
+        this.stateStore.setBinding(threadId, { memoryMode: selected });
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      if (action === 'permission') {
+        await interaction.deferUpdate();
+        await this.#showConfirmation(
+          interaction,
+          { type: 'permission', threadId, profile: selected },
+          `権限プロファイルを **${selected}** に変更しますか？以降のターンのfilesystem、network、approval境界が変わる可能性があります。`,
+          '権限を変更',
+        );
+        return;
+      }
+      if (action === 'more') {
+        await interaction.deferUpdate();
+        if (selected === 'status') {
+          await this.#showTaskStatus(interaction, threadId);
+          return;
+        }
+        if (['tier', 'personality', 'memory'].includes(selected)) {
+          const context = await this.#controlContext(threadId);
+          await interaction.editReply(secondarySettingsPayload({ ...context, kind: selected }));
+          return;
+        }
+        if (selected === 'goal') {
+          const result = await this.codex.getGoal(threadId);
+          await interaction.editReply(goalPayload(threadId, result.goal ?? null));
+          return;
+        }
+        if (selected === 'compact') {
+          await this.#showConfirmation(
+            interaction,
+            { type: 'compact', threadId },
+            'このタスクのcontextをcompactしますか？処理はapp-serverの `thread/compact/start` で行います。',
+            'Compact',
+          );
+          return;
+        }
+        if (selected === 'fork') {
+          await this.#showConfirmation(
+            interaction,
+            { type: 'fork', threadId, lastTurnId: null },
+            'このタスクの全履歴から新しいタスクをforkしますか？',
+            'Fork',
+          );
+          return;
+        }
+        if (selected === 'review') {
+          await interaction.editReply(reviewPayload(threadId));
+          return;
+        }
+        if (selected === 'terminals') {
+          const terminals = await this.codex.listBackgroundTerminals(threadId);
+          await interaction.editReply(terminalPayload(threadId, terminals));
+          return;
+        }
+        return;
+      }
+      if (action === 'review') {
+        const [kind, delivery] = selected.split(':');
+        if (kind === 'uncommitted') {
+          await interaction.deferUpdate();
+          const result = await this.#startReview(threadId, kind, null, delivery);
+          await interaction.editReply({ content: result.text, embeds: [], components: [] });
+        } else {
+          await this.#showReviewModal(interaction, threadId, kind, delivery);
+        }
+        return;
+      }
+      if (action === 'terminal') {
+        await interaction.deferUpdate();
+        const terminals = await this.codex.listBackgroundTerminals(threadId);
+        const terminal = terminals.find((candidate) => candidate.processId === selected);
+        if (!terminal) throw new Error(`背景ターミナル ${selected} が見つかりません。`);
+        await this.#showConfirmation(
+          interaction,
+          { type: 'terminal', threadId, processId: selected },
+          `app-server管理の背景ターミナル \`${selected}\` (PID ${terminal.osPid ?? 'unknown'}) を終了しますか？\n${truncate(terminal.command, 1200)}`,
+          'Terminalを終了',
+        );
+        return;
+      }
+      return;
+    }
     if (uiParts[0] === 'cx' && uiParts[1] === 'ui') {
       if (uiParts[2] === 'control' && uiParts[3] === 'open') {
         this.#assertControlPanelInteraction(interaction);
@@ -856,6 +1361,12 @@ export class DiscordController {
         const result = await this.codex.threadMetadata(threadId);
         const channel = await this.#openTaskChannel(result.thread);
         await interaction.followUp(messageOptions(`開きました: ${channelMention(channel.id)}`, { ephemeral: true }));
+        return;
+      }
+      if (uiParts[2] === 'control' && uiParts[3] === 'resources') {
+        this.#assertControlPanelInteraction(interaction);
+        await interaction.deferReply({ ephemeral: true });
+        await interaction.editReply({ embeds: [await this.#resourceResponse(interaction.values[0])] });
         return;
       }
       if (uiParts[2] === 'task') {
@@ -927,6 +1438,11 @@ export class DiscordController {
           await interaction.editReply(this.#syncResultText(await this.#syncAllTasks()));
           return;
         }
+        if (action === 'usage') {
+          await interaction.deferReply({ ephemeral: true });
+          await interaction.editReply({ embeds: [await this.#accountUsageResponse()] });
+          return;
+        }
         if (action === 'pending') {
           await interaction.reply(messageOptions(this.#pendingContent(), { ephemeral: true }));
           return;
@@ -939,10 +1455,9 @@ export class DiscordController {
         if (action === 'refresh') {
           await interaction.deferReply({ ephemeral: true });
           const result = await this.codex.readThread(threadId);
-          const latest = [...(result.thread.turns ?? [])].reverse()[0];
           const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
           await this.#ensureTaskPanel(result.thread, channel, binding.archived);
-          await interaction.editReply({ embeds: [this.#threadEmbed(result.thread, latest)] });
+          await this.#showTaskStatus(interaction, threadId);
           return;
         }
         if (action === 'pending') {
@@ -951,6 +1466,11 @@ export class DiscordController {
         }
         if (action === 'interrupt') {
           await this.#showInterruptConfirmation(interaction, threadId);
+          return;
+        }
+        if (action === 'controls') {
+          await interaction.deferReply({ ephemeral: true });
+          await this.#showTaskControls(interaction, threadId);
           return;
         }
         if (action === 'archive') {
@@ -972,6 +1492,75 @@ export class DiscordController {
         return;
       }
       return;
+    }
+    if (parts[1] === 'ctl') {
+      const action = parts[2];
+      const threadId = parts[3];
+      this.#assertTaskPanelInteraction(interaction, threadId);
+      if (action === 'back') {
+        await interaction.deferUpdate();
+        await this.#showTaskControls(interaction, threadId);
+        return;
+      }
+      if (action === 'goalset') {
+        await this.#showGoalModal(interaction, threadId);
+        return;
+      }
+      if (action === 'goalclear') {
+        await interaction.deferUpdate();
+        await this.#showConfirmation(
+          interaction,
+          { type: 'goalclear', threadId },
+          'このタスクのgoalを解除しますか？',
+          'Goalを解除',
+        );
+        return;
+      }
+      return;
+    }
+    if (parts[1] === 'confirm') {
+      const action = this.pendingActions.get(parts[2]);
+      if (!action || action.userId !== interaction.user.id) throw new Error('確認操作は期限切れです。');
+      this.pendingActions.delete(parts[2]);
+      if (parts[3] === 'no') {
+        await interaction.update({ content: '操作を取り消しました。', embeds: [], components: [] });
+        return;
+      }
+      await interaction.deferUpdate();
+      if (action.type === 'permission') {
+        await this.#applyThreadSettings(action.threadId, { permissions: action.profile });
+        await this.#showTaskControls(interaction, action.threadId);
+        return;
+      }
+      if (action.type === 'compact') {
+        await this.codex.compactThread(action.threadId);
+        await interaction.editReply({ content: 'Context compactを開始しました。', embeds: [], components: [] });
+        return;
+      }
+      if (action.type === 'fork') {
+        const result = await this.codex.forkThread(action.threadId, action.lastTurnId);
+        const channel = await this.#openTaskChannel(result.thread);
+        await interaction.editReply({
+          content: `Forkしました: ${channelMention(channel.id)} / task \`${result.thread.id}\``,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+      if (action.type === 'goalclear') {
+        await this.codex.clearGoal(action.threadId);
+        await interaction.editReply(goalPayload(action.threadId, null));
+        return;
+      }
+      if (action.type === 'terminal') {
+        const result = await this.codex.terminateBackgroundTerminal(action.threadId, action.processId);
+        const terminals = await this.codex.listBackgroundTerminals(action.threadId);
+        const payload = terminalPayload(action.threadId, terminals);
+        payload.content = result.terminated ? `Terminal \`${action.processId}\` を終了しました。` : `Terminal \`${action.processId}\` は既に停止しています。`;
+        await interaction.editReply(payload);
+        return;
+      }
+      throw new Error(`Unknown confirmed action: ${action.type}`);
     }
     if (parts[1] === 'interrupt') {
       const action = this.pendingActions.get(parts[2]);
@@ -1039,6 +1628,38 @@ export class DiscordController {
         this.#log('user-input-mirror-error', { threadId: action.threadId, source: mirror.source, error: error.message });
       });
       await interaction.editReply(`受理されました: **${result.mode}** / turn \`${result.turnId ?? 'pending'}\``);
+      return;
+    }
+
+    if (parts[1] === 'goal') {
+      const action = this.pendingActions.get(parts[2]);
+      if (!action || action.userId !== interaction.user.id || action.type !== 'goalset') {
+        throw new Error('Goal入力画面は期限切れです。');
+      }
+      this.pendingActions.delete(parts[2]);
+      await interaction.deferReply({ ephemeral: true });
+      const objective = interaction.fields.getTextInputValue('objective').trim();
+      const budgetText = interaction.fields.getTextInputValue('budget').trim();
+      const tokenBudget = budgetText ? Number.parseInt(budgetText, 10) : null;
+      if (!objective) throw new Error('Goal objectiveは空にできません。');
+      if (budgetText && (!Number.isSafeInteger(tokenBudget) || tokenBudget <= 0 || String(tokenBudget) !== budgetText)) {
+        throw new Error('Token budgetは正の整数で指定してください。');
+      }
+      const result = await this.codex.setGoal(action.threadId, objective, tokenBudget);
+      await interaction.editReply(goalPayload(action.threadId, result.goal));
+      return;
+    }
+
+    if (parts[1] === 'review') {
+      const action = this.pendingActions.get(parts[2]);
+      if (!action || action.userId !== interaction.user.id || action.type !== 'review') {
+        throw new Error('Review入力画面は期限切れです。');
+      }
+      this.pendingActions.delete(parts[2]);
+      await interaction.deferReply({ ephemeral: true });
+      const value = interaction.fields.getTextInputValue('value');
+      const result = await this.#startReview(action.threadId, action.kind, value, action.delivery);
+      await interaction.editReply(result.text);
       return;
     }
 
@@ -2197,7 +2818,24 @@ export class DiscordController {
       }
       const binding = this.stateStore.binding(threadId);
       if (!binding) return;
-      if (message.method === 'turn/started') await this.#turnStarted(binding, message.params);
+      if (message.method === 'thread/settings/updated') {
+        const settings = message.params.threadSettings ?? {};
+        this.stateStore.setBinding(threadId, {
+          runtimeSettings: {
+            ...binding.runtimeSettings,
+            model: settings.model ?? binding.runtimeSettings?.model ?? null,
+            effort: settings.effort ?? null,
+            serviceTier: settings.serviceTier ?? null,
+            approvalPolicy: settings.approvalPolicy ?? null,
+            approvalsReviewer: settings.approvalsReviewer ?? null,
+            sandbox: settings.sandboxPolicy ?? null,
+            activePermissionProfile: settings.activePermissionProfile ?? null,
+            collaborationMode: settings.collaborationMode ?? null,
+            personality: settings.personality ?? null,
+          },
+        });
+      }
+      else if (message.method === 'turn/started') await this.#turnStarted(binding, message.params);
       else if (message.method === 'item/agentMessage/delta') this.#agentDelta(binding, message.params);
       else if (['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(message.method)) {
         this.#reasoningDelta(binding, message.params);
@@ -2370,6 +3008,7 @@ export class DiscordController {
   #tokenUsageChanged(binding, params) {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
     view.tokenUsage = params.tokenUsage;
+    this.stateStore.setBinding(binding.threadId, { tokenUsage: params.tokenUsage });
     if (binding.watchLevel === 'verbose') this.#scheduleTurnRender(binding, view);
   }
 
@@ -2872,12 +3511,13 @@ export class DiscordController {
     }
   }
 
-  async #handleSubscriptionRestored({ binding, thread, missedCompletion }) {
+  async #handleSubscriptionRestored({ binding, thread, runtime, missedCompletion }) {
     this.stateStore.setBinding(binding.threadId, {
       name: thread.name ?? binding.name,
       cwd: thread.cwd ?? binding.cwd,
       sessionPath: thread.path ?? binding.sessionPath,
       archived: false,
+      runtimeSettings: this.#runtimeSettingsFromResume(runtime, binding.runtimeSettings),
     });
     const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
     if (!channel) return;

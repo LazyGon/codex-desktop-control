@@ -5,9 +5,13 @@ import { commandPayload } from '../src/commands.mjs';
 test('guild command payload contains the full remote operation surface', () => {
   assert.equal(commandPayload.length, 1);
   const subcommands = commandPayload[0].options.map((option) => option.name);
-  for (const expected of ['status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh']) {
+  for (const expected of [
+    'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
+    'model', 'reasoning', 'permissions', 'mode', 'memory', 'usage', 'resources', 'goal', 'compact', 'fork', 'review', 'terminals',
+  ]) {
     assert.ok(subcommands.includes(expected), `missing /codex ${expected}`);
   }
+  assert.equal(subcommands.length, 25, 'Discord permits at most 25 top-level subcommands');
   for (const removed of ['bind', 'unbind', 'catchup', 'autocatchup']) {
     assert.equal(subcommands.includes(removed), false, `/codex ${removed} should be removed`);
   }

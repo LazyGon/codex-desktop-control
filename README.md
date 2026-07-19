@@ -96,9 +96,14 @@ binds the same channel, and delivers the post. It does not create tasks from
 unbound channels in control, archive, or unrelated categories.
 
 `codex-remote` and every task channel contain a pinned control panel. Task
-panels provide delivery-mode and watch-level selects plus refresh, pending,
-archive/restore, and confirmed interrupt actions. The control panel provides
-status, full synchronization, pending requests, and task navigation. Renaming
+panels provide delivery-mode and watch-level selects plus status refresh,
+pending requests, a task control center, archive/restore, and confirmed
+interrupt actions. The task control center exposes model, reasoning effort,
+permission profile, Plan/Default mode, Fast/service tier, personality, memory,
+goal, compact, fork, review, and app-server background-terminal controls. The
+global panel provides bridge status, account usage, read-only MCP/Skills/
+Plugins/Hooks/experimental-feature inventory, full synchronization, pending
+requests, and task navigation. Renaming
 a task channel renames the Codex task; the Bridge then restores the channel's
 running/stopped status prefix.
 

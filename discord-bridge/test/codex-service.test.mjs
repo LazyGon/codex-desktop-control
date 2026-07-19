@@ -29,6 +29,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const listArchivedFilters = [];
   const startedThreads = [];
   const namedThreads = [];
+  const controlCalls = [];
   server.on('connection', (socket) => {
     peer = socket;
     socket.on('message', (data) => {
@@ -47,6 +48,29 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
         namedThreads.push(request.params);
         result = {};
       }
+      if (request.method === 'thread/settings/update') {
+        controlCalls.push([request.method, request.params]);
+        result = {};
+      }
+      if (request.method === 'model/list') result = { data: [{ model: 'gpt-test' }], nextCursor: null };
+      if (request.method === 'permissionProfile/list') result = { data: [{ id: ':workspace', allowed: true }], nextCursor: null };
+      if (request.method === 'collaborationMode/list') result = { data: [{ name: 'Default', mode: 'default' }] };
+      if (request.method === 'thread/goal/get') result = { goal: null };
+      if (request.method === 'thread/goal/set') result = { goal: { threadId: request.params.threadId, objective: request.params.objective } };
+      if (request.method === 'thread/goal/clear') result = { cleared: true };
+      if (request.method === 'thread/compact/start') result = {};
+      if (request.method === 'thread/fork') result = { thread: { id: 'thread-fork' } };
+      if (request.method === 'review/start') result = { turn: { id: 'review-turn' }, reviewThreadId: request.params.threadId };
+      if (request.method === 'thread/backgroundTerminals/list') result = { data: [{ processId: 'process-1' }], nextCursor: null };
+      if (request.method === 'thread/backgroundTerminals/terminate') result = { terminated: true };
+      if (request.method === 'thread/memoryMode/set') result = {};
+      if (request.method === 'account/rateLimits/read') result = { rateLimits: { primary: null } };
+      if (request.method === 'account/usage/read') result = { summary: { lifetimeTokens: 42 } };
+      if (request.method === 'mcpServerStatus/list') result = { data: [{ name: 'mock-mcp' }], nextCursor: null };
+      if (request.method === 'skills/list') result = { data: [{ cwd: 'C:/work', skills: [] }] };
+      if (request.method === 'hooks/list') result = { data: [{ cwd: 'C:/work', hooks: [] }] };
+      if (request.method === 'plugin/list') result = { marketplaces: [] };
+      if (request.method === 'experimentalFeature/list') result = { data: [{ name: 'mock-feature' }], nextCursor: null };
       if (request.method === 'thread/read') {
         result = {
           thread: {
@@ -90,6 +114,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   service.start();
   const restored = await restoredPromise;
   assert.equal(restored.thread.id, 'thread-1');
+  assert.equal(restored.runtime.thread.id, 'thread-1');
   assert.equal(restored.missedCompletion.turn.id, 'new-turn');
   assert.equal(restored.missedCompletion.finalText, 'finished offline');
   assert.equal(restored.missedCompletion.needsCompletionMessage, true);
@@ -105,6 +130,30 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.equal(started.thread.id, 'thread-new');
   assert.deepEqual(startedThreads, [{ cwd: 'C:\\new-work' }]);
   assert.deepEqual(namedThreads, [{ threadId: 'thread-new', name: 'New work' }]);
+
+  await service.updateThreadSettings('thread-1', { model: 'gpt-test' });
+  assert.deepEqual(await service.listModels(), [{ model: 'gpt-test' }]);
+  assert.deepEqual(await service.listPermissionProfiles('C:/work'), [{ id: ':workspace', allowed: true }]);
+  assert.deepEqual(await service.listCollaborationModes(), [{ name: 'Default', mode: 'default' }]);
+  assert.deepEqual(await service.getGoal('thread-1'), { goal: null });
+  assert.equal((await service.setGoal('thread-1', 'Ship it', 1000)).goal.objective, 'Ship it');
+  assert.equal((await service.clearGoal('thread-1')).cleared, true);
+  await service.compactThread('thread-1');
+  assert.equal((await service.forkThread('thread-1')).thread.id, 'thread-fork');
+  assert.equal((await service.startReview('thread-1', { type: 'uncommittedChanges' })).turn.id, 'review-turn');
+  assert.deepEqual(await service.listBackgroundTerminals('thread-1'), [{ processId: 'process-1' }]);
+  assert.equal((await service.terminateBackgroundTerminal('thread-1', 'process-1')).terminated, true);
+  await service.setMemoryMode('thread-1', 'enabled');
+  assert.equal((await service.accountUsage()).summary.lifetimeTokens, 42);
+  assert.deepEqual(await service.listMcpServers('thread-1'), [{ name: 'mock-mcp' }]);
+  assert.equal((await service.listSkills(['C:/work'])).data[0].cwd, 'C:/work');
+  assert.equal((await service.listHooks(['C:/work'])).data[0].cwd, 'C:/work');
+  assert.deepEqual((await service.listPlugins()).marketplaces, []);
+  assert.deepEqual(await service.listExperimentalFeatures('thread-1'), [{ name: 'mock-feature' }]);
+  assert.deepEqual(controlCalls, [[
+    'thread/settings/update',
+    { threadId: 'thread-1', model: 'gpt-test' },
+  ]]);
 
   const notificationPromise = new Promise((resolve) => service.once('notification', resolve));
   peer.send(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'live-turn' } } }));

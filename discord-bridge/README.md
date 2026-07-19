@@ -15,9 +15,16 @@ outbound connection to Discord.
   working directory, derives its title from the channel name, binds the same
   channel, and serializes rapid follow-up messages to prevent duplicate tasks.
 - Pins one persistent control panel in `codex-remote` and one in every task
-  channel. The global panel exposes status, full sync, pending requests, and
-  task navigation. Task panels expose delivery mode, watch level, refresh,
-  task-scoped pending requests, archive/restore, and confirmed interrupt.
+  channel. The global panel exposes status, account usage, read-only Codex
+  resource inventory, full sync, pending requests, and task navigation. Task
+  panels expose delivery mode, watch level, detailed status, task-scoped
+  pending requests, a task control center, archive/restore, and confirmed
+  interrupt.
+- Provides a dropdown-first task control center backed by live app-server
+  catalogs for model, reasoning effort, named permission profile, and
+  Plan/Default mode. Additional screens expose Fast/service tier, personality,
+  memory, goal, context compact, fork, review, and app-server-managed background
+  terminals.
 - Moves archived Codex tasks into `Codex Archived` and returns unarchived tasks
   to their project category. Moving a task channel into `Codex Archived` archives
   the Codex task; moving it back to its own project category unarchives it. A move
@@ -69,7 +76,7 @@ outbound connection to Discord.
 
 | Command | Purpose |
 | --- | --- |
-| `/codex status` | Discord, bridge, app-server, and subscription health |
+| `/codex status` | Global health, or detailed task runtime status in a task channel |
 | `/codex tasks` | Select a recent task and open its task channel |
 | `/codex open` | Open a task channel by task ID/autocomplete |
 | `/codex deliver` | Steer when active, start a turn when idle |
@@ -80,6 +87,15 @@ outbound connection to Discord.
 | `/codex pending` | Show unanswered approvals or input requests |
 | `/codex sync` | Immediately reconcile every active and archived task |
 | `/codex refresh` | Fetch current task state directly from app-server |
+| `/codex model` / `reasoning` | Show or change the model and reasoning effort |
+| `/codex permissions` | Show or confirm a named permission-profile change |
+| `/codex mode` / `memory` | Show or change collaboration and task-memory modes |
+| `/codex usage` | Show account token usage and rate-limit windows |
+| `/codex resources` | Read MCP, Skills, Plugins, Hooks, or experimental inventory |
+| `/codex goal` | View, set, or confirm clearing a task goal |
+| `/codex compact` / `fork` | Confirm context compact or task fork |
+| `/codex review` | Start inline or detached review for a selected target |
+| `/codex terminals` | List or confirm termination of task background terminals |
 
 Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct
@@ -195,6 +211,12 @@ time is deferred before execution.
   category permission overwrites; message management is used for durable cards
   and pinned control panels.
 - Discord input becomes Codex turn text. There is no raw shell endpoint.
+- Permission changes, compact, fork, goal removal, and background-terminal
+  termination require explicit confirmation. Terminal termination accepts only
+  a process ID returned by the selected task's app-server terminal inventory;
+  raw PID kill is not exposed.
+- Task deletion, filesystem operations, global config mutation, and deprecated
+  rollback are not exposed through Discord.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
   and user allowlist. Unbound control, archive, and unrelated channels never

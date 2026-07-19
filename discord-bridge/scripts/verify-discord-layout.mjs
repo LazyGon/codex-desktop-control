@@ -40,6 +40,10 @@ try {
     .flatMap((project) => project.categoryIds ?? []));
   const command = commands.find((candidate) => candidate.name === 'codex');
   const commandNames = command?.options.map((option) => option.name) ?? [];
+  const requiredCommands = [
+    'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
+    'model', 'reasoning', 'permissions', 'mode', 'memory', 'usage', 'resources', 'goal', 'compact', 'fork', 'review', 'terminals', 'help',
+  ];
   const removedCommands = ['autocatchup', 'catchup', 'bind', 'unbind'].filter((name) => commandNames.includes(name));
   const errors = [];
   let taskPanels = 0;
@@ -85,7 +89,8 @@ try {
     errors.push('At least one archived task is outside an archive category.');
   }
   if (removedCommands.length) errors.push(`Removed commands remain registered: ${removedCommands.join(', ')}`);
-  if (!commandNames.includes('sync')) errors.push('The /codex sync command is missing.');
+  const missingCommands = requiredCommands.filter((name) => !commandNames.includes(name));
+  if (missingCommands.length) errors.push(`Required commands are missing: ${missingCommands.join(', ')}`);
   if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
     errors.push(`Task channel count ${taskChannels.size} does not match state bindings ${Object.keys(state.bindings ?? {}).length}.`);
   }
@@ -96,8 +101,10 @@ try {
       'Codex Remote UI / control-panel',
       [
         'cx:ui:control:status',
+        'cx:ui:control:usage',
         'cx:ui:control:sync',
         'cx:ui:control:pending',
+        'cx:ui:control:resources',
         ...(Object.keys(state.bindings ?? {}).length ? ['cx:ui:control:open'] : []),
       ],
     );
@@ -114,6 +121,7 @@ try {
         `cx:ui:task:watch:${threadId}`,
         `cx:ui:task:refresh:${threadId}`,
         `cx:ui:task:pending:${threadId}`,
+        `cx:ui:task:controls:${threadId}`,
         `cx:ui:task:archive:${threadId}`,
         `cx:ui:task:interrupt:${threadId}`,
       ],

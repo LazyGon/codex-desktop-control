@@ -33,11 +33,23 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    past card. Turn completion leaves a final card with task and turn identity.
 6. Respond to approval or input cards when they appear.
 
-The pinned `codex-remote` panel provides status, full sync, pending requests,
-and task navigation. Each pinned task panel provides delivery mode, watch
-level, refresh, task-scoped pending requests, archive/restore, and confirmed
-interrupt. Renaming the channel renames the Codex task. Moving it between its
+The pinned `codex-remote` panel provides status, account usage, read-only MCP/
+Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
+requests, and task navigation. Each pinned task panel provides delivery mode,
+watch level, detailed status, task-scoped pending requests, a task control
+center, archive/restore, and confirmed interrupt. The control center uses
+dropdowns populated from the shared app-server for model, reasoning effort,
+named permission profile, and Plan/Default mode. Its More menu includes Fast/
+service tier, personality, memory, goal, context compact, fork, review, and
+background terminals. Renaming the channel renames the Codex task. Moving it between its
 project and archive categories remains the direct channel-level archive UI.
+
+Permission changes, context compact, fork, goal removal, and background
+terminal termination always require confirmation. A terminal can be terminated
+only when it is listed by the selected task's app-server background-terminal
+inventory. Discord does not expose arbitrary shell execution, raw PID kill,
+task deletion, filesystem operations, global configuration mutation, or the
+deprecated rollback API.
 
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
