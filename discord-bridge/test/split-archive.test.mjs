@@ -101,10 +101,11 @@ test('project archive includes .git and protected files under the outer project 
   const archive = await createSplit7zProjectArchive(project, {
     volumeBytes: 10_000,
     maxBytes: 100_000,
-    tempRoot,
+    tempRoot: path.relative(process.cwd(), tempRoot),
     archiverPath: executable,
   });
   try {
+    assert.equal(archive.tempRoot, path.resolve(tempRoot));
     assert.equal(archive.format, 'split-7z-project-v1');
     assert.ok(archive.volumes.length > 1);
     assert.ok(archive.volumes.every((volume) => volume.size <= 10_000));

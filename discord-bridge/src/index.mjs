@@ -62,6 +62,7 @@ const client = new Client({
   intents: gatewayIntents,
   partials: [Partials.Channel, Partials.Message],
   allowedMentions: { parse: [] },
+  rest: { timeout: config.discordRestTimeoutMs },
 });
 const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
 const controller = new DiscordController({ client, codex, stateStore, config, logDir });

@@ -26,6 +26,7 @@ const defaults = {
   initialSnapshotMessages: 16,
   liveUpdateIntervalMs: 2500,
   taskSyncIntervalMs: 30_000,
+  discordRestTimeoutMs: 120_000,
   plainMessageInputEnabled: false,
   fileShareEnabled: true,
   fileShareChunkBytes: 7_500_000,
@@ -71,6 +72,11 @@ export function loadConfig() {
   }
   if (!Number.isInteger(config.taskSyncIntervalMs) || config.taskSyncIntervalMs < 10_000) {
     errors.push('taskSyncIntervalMs must be an integer of at least 10000.');
+  }
+  if (!Number.isInteger(config.discordRestTimeoutMs)
+    || config.discordRestTimeoutMs < 15_000
+    || config.discordRestTimeoutMs > 900_000) {
+    errors.push('discordRestTimeoutMs must be an integer from 15000 to 900000.');
   }
   if (!Number.isInteger(config.initialSnapshotMessages)
     || config.initialSnapshotMessages < 2

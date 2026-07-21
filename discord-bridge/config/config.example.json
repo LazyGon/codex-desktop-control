@@ -16,6 +16,7 @@
   "initialSnapshotMessages": 16,
   "liveUpdateIntervalMs": 2500,
   "taskSyncIntervalMs": 30000,
+  "discordRestTimeoutMs": 120000,
   "plainMessageInputEnabled": false,
   "fileShareEnabled": true,
   "fileShareChunkBytes": 7500000,

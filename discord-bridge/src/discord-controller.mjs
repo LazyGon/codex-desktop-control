@@ -1246,6 +1246,12 @@ export class DiscordController {
   async #sendProjectArchive(channel, binding, userId) {
     this.#assertFileSharingEnabled();
     if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
+    this.#log('project-archive-started', {
+      userId,
+      channelId: channel.id,
+      threadId: binding.threadId,
+      projectRoot: binding.cwd,
+    });
     const archive = await createSplit7zProjectArchive(binding.cwd, {
       volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
       maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
@@ -1253,6 +1259,15 @@ export class DiscordController {
       archiverPath: this.config.fileShareArchiverPath,
     });
     try {
+      this.#log('project-archive-prepared', {
+        userId,
+        channelId: channel.id,
+        threadId: binding.threadId,
+        files: archive.project.files.length,
+        sourceBytes: archive.project.sourceBytes,
+        archiveBytes: archive.archiveBytes,
+        volumes: archive.volumes.length,
+      });
       const firstMessage = await channel.send(messageOptions([
         '**Codex project archive**',
         `Project: \`${truncate(archive.project.projectName, 500)}\``,
@@ -1264,17 +1279,19 @@ export class DiscordController {
           ? `全volumeを同じフォルダへ保存し、\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`
           : `\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`,
       ].join('\n')));
-      const perMessage = this.config.fileShareAttachmentsPerMessage ?? 4;
-      for (let index = 0; index < archive.volumes.length; index += perMessage) {
-        const group = archive.volumes.slice(index, index + perMessage);
-        const files = [];
-        for (const volume of group) {
-          files.push(new AttachmentBuilder(await readArchiveVolume(volume), { name: volume.name }));
-        }
+      for (const volume of archive.volumes) {
         await channel.send({
-          content: `**${archive.archiveName}** volumes ${group[0].index + 1}-${group.at(-1).index + 1}/${archive.volumes.length}`,
-          files,
+          content: `**${archive.archiveName}** volume ${volume.index + 1}/${archive.volumes.length}`,
+          files: [new AttachmentBuilder(await readArchiveVolume(volume), { name: volume.name })],
           allowedMentions: { parse: [] },
+        });
+        this.#log('project-archive-volume-uploaded', {
+          userId,
+          channelId: channel.id,
+          threadId: binding.threadId,
+          volume: volume.index + 1,
+          volumes: archive.volumes.length,
+          bytes: volume.size,
         });
       }
       const manifest = Buffer.from(`${JSON.stringify(projectArchiveManifest(archive), null, 2)}\n`, 'utf8');

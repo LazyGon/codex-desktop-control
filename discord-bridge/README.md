@@ -189,6 +189,11 @@ absolute `7z.exe` path can be set as `fileShareArchiverPath`. Temporary archive
 volumes are deleted after posting, and stale managed transfer directories are
 removed when the Bridge starts.
 
+Project archive volumes are posted one per Discord message so a slow outbound
+connection does not force one request to carry several attachments. Discord
+REST requests use the configurable `discordRestTimeoutMs` timeout, which
+defaults to 120 seconds.
+
 Whole-project downloads use the same configured transfer maximum for both the
 source tree and produced archive. Save every posted volume in one directory
 and open `.project.7z.001`; a single-volume transfer is opened as

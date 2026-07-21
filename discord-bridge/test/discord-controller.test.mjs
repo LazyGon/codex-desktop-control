@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -967,6 +968,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const siblingPath = path.join(siblingProject, 'cross-project.txt');
   fs.writeFileSync(safePath, 'artifact', 'utf8');
   fs.writeFileSync(secretPath, 'TOKEN=secret', 'utf8');
+  fs.writeFileSync(path.join(project, 'archive-payload.bin'), randomBytes(30_000));
   fs.writeFileSync(siblingPath, 'cross-project', 'utf8');
 
   const client = new EventEmitter();
@@ -1110,8 +1112,11 @@ test('task file UI browses project entries and resolves only safe assistant-link
     assert.match(confirmedProject.lastReply.content, /https:\/\/discord\.test\/2/);
     assert.match(filePosts[1].content, /Codex project archive/);
     assert.match(filePosts[1].content, /Includes: `\.git`/);
+    const volumePosts = filePosts.slice(2, -1);
+    assert.ok(volumePosts.length > 1);
+    assert.ok(volumePosts.every((post) => post.files?.length === 1));
     const projectAttachments = filePosts.slice(2).flatMap((post) => post.files ?? []);
-    assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z')));
+    assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z.001')));
     assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z-manifest.json')));
   }
 });

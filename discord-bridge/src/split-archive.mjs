@@ -245,14 +245,15 @@ export async function createSplit7zProjectArchive(projectRoot, {
   archiverPath = null,
 }) {
   if (!Number.isSafeInteger(volumeBytes) || volumeBytes <= 0) throw new Error('Invalid archive volume size.');
+  const resolvedTempRoot = path.resolve(tempRoot);
   const executable = discover7Zip(archiverPath);
   if (!executable) {
     throw new Error('プロジェクト転送には7-Zipが必要です。7z.exeをインストールするかfileShareArchiverPathを設定してください。');
   }
   const snapshot = await scanProjectTree(projectRoot, maxBytes);
-  await fs.promises.mkdir(tempRoot, { recursive: true });
-  const directory = await fs.promises.mkdtemp(path.join(tempRoot, TRANSFER_DIRECTORY_PREFIX));
-  assertManagedTransferDirectory(tempRoot, directory);
+  await fs.promises.mkdir(resolvedTempRoot, { recursive: true });
+  const directory = await fs.promises.mkdtemp(path.join(resolvedTempRoot, TRANSFER_DIRECTORY_PREFIX));
+  assertManagedTransferDirectory(resolvedTempRoot, directory);
   const archiveName = safeAttachmentName(snapshot.projectName, '.project.7z');
   const archivePath = path.join(directory, archiveName);
   const listPath = path.join(directory, 'project-files.utf8.lst');
@@ -283,7 +284,7 @@ export async function createSplit7zProjectArchive(projectRoot, {
       maxBytes,
     );
     return {
-      tempRoot,
+      tempRoot: resolvedTempRoot,
       directory,
       executable,
       format: volumes.length > 1 ? 'split-7z-project-v1' : 'single-7z-project-v1',
