@@ -15,6 +15,37 @@ test('assistant cards expose one stable linked-file button only when links exist
   assert.equal(rows[0].components[0].label, 'Linked files (3)');
 });
 
+test('file selectors use native Discord emojis for folders, files, and locked entries', () => {
+  const browser = json(fileBrowserPayload({
+    key: 'icons',
+    threadId: 'thread-1',
+    relativeDirectory: '',
+    page: 0,
+    entries: [
+      { name: 'folder', kind: 'directory', navigable: true, lockedReason: null },
+      { name: 'report.txt', kind: 'file', size: 12, lockedReason: null },
+      { name: '.env', kind: 'file', size: 12, lockedReason: 'secret' },
+    ],
+  }));
+  const browserOptions = browser.components[0].components[0].options;
+  assert.deepEqual(browserOptions.map((option) => option.label), ['folder', 'report.txt', '.env']);
+  assert.deepEqual(browserOptions.map((option) => option.emoji.name), ['🗂️', '📄', '🔒']);
+
+  const linked = json(linkedFilePickerPayload({
+    key: 'linked-icons',
+    threadId: 'thread-1',
+    page: 0,
+    items: [
+      { reference: { label: 'report.txt' }, file: { relativePath: 'report.txt' } },
+      { reference: { label: '.env' }, error: 'secret' },
+    ],
+  }));
+  assert.deepEqual(
+    linked.components[0].components[0].options.map((option) => option.emoji.name),
+    ['📄', '🔒'],
+  );
+});
+
 test('project browser pages entries and exposes navigation controls', () => {
   const entries = Array.from({ length: 27 }, (_, index) => ({
     name: `file-${index}.txt`,

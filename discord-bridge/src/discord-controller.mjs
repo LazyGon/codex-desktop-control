@@ -2741,17 +2741,29 @@ export class DiscordController {
     return { options, expectsAttachment: value.length > 3900, localFiles };
   }
 
-  async #ensureAssistantMessageCard(binding, turn, item, channel, messages, preferredMessageId = null) {
+  async #ensureAssistantMessageCard(
+    binding,
+    turn,
+    item,
+    channel,
+    messages,
+    preferredMessageId = null,
+    { migrationEntryId = null, excludedMessageIds = new Set() } = {},
+  ) {
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     const assistantEntries = { ...(record.assistantEntries ?? {}) };
-    const existingIds = assistantEntries[item.id]?.messageIds ?? [];
+    const existingIds = assistantEntries[item.id]?.messageIds
+      ?? (migrationEntryId ? assistantEntries[migrationEntryId]?.messageIds : null)
+      ?? [];
     let message = await this.#resolveChannelMessage(channel, messages, preferredMessageId ?? existingIds[0]);
-    if (message && this.#embedAssistantMessageId(message)
+    if (excludedMessageIds.has(message?.id)) message = null;
+    if (!migrationEntryId && message && this.#embedAssistantMessageId(message)
       && this.#embedAssistantMessageId(message) !== item.id) {
       message = null;
     }
     if (!message) {
       message = [...messages.values()].find((candidate) => candidate.author.id === this.client.user.id
+        && !excludedMessageIds.has(candidate.id)
         && this.#embedTurnId(candidate) === turn.id
         && this.#embedAssistantMessageId(candidate) === item.id);
     }
@@ -2772,6 +2784,7 @@ export class DiscordController {
 
     const staleIds = new Set([...existingIds, ...duplicateIds].filter(Boolean));
     staleIds.delete(message.id);
+    if (migrationEntryId && migrationEntryId !== item.id) delete assistantEntries[migrationEntryId];
     const claimedByOtherEntries = new Set(Object.entries(assistantEntries)
       .filter(([entryId]) => entryId !== item.id)
       .flatMap(([, entry]) => entry.messageIds ?? []));
@@ -2802,6 +2815,35 @@ export class DiscordController {
     }
     this.stateStore.setTurnRecord(binding.threadId, turn.id, patch);
     return message;
+  }
+
+  async #reconcileStableAssistantMessages(binding, turn, channel, messages) {
+    const stableItems = (turn.items ?? [])
+      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text);
+    const migratedEntryIds = new Set();
+    const usedMessageIds = new Set();
+    for (const item of stableItems) {
+      const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
+      const entries = record.assistantEntries ?? {};
+      const migrationEntryId = entries[item.id] ? null : Object.entries(entries)
+        .find(([entryId, entry]) => !migratedEntryIds.has(entryId)
+          && entry.phase === item.phase
+          && entry.text?.trim() === item.text.trim())?.[0] ?? null;
+      if (migrationEntryId) migratedEntryIds.add(migrationEntryId);
+      const preferredMessageId = entries[item.id]?.messageIds?.[0]
+        ?? (migrationEntryId ? entries[migrationEntryId]?.messageIds?.[0] : null)
+        ?? null;
+      const message = await this.#ensureAssistantMessageCard(
+        binding,
+        turn,
+        item,
+        channel,
+        messages,
+        preferredMessageId,
+        { migrationEntryId, excludedMessageIds: usedMessageIds },
+      );
+      usedMessageIds.add(message.id);
+    }
   }
 
   #userCardOptions(binding, turn, userItem, sourceMessage = null, existingMessage = null) {
@@ -3201,6 +3243,7 @@ export class DiscordController {
       // thread/read. Reconcile only the latest completed user cards here so a
       // reconnect converges without backfilling old commentary.
       await this.#ensureTurnUserMessages(binding, latestCompleted, channel, messages);
+      await this.#reconcileStableAssistantMessages(binding, latestCompleted, channel, messages);
     }
 
     if (activeTurn) {
@@ -3535,6 +3578,7 @@ export class DiscordController {
       if (persistedTurn?.items?.length) stableTurn = { ...turn, items: persistedTurn.items };
     }
     await this.#ensureTurnUserMessages(binding, stableTurn, channel, messages);
+    await this.#reconcileStableAssistantMessages(binding, stableTurn, channel, messages);
     const finalText = view.text;
     const completionMessage = await this.#ensureTurnFinalMessages(
       binding,

@@ -44,7 +44,7 @@ as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
 volume into the same folder and open the `.7z.001` file with a 7z-compatible
 phone or desktop app. The manifest records the original-file and per-volume
 SHA-256 hashes.
-Entries marked `LOCK` remain indexed but cannot be downloaded because they are
+Entries marked `🔒` remain indexed but cannot be downloaded because they are
 secret/protected, outside the project boundary, or a filesystem link.
 The project browser itself never leaves the task working directory. A file
 explicitly linked by Codex may also resolve in a sibling repository under a

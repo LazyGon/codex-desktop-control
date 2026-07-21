@@ -28,9 +28,9 @@ export function linkedFilesComponents(count) {
   )];
 }
 
-function entryLabel(entry) {
-  const icon = entry.lockedReason ? 'LOCK' : entry.kind === 'directory' ? 'DIR' : 'FILE';
-  return truncate(`${icon} ${entry.name}`, 100, '');
+function entryEmoji(entry) {
+  if (entry.lockedReason) return '🔒';
+  return entry.kind === 'directory' ? '🗂️' : '📄';
 }
 
 function entryDescription(entry) {
@@ -61,7 +61,8 @@ export function fileBrowserPayload(session) {
         .setCustomId(`cx:files:browse:${session.key}`)
         .setPlaceholder('開くフォルダまたは取得するファイルを選択')
         .addOptions(visible.map((entry, offset) => new StringSelectMenuOptionBuilder()
-          .setLabel(entryLabel(entry))
+          .setLabel(truncate(entry.name, 100, ''))
+          .setEmoji(entryEmoji(entry))
           .setDescription(entryDescription(entry))
           .setValue(String(start + offset)))),
     ));
@@ -90,7 +91,8 @@ export function linkedFilePickerPayload(session) {
     .setCustomId(`cx:files:linkedpick:${session.key}`)
     .setPlaceholder('ダウンロードするファイルを選択')
     .addOptions(visible.map((item, index) => new StringSelectMenuOptionBuilder()
-      .setLabel(truncate(`${item.error ? 'LOCK' : 'FILE'} ${item.reference.label}`, 100, ''))
+      .setLabel(truncate(item.reference.label, 100, ''))
+      .setEmoji(item.error ? '🔒' : '📄')
       .setDescription(truncate(item.error ? `取得不可: ${item.error}` : item.file.relativePath, 100, ''))
       .setValue(String(start + index))));
   const components = [new ActionRowBuilder().addComponents(menu)];

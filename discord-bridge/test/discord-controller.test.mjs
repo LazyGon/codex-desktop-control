@@ -23,6 +23,7 @@ test('completed turns replace the pinned task panel below the final card exactly
         status: 'completed',
         items: [
           { type: 'userMessage', id: 'persisted-user', content: [{ type: 'text', text: 'Do the work.' }] },
+          { type: 'agentMessage', id: 'persisted-commentary', phase: 'commentary', text: 'Working.' },
           { type: 'agentMessage', id: 'final-1', phase: 'final_answer', text: 'Finished.' },
         ],
       }],
@@ -83,6 +84,28 @@ test('completed turns replace the pinned task panel below the final card exactly
     embeds: [{ footer: { text: taskPanelMarker(binding.threadId) } }],
   });
   oldPanel.pinned = true;
+  const liveCommentary = makeMessage('assistant-live', {
+    embeds: [{
+      title: 'Codex message',
+      description: 'Working.',
+      fields: [
+        { name: 'Task', value: `\`${binding.threadId}\`` },
+        { name: 'Turn', value: '`turn-complete`' },
+        { name: 'Message', value: '`live-commentary`' },
+      ],
+    }],
+  });
+  binding.turnMessages['turn-complete'] = {
+    assistantEntries: {
+      'live-commentary': {
+        text: 'Working.',
+        phase: 'commentary',
+        messageIds: [liveCommentary.id],
+        localFiles: [],
+      },
+    },
+    assistantMessageIds: [liveCommentary.id],
+  };
   const channel = {
     id: 'task-channel',
     messages: {
@@ -141,6 +164,7 @@ test('completed turns replace the pinned task panel below the final card exactly
         status: 'completed',
         items: [
           { type: 'userMessage', id: 'live-user', content: [{ type: 'text', text: 'Do the work.' }] },
+          { type: 'agentMessage', id: 'live-commentary', phase: 'commentary', text: 'Working.' },
           { type: 'agentMessage', id: 'final-1', phase: 'final_answer', text: 'Finished.' },
         ],
       },
@@ -160,6 +184,9 @@ test('completed turns replace the pinned task panel below the final card exactly
   assert.equal(panel.embeds[0].fields.find((field) => field.name === 'Status').value, 'idle');
   assert.deepEqual(Object.keys(binding.turnMessages['turn-complete'].userEntries), ['persisted-user']);
   assert.equal(binding.turnMessages['turn-complete'].userEntries['persisted-user'].messageIds.length, 1);
+  assert.deepEqual(Object.keys(binding.turnMessages['turn-complete'].assistantEntries), ['persisted-commentary']);
+  assert.deepEqual(binding.turnMessages['turn-complete'].assistantEntries['persisted-commentary'].messageIds, [liveCommentary.id]);
+  assert.equal(liveCommentary.embeds[0].fields.find((field) => field.name === 'Message').value, '`persisted-commentary`');
   const finalIndex = sent.findIndex((message) => message.embeds[0]?.title === 'Codex turn completed');
   const panelIndex = sent.findIndex((message) => message.id === panel.id);
   assert.ok(finalIndex >= 0 && panelIndex > finalIndex);
@@ -1037,8 +1064,10 @@ test('task file UI browses project entries and resolves only safe assistant-link
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   const linkedOptions = linked.lastReply.components[0].toJSON().components[0].options;
-  assert.equal(linkedOptions[0].label, 'FILE cross-project');
-  assert.equal(linkedOptions[1].label, 'LOCK environment');
+  assert.equal(linkedOptions[0].label, 'cross-project');
+  assert.equal(linkedOptions[0].emoji.name, '📄');
+  assert.equal(linkedOptions[1].label, 'environment');
+  assert.equal(linkedOptions[1].emoji.name, '🔒');
   assert.match(linkedOptions[1].description, /取得不可/);
 
   const pickerId = linked.lastReply.components[0].toJSON().components[0].custom_id;
