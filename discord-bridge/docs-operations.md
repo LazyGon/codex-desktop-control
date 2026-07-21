@@ -37,7 +37,9 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    directory. Select a directory to open it or a file to post it into the
    private task channel. `/codex-files` opens the same browser with explicit
    task autocomplete. On an assistant card, use `Linked files` to select a
-   local file that Codex linked in its message.
+   local file that Codex linked in its message. To retrieve the entire working
+   directory, tap `📦 Download project`, review the secret-exposure warning,
+   and confirm `Archiveを作成`.
 
 Files that fit in one attachment are posted directly. Larger files are posted
 as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
@@ -46,6 +48,13 @@ phone or desktop app. The manifest records the original-file and per-volume
 SHA-256 hashes.
 Entries marked `🔒` remain indexed but cannot be downloaded because they are
 secret/protected, outside the project boundary, or a filesystem link.
+The whole-project archive is an explicit exception: it includes `.git`,
+`.env`, keys, credentials, and other protected regular files. It skips
+symlinks, junctions, and special filesystem entries. Download every
+`.project.7z.*` volume into one folder and open `.project.7z.001`. A
+single-volume transfer is opened as `.project.7z`. Extraction creates the outer
+project directory. Both source and archive must fit under the configured
+transfer maximum.
 The project browser itself never leaves the task working directory. A file
 explicitly linked by Codex may also resolve in a sibling repository under a
 parent shared by managed projects, which covers cross-repository work without

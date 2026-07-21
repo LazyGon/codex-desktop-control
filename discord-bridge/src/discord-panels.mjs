@@ -123,6 +123,11 @@ export function taskPanelPayload({ thread, binding }) {
           .setCustomId(`cx:ui:task:files:${thread.id}`)
           .setLabel('Project files')
           .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`cx:ui:task:project:${thread.id}`)
+          .setLabel('Download project')
+          .setEmoji('📦')
+          .setStyle(ButtonStyle.Secondary),
       ),
     ],
     allowedMentions: { parse: [] },

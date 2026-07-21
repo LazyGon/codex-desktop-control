@@ -7,6 +7,7 @@ import path from 'node:path';
 import { ChannelType } from 'discord.js';
 import { DiscordController } from '../src/discord-controller.mjs';
 import { taskPanelMarker } from '../src/discord-panels.mjs';
+import { discover7Zip } from '../src/split-archive.mjs';
 
 test('completed turns replace the pinned task panel below the final card exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
@@ -1000,8 +1001,8 @@ test('task file UI browses project entries and resolves only safe assistant-link
     stateStore,
     config: {
       fileShareEnabled: true,
-      fileShareChunkBytes: 100,
-      fileShareMaxBytes: 100,
+      fileShareChunkBytes: 10_000,
+      fileShareMaxBytes: 100_000,
       fileShareAttachmentsPerMessage: 2,
       guildId: 'guild-1',
       allowedUserIds: ['user-1'],
@@ -1041,6 +1042,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     isModalSubmit: () => false,
     isRepliable: () => true,
     deferReply: async function deferReply() { this.deferred = true; },
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
     editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
     reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
   });
@@ -1054,6 +1056,18 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const browserOptions = browser.lastReply.components[0].toJSON().components[0].options;
   assert.ok(browserOptions.some((option) => option.label.includes('artifact.txt')));
   assert.match(browserOptions.find((option) => option.label.includes('.env')).description, /取得不可/);
+
+  const projectDownload = interaction(`cx:ui:task:project:${binding.threadId}`);
+  client.emit('interactionCreate', projectDownload);
+  for (let attempt = 0; attempt < 100 && !projectDownload.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(projectDownload.lastReply.content, /\.git/);
+  assert.match(projectDownload.lastReply.content, /鍵・資格情報/);
+  assert.match(projectDownload.lastReply.content, /symlink・junction/);
+  const projectConfirm = projectDownload.lastReply.components[0].toJSON().components[0];
+  assert.match(projectConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
+  assert.equal(projectConfirm.label, 'Archiveを作成');
 
   const linked = interaction('cx:files:linked', {
     id: 'assistant-card',
@@ -1086,4 +1100,18 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.match(download.lastFollowUp.content, /https:\/\/discord\.test\/1/);
   assert.equal(filePosts.length, 1);
   assert.equal(filePosts[0].files.length, 1);
+
+  if (discover7Zip()) {
+    const confirmedProject = interaction(projectConfirm.custom_id);
+    client.emit('interactionCreate', confirmedProject);
+    for (let attempt = 0; attempt < 200 && !/投稿しました/.test(confirmedProject.lastReply?.content ?? ''); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.match(confirmedProject.lastReply.content, /https:\/\/discord\.test\/2/);
+    assert.match(filePosts[1].content, /Codex project archive/);
+    assert.match(filePosts[1].content, /Includes: `\.git`/);
+    const projectAttachments = filePosts.slice(2).flatMap((post) => post.files ?? []);
+    assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z')));
+    assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z-manifest.json')));
+  }
 });

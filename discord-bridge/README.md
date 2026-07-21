@@ -56,6 +56,10 @@ outbound connection to Discord.
 - Browses one directory level at a time from a task's project root through the
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
+- Downloads the complete task working directory from the task panel's
+  `📦 Download project` button. After an explicit secret-exposure confirmation,
+  the Bridge includes `.git` and protected regular files, skips filesystem
+  links and special entries, and posts ordered 7z volumes plus a JSON manifest.
 - Uploads files up to the configured transfer maximum. Files above one Discord
   attachment are packaged as ordered 7z volumes and accompanied by a JSON
   manifest containing original-file and per-volume SHA-256 hashes.
@@ -185,6 +189,12 @@ absolute `7z.exe` path can be set as `fileShareArchiverPath`. Temporary archive
 volumes are deleted after posting, and stale managed transfer directories are
 removed when the Bridge starts.
 
+Whole-project downloads use the same configured transfer maximum for both the
+source tree and produced archive. Save every posted volume in one directory
+and open `.project.7z.001`; a single-volume transfer is opened as
+`.project.7z`. The archive preserves the outer project folder so extraction
+does not scatter its contents into the destination.
+
 ## Operations
 
 ```powershell
@@ -248,6 +258,11 @@ time is deferred before execution.
   index as unavailable entries. `.git`, `.codex`, credential stores,
   `.env` variants, DPAPI tokens, private-key extensions, and files containing a
   private-key header cannot be downloaded.
+- `📦 Download project` is the deliberate exception to those per-file
+  restrictions: after an explicit warning and confirmation, it includes every
+  regular file under the task working directory, including `.git` and likely
+  secrets. It still excludes symbolic links, junctions, and special filesystem
+  entries, and verifies source size and modification time after archiving.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
   and user allowlist. Unbound control, archive, and unrelated channels never

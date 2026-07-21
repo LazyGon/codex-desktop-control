@@ -127,6 +127,7 @@ try {
         `cx:ui:task:archive:${threadId}`,
         `cx:ui:task:interrupt:${threadId}`,
         `cx:ui:task:files:${threadId}`,
+        `cx:ui:task:project:${threadId}`,
       ],
     );
     if (panel) taskPanels += 1;

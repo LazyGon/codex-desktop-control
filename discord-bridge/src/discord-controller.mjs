@@ -54,8 +54,10 @@ import {
 import {
   cleanupStaleSplitArchives,
   createSplit7zArchive,
+  createSplit7zProjectArchive,
   disposeSplitArchive,
   hashResolvedFile,
+  projectArchiveManifest,
   readArchiveVolume,
   readHashedFile,
   splitArchiveManifest,
@@ -1241,6 +1243,66 @@ export class DiscordController {
     }
   }
 
+  async #sendProjectArchive(channel, binding, userId) {
+    this.#assertFileSharingEnabled();
+    if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
+    const archive = await createSplit7zProjectArchive(binding.cwd, {
+      volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+      tempRoot: this.fileTransferTempRoot,
+      archiverPath: this.config.fileShareArchiverPath,
+    });
+    try {
+      const firstMessage = await channel.send(messageOptions([
+        '**Codex project archive**',
+        `Project: \`${truncate(archive.project.projectName, 500)}\``,
+        `Files: ${archive.project.files.length} / Source: ${formatFileSize(archive.project.sourceBytes)}`,
+        `Archive: ${formatFileSize(archive.archiveBytes)} / 7z / ${archive.volumes.length} volume(s)`,
+        'Includes: `.git` and protected/secret-named regular files',
+        `Skipped filesystem links/special entries: ${archive.project.skippedLinks.length + archive.project.skippedSpecial.length}`,
+        archive.volumes.length > 1
+          ? `全volumeを同じフォルダへ保存し、\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`
+          : `\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`,
+      ].join('\n')));
+      const perMessage = this.config.fileShareAttachmentsPerMessage ?? 4;
+      for (let index = 0; index < archive.volumes.length; index += perMessage) {
+        const group = archive.volumes.slice(index, index + perMessage);
+        const files = [];
+        for (const volume of group) {
+          files.push(new AttachmentBuilder(await readArchiveVolume(volume), { name: volume.name }));
+        }
+        await channel.send({
+          content: `**${archive.archiveName}** volumes ${group[0].index + 1}-${group.at(-1).index + 1}/${archive.volumes.length}`,
+          files,
+          allowedMentions: { parse: [] },
+        });
+      }
+      const manifest = Buffer.from(`${JSON.stringify(projectArchiveManifest(archive), null, 2)}\n`, 'utf8');
+      await channel.send({
+        content: `**${archive.archiveName}** project manifest`,
+        files: [new AttachmentBuilder(manifest, {
+          name: safeAttachmentName(archive.project.projectName, '.project.7z-manifest.json'),
+        })],
+        allowedMentions: { parse: [] },
+      });
+      this.#log('project-archive-downloaded', {
+        userId,
+        channelId: channel.id,
+        threadId: binding.threadId,
+        projectName: archive.project.projectName,
+        files: archive.project.files.length,
+        sourceBytes: archive.project.sourceBytes,
+        archiveBytes: archive.archiveBytes,
+        volumes: archive.volumes.length,
+        skippedLinks: archive.project.skippedLinks.length,
+        skippedSpecial: archive.project.skippedSpecial.length,
+      });
+      return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
+    } finally {
+      await disposeSplitArchive(archive);
+    }
+  }
+
   async #downloadFile(interaction, file, threadId) {
     const binding = this.stateStore.binding(threadId);
     if (!binding) throw new Error('ファイルの投稿先タスクが見つかりません。');
@@ -1879,6 +1941,21 @@ export class DiscordController {
           await this.#startFileBrowser(interaction, threadId);
           return;
         }
+        if (action === 'project') {
+          this.#assertFileSharingEnabled();
+          const maximum = formatFileSize(this.config.fileShareMaxBytes ?? 512_000_000);
+          await this.#showConfirmation(
+            interaction,
+            { type: 'projectArchive', threadId },
+            [
+              `プロジェクト全体 \`${truncate(binding.cwd, 1200)}\` をタスクチャンネルへ投稿しますか？`,
+              '`.git`、`.env`、鍵・資格情報など、通常のファイルブラウザでは保護される通常ファイルも含まれます。',
+              `転送上限は ${maximum} です。symlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。`,
+            ].join('\n'),
+            'Archiveを作成',
+          );
+          return;
+        }
         if (action === 'archive') {
           await interaction.deferReply({ ephemeral: true });
           if (binding.archived) {
@@ -1964,6 +2041,18 @@ export class DiscordController {
         const payload = terminalPayload(action.threadId, terminals);
         payload.content = result.terminated ? `Terminal \`${action.processId}\` を終了しました。` : `Terminal \`${action.processId}\` は既に停止しています。`;
         await interaction.editReply(payload);
+        return;
+      }
+      if (action.type === 'projectArchive') {
+        const binding = this.#assertTaskPanelInteraction(interaction, action.threadId);
+        const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+        await interaction.editReply({ content: 'プロジェクトarchiveを作成しています...', embeds: [], components: [] });
+        const url = await this.#sendProjectArchive(channel, binding, interaction.user.id);
+        await interaction.editReply({
+          content: `プロジェクトarchiveを投稿しました: ${url}`,
+          embeds: [],
+          components: [],
+        });
         return;
       }
       throw new Error(`Unknown confirmed action: ${action.type}`);

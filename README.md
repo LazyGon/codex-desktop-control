@@ -104,6 +104,9 @@ below the final card so its controls remain at the latest channel position.
 They also provide a project-file browser, while assistant
 cards expose safe local file links for download to the private task channel.
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
+The task panel's `📦 Download project` action creates a confirmed full working
+directory archive, including `.git` and protected regular files, as split 7z
+volumes with a manifest. Filesystem links and special entries are excluded.
 The task control center exposes model, reasoning effort,
 permission profile, Plan/Default mode, Fast/service tier, personality, memory,
 goal, compact, fork, review, and app-server background-terminal controls. The

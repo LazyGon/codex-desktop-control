@@ -72,6 +72,9 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
   assert.equal(active.components[2].components[4].disabled, false);
   assert.equal(active.components[3].components[0].custom_id, `cx:ui:task:files:${thread.id}`);
   assert.equal(active.components[3].components[0].label, 'Project files');
+  assert.equal(active.components[3].components[1].custom_id, `cx:ui:task:project:${thread.id}`);
+  assert.equal(active.components[3].components[1].label, 'Download project');
+  assert.equal(active.components[3].components[1].emoji.name, '📦');
 
   const archived = json(taskPanelPayload({
     thread: { ...thread, status: { type: 'idle' } },
@@ -83,4 +86,5 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
   assert.equal(archived.components[2].components[3].label, 'Restore');
   assert.equal(archived.components[2].components[4].disabled, true);
   assert.equal(archived.components[3].components[0].disabled ?? false, false);
+  assert.equal(archived.components[3].components[1].disabled ?? false, false);
 });
