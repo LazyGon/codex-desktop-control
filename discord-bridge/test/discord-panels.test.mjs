@@ -42,7 +42,7 @@ test('control panel exposes status, usage, resources, sync, pending, and task na
   ]);
 });
 
-test('task panel exposes mode and watch selects plus safe task actions', () => {
+test('task panel exposes mode and watch selects plus safe task and project-file actions', () => {
   const thread = {
     id: 'thread-1',
     name: 'Task one',
@@ -70,6 +70,8 @@ test('task panel exposes mode and watch selects plus safe task actions', () => {
   assert.equal(active.components[2].components[2].label, 'Controls');
   assert.equal(active.components[2].components[3].label, 'Archive');
   assert.equal(active.components[2].components[4].disabled, false);
+  assert.equal(active.components[3].components[0].custom_id, `cx:ui:task:files:${thread.id}`);
+  assert.equal(active.components[3].components[0].label, 'Project files');
 
   const archived = json(taskPanelPayload({
     thread: { ...thread, status: { type: 'idle' } },
@@ -80,4 +82,5 @@ test('task panel exposes mode and watch selects plus safe task actions', () => {
   assert.equal(archived.components[2].components[2].disabled, true);
   assert.equal(archived.components[2].components[3].label, 'Restore');
   assert.equal(archived.components[2].components[4].disabled, true);
+  assert.equal(archived.components[3].components[0].disabled ?? false, false);
 });

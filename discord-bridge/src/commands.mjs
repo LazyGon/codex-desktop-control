@@ -220,4 +220,9 @@ export const codexCommand = new SlashCommandBuilder()
     .setName('help')
     .setDescription('主要操作と安全境界を表示します'));
 
-export const commandPayload = [codexCommand.toJSON()];
+export const codexFilesCommand = addTaskOption(new SlashCommandBuilder()
+  .setName('codex-files')
+  .setDescription('Codexタスクのプロジェクトファイルを参照・取得します')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator));
+
+export const commandPayload = [codexCommand.toJSON(), codexFilesCommand.toJSON()];

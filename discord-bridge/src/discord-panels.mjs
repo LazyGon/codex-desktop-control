@@ -118,6 +118,12 @@ export function taskPanelPayload({ thread, binding }) {
       new ActionRowBuilder().addComponents(compose),
       new ActionRowBuilder().addComponents(watch),
       actions,
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`cx:ui:task:files:${thread.id}`)
+          .setLabel('Project files')
+          .setStyle(ButtonStyle.Secondary),
+      ),
     ],
     allowedMentions: { parse: [] },
   };

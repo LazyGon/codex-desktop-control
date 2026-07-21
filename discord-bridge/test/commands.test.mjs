@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { commandPayload } from '../src/commands.mjs';
 
 test('guild command payload contains the full remote operation surface', () => {
-  assert.equal(commandPayload.length, 1);
+  assert.equal(commandPayload.length, 2);
   const subcommands = commandPayload[0].options.map((option) => option.name);
   for (const expected of [
     'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
@@ -16,6 +16,10 @@ test('guild command payload contains the full remote operation surface', () => {
     assert.equal(subcommands.includes(removed), false, `/codex ${removed} should be removed`);
   }
   assert.equal(commandPayload[0].default_member_permissions, '8');
+  assert.equal(commandPayload[1].name, 'codex-files');
+  assert.equal(commandPayload[1].default_member_permissions, '8');
+  assert.equal(commandPayload[1].options[0].name, 'task');
+  assert.equal(commandPayload[1].options[0].autocomplete, true);
 });
 
 test('required slash command options always precede optional options', () => {
@@ -32,7 +36,7 @@ test('required slash command options always precede optional options', () => {
       }
     }
   };
-  for (const subcommand of commandPayload[0].options) {
-    visit(subcommand);
+  for (const command of commandPayload) {
+    visit(command, command.name);
   }
 });

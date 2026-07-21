@@ -59,10 +59,12 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
         author: { id: 'bot-user', bot: true },
         content: options.content ?? '',
         embeds: (options.embeds ?? []).map((embed) => embed.toJSON()),
+        components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
         attachments: new Map(),
         edit: async (next) => {
           message.content = next.content ?? message.content;
           if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+          if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
           if (next.attachments?.length === 0) message.attachments.clear();
           return message;
         },
@@ -145,7 +147,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
       threadId: 'thread-1',
       turnId: 'turn-1',
       itemId: 'assistant-item-1',
-      delta: 'first update',
+      delta: 'first update [artifact](C:\\work\\artifact.txt)',
     },
   });
   codex.emit('notification', {
@@ -153,11 +155,11 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     params: {
       threadId: 'thread-1',
       turnId: 'turn-1',
-      item: { type: 'agentMessage', id: 'assistant-item-1', phase: 'commentary', text: 'first update' },
+      item: { type: 'agentMessage', id: 'assistant-item-1', phase: 'commentary', text: 'first update [artifact](C:\\work\\artifact.txt)' },
     },
   });
   for (let attempt = 0; attempt < 100
-    && turnRecords.get('thread-1:turn-1')?.assistantEntries?.['assistant-item-1']?.text !== 'first update'; attempt += 1) {
+    && turnRecords.get('thread-1:turn-1')?.assistantEntries?.['assistant-item-1']?.text !== 'first update [artifact](C:\\work\\artifact.txt)'; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   codex.emit('notification', {
@@ -185,10 +187,12 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   })));
   assert.ok(pastAssistant, diagnostic);
   assert.ok(liveAssistant, diagnostic);
-  assert.equal(pastAssistant.embeds[0].description, 'first update');
+  assert.equal(pastAssistant.embeds[0].description, 'first update [artifact](C:\\work\\artifact.txt)');
+  assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.deepEqual(pastAssistant.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);
   assert.equal(liveAssistant.embeds[0].fields.find((field) => field.name === 'Message').value, '`assistant-item-2`');
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].messageIds, [pastAssistant.id]);
+  assert.equal(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].localFiles[0].target, 'C:\\work\\artifact.txt');
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-2'].messageIds, [liveAssistant.id]);
   assert.equal(new Set(turnRecords.get('thread-1:turn-1').assistantMessageIds).size, 2);
 });
@@ -756,4 +760,138 @@ test('moving a task channel to an unrelated category rolls it back without chang
   assert.deepEqual(codexCalls, []);
   assert.equal(binding.archived, false);
   assert.equal(binding.categoryId, 'project-category');
+});
+
+test('task file UI browses project entries and resolves only safe assistant-linked files', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-files-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const safePath = path.join(project, 'artifact.txt');
+  const secretPath = path.join(project, '.env');
+  const siblingProject = path.join(directory, 'sibling-project');
+  fs.mkdirSync(siblingProject);
+  const siblingPath = path.join(siblingProject, 'cross-project.txt');
+  fs.writeFileSync(safePath, 'artifact', 'utf8');
+  fs.writeFileSync(secretPath, 'TOKEN=secret', 'utf8');
+  fs.writeFileSync(siblingPath, 'cross-project', 'utf8');
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const binding = {
+    threadId: 'thread-files',
+    channelId: 'task-channel',
+    cwd: project,
+    turnMessages: {
+      'turn-1': {
+        assistantEntries: {
+          'assistant-1': {
+            messageIds: ['assistant-card'],
+            localFiles: [
+              { label: 'cross-project', target: siblingPath },
+              { label: 'environment', target: secretPath },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const stateStore = {
+    binding: (threadId) => threadId === binding.threadId ? structuredClone(binding) : null,
+    bindingByChannel: (channelId) => channelId === binding.channelId ? structuredClone(binding) : null,
+    projectCategories: () => [{ path: project }, { path: siblingProject }],
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      fileShareEnabled: true,
+      fileShareChunkBytes: 4,
+      fileShareMaxBytes: 100,
+      fileShareAttachmentsPerMessage: 2,
+      guildId: 'guild-1',
+      allowedUserIds: ['user-1'],
+    },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const filePosts = [];
+  const taskChannel = {
+    id: binding.channelId,
+    isTextBased: () => true,
+    send: async (payload) => {
+      const message = {
+        id: `file-post-${filePosts.length + 1}`,
+        url: `https://discord.test/${filePosts.length + 1}`,
+        ...payload,
+      };
+      filePosts.push(message);
+      return message;
+    },
+  };
+
+  const interaction = (customId, message = null) => ({
+    guildId: 'guild-1',
+    channelId: binding.channelId,
+    channel: taskChannel,
+    user: { id: 'user-1' },
+    customId,
+    message,
+    deferred: false,
+    replied: false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => false,
+    isButton: () => true,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferReply: async function deferReply() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+    reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+  });
+
+  const browser = interaction(`cx:ui:task:files:${binding.threadId}`);
+  client.emit('interactionCreate', browser);
+  for (let attempt = 0; attempt < 100 && !browser.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(browser.lastReply.embeds[0].toJSON().title, 'Project files');
+  const browserOptions = browser.lastReply.components[0].toJSON().components[0].options;
+  assert.ok(browserOptions.some((option) => option.label.includes('artifact.txt')));
+  assert.match(browserOptions.find((option) => option.label.includes('.env')).description, /取得不可/);
+
+  const linked = interaction('cx:files:linked', {
+    id: 'assistant-card',
+    embeds: [],
+  });
+  client.emit('interactionCreate', linked);
+  for (let attempt = 0; attempt < 100 && !linked.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const linkedOptions = linked.lastReply.components[0].toJSON().components[0].options;
+  assert.equal(linkedOptions[0].label, 'FILE cross-project');
+  assert.equal(linkedOptions[1].label, 'LOCK environment');
+  assert.match(linkedOptions[1].description, /取得不可/);
+
+  const pickerId = linked.lastReply.components[0].toJSON().components[0].custom_id;
+  const download = {
+    ...interaction(pickerId),
+    values: ['0'],
+    isStringSelectMenu: () => true,
+    isButton: () => false,
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
+    followUp: async function followUp(payload) { this.lastFollowUp = payload; return payload; },
+  };
+  client.emit('interactionCreate', download);
+  for (let attempt = 0; attempt < 100 && !download.lastFollowUp; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(download.lastFollowUp.content, /https:\/\/discord\.test\/1/);
+  assert.equal(filePosts.length, 4, 'header, two part messages, and manifest');
+  assert.equal(filePosts[1].files.length, 2);
+  assert.equal(filePosts[2].files.length, 2);
+  assert.equal(filePosts[3].files.length, 1);
 });

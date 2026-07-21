@@ -19,7 +19,7 @@ outbound connection to Discord.
   resource inventory, full sync, pending requests, and task navigation. Task
   panels expose delivery mode, watch level, detailed status, task-scoped
   pending requests, a task control center, archive/restore, and confirmed
-  interrupt.
+  interrupt, plus a paged project-file browser.
 - Provides a dropdown-first task control center backed by live app-server
   catalogs for model, reasoning effort, named permission profile, and
   Plan/Default mode. Additional screens expose Fast/service tier, personality,
@@ -45,6 +45,17 @@ outbound connection to Discord.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
   only on the latest card. A past commentary card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
+- Adds a `Linked files` button to assistant cards that contain Markdown links
+  to absolute local Windows files. The resulting dropdown resolves only files
+  inside managed Codex project trees (including explicitly linked sibling
+  repositories under a parent shared by managed projects) and posts the
+  selected file to its private task channel.
+- Browses one directory level at a time from a task's project root through the
+  `Project files` panel button or `/codex-files`. Directories are opened in the
+  ephemeral browser; selected files are posted to the task channel.
+- Uploads files up to the configured transfer maximum. Files above one Discord
+  attachment are split into ordered raw chunks and accompanied by a JSON
+  manifest containing whole-file and per-part SHA-256 hashes.
 - Uses the last public assistant message when an older completed turn has no
   explicit `final_answer`, instead of displaying a missing-text placeholder.
 - Synchronizes the Codex task name into its Discord channel name and prefixes
@@ -96,6 +107,7 @@ outbound connection to Discord.
 | `/codex compact` / `fork` | Confirm context compact or task fork |
 | `/codex review` | Start inline or detached review for a selected target |
 | `/codex terminals` | List or confirm termination of task background terminals |
+| `/codex-files` | Browse and download files from a selected task's project root |
 
 Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct
@@ -215,8 +227,18 @@ time is deferred before execution.
   termination require explicit confirmation. Terminal termination accepts only
   a process ID returned by the selected task's app-server terminal inventory;
   raw PID kill is not exposed.
-- Task deletion, filesystem operations, global config mutation, and deprecated
+- Task deletion, file writes or deletion, global config mutation, and deprecated
   rollback are not exposed through Discord.
+- File browsing is read-only and rooted at the selected task's working
+  directory. Assistant-card downloads accept only paths that Codex actually
+  linked and that resolve inside a managed project tree, a parent shared by
+  managed sibling projects, or a runtime workspace root;
+  arbitrary path input, UNC paths, traversal, alternate data streams, and
+  symbolic links/junctions are rejected.
+- Protected directories and likely secret files remain visible in the file
+  index as unavailable entries. `.git`, `.codex`, credential stores,
+  `.env` variants, DPAPI tokens, private-key extensions, and files containing a
+  private-key header cannot be downloaded.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
   and user allowlist. Unbound control, archive, and unrelated channels never

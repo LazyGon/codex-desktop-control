@@ -98,7 +98,10 @@ unbound channels in control, archive, or unrelated categories.
 `codex-remote` and every task channel contain a pinned control panel. Task
 panels provide delivery-mode and watch-level selects plus status refresh,
 pending requests, a task control center, archive/restore, and confirmed
-interrupt actions. The task control center exposes model, reasoning effort,
+interrupt actions. They also provide a project-file browser, while assistant
+cards expose safe local file links for download to the private task channel.
+Large files are split into ordered Discord attachments with a SHA-256 manifest.
+The task control center exposes model, reasoning effort,
 permission profile, Plan/Default mode, Fast/service tier, personality, memory,
 goal, compact, fork, review, and app-server background-terminal controls. The
 global panel provides bridge status, account usage, read-only MCP/Skills/

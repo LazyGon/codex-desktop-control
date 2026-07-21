@@ -17,6 +17,10 @@
   "liveUpdateIntervalMs": 2500,
   "taskSyncIntervalMs": 30000,
   "plainMessageInputEnabled": false,
+  "fileShareEnabled": true,
+  "fileShareChunkBytes": 7500000,
+  "fileShareMaxBytes": 512000000,
+  "fileShareAttachmentsPerMessage": 4,
   "autoStartSharedDesktop": true,
   "sharedLauncherPath": "..\\launcher\\CodexSharedLauncher.exe",
   "appServerUrl": null

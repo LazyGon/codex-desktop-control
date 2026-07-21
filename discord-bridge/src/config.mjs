@@ -27,6 +27,10 @@ const defaults = {
   liveUpdateIntervalMs: 2500,
   taskSyncIntervalMs: 30_000,
   plainMessageInputEnabled: false,
+  fileShareEnabled: true,
+  fileShareChunkBytes: 7_500_000,
+  fileShareMaxBytes: 512_000_000,
+  fileShareAttachmentsPerMessage: 4,
   autoStartSharedDesktop: true,
   sharedLauncherPath: defaultSharedLauncherPath,
   appServerUrl: null,
@@ -74,6 +78,24 @@ export function loadConfig() {
   }
   if (typeof config.plainMessageInputEnabled !== 'boolean') {
     errors.push('plainMessageInputEnabled must be boolean.');
+  }
+  if (typeof config.fileShareEnabled !== 'boolean') {
+    errors.push('fileShareEnabled must be boolean.');
+  }
+  if (!Number.isInteger(config.fileShareChunkBytes)
+    || config.fileShareChunkBytes < 1_000_000
+    || config.fileShareChunkBytes > 7_500_000) {
+    errors.push('fileShareChunkBytes must be an integer from 1000000 to 7500000.');
+  }
+  if (!Number.isInteger(config.fileShareMaxBytes)
+    || config.fileShareMaxBytes < config.fileShareChunkBytes
+    || config.fileShareMaxBytes > 2_000_000_000) {
+    errors.push('fileShareMaxBytes must be an integer from fileShareChunkBytes to 2000000000.');
+  }
+  if (!Number.isInteger(config.fileShareAttachmentsPerMessage)
+    || config.fileShareAttachmentsPerMessage < 1
+    || config.fileShareAttachmentsPerMessage > 10) {
+    errors.push('fileShareAttachmentsPerMessage must be an integer from 1 to 10.');
   }
   if (errors.length) throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);
   return config;

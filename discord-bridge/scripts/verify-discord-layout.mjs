@@ -39,6 +39,7 @@ try {
   const referencedProjectCategoryIds = new Set(Object.values(state.projectCategories ?? {})
     .flatMap((project) => project.categoryIds ?? []));
   const command = commands.find((candidate) => candidate.name === 'codex');
+  const filesCommand = commands.find((candidate) => candidate.name === 'codex-files');
   const commandNames = command?.options.map((option) => option.name) ?? [];
   const requiredCommands = [
     'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
@@ -89,6 +90,7 @@ try {
     errors.push('At least one archived task is outside an archive category.');
   }
   if (removedCommands.length) errors.push(`Removed commands remain registered: ${removedCommands.join(', ')}`);
+  if (!filesCommand) errors.push('Required command is missing: codex-files');
   const missingCommands = requiredCommands.filter((name) => !commandNames.includes(name));
   if (missingCommands.length) errors.push(`Required commands are missing: ${missingCommands.join(', ')}`);
   if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
@@ -124,6 +126,7 @@ try {
         `cx:ui:task:controls:${threadId}`,
         `cx:ui:task:archive:${threadId}`,
         `cx:ui:task:interrupt:${threadId}`,
+        `cx:ui:task:files:${threadId}`,
       ],
     );
     if (panel) taskPanels += 1;
@@ -136,7 +139,7 @@ try {
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
     panels: { control: Boolean(state.infrastructure.controlPanelMessageId), tasks: taskPanels },
-    commands: commandNames,
+    commands: [...commandNames.map((name) => `codex ${name}`), ...(filesCommand ? ['codex-files'] : [])],
     errors,
   }, null, 2)}\n`);
   if (errors.length) process.exitCode = 1;

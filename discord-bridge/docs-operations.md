@@ -32,6 +32,21 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity.
 6. Respond to approval or input cards when they appear.
+7. Use `Project files` in the pinned task panel to browse the task working
+   directory. Select a directory to open it or a file to post it into the
+   private task channel. `/codex-files` opens the same browser with explicit
+   task autocomplete. On an assistant card, use `Linked files` to select a
+   local file that Codex linked in its message.
+
+Files larger than one attachment are posted as numbered raw chunks followed by
+a `.codex-transfer.json` manifest. Download every part, concatenate them in
+numeric order, and compare the result with the manifest's whole-file SHA-256.
+Entries marked `LOCK` remain indexed but cannot be downloaded because they are
+secret/protected, outside the project boundary, or a filesystem link.
+The project browser itself never leaves the task working directory. A file
+explicitly linked by Codex may also resolve in a sibling repository under a
+parent shared by managed projects, which covers cross-repository work without
+opening arbitrary-path input.
 
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
@@ -48,8 +63,9 @@ Permission changes, context compact, fork, goal removal, and background
 terminal termination always require confirmation. A terminal can be terminated
 only when it is listed by the selected task's app-server background-terminal
 inventory. Discord does not expose arbitrary shell execution, raw PID kill,
-task deletion, filesystem operations, global configuration mutation, or the
-deprecated rollback API.
+task deletion, filesystem writes or deletion, global configuration mutation,
+or the deprecated rollback API. The only filesystem surface is bounded read-only file
+browsing and download; it does not expose arbitrary paths, writes, or deletion.
 
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle

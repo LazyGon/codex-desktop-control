@@ -40,6 +40,22 @@ import {
   taskPanelPayload,
 } from './discord-panels.mjs';
 import {
+  fileBrowserPayload,
+  formatFileSize,
+  linkedFilePickerPayload,
+  linkedFilesComponents,
+} from './discord-file-ui.mjs';
+import {
+  extractLocalFileReferences,
+  inspectFileTransfer,
+  listProjectDirectory,
+  readTransferPart,
+  resolveShareFile,
+  safeAttachmentName,
+  transferManifest,
+  transferPartName,
+} from './local-file-share.mjs';
+import {
   accountUsageEmbed,
   goalPayload,
   resourceInventoryEmbed,
@@ -310,6 +326,10 @@ export class DiscordController {
       if (!this.#authorized(interaction)) return;
       if (interaction.isChatInputCommand() && interaction.commandName === 'codex') {
         await this.#handleCommand(interaction);
+        return;
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'codex-files') {
+        await this.#handleFilesCommand(interaction);
         return;
       }
       if (interaction.isStringSelectMenu()) {
@@ -772,8 +792,16 @@ export class DiscordController {
   #persistRuntime(threadId, runtime) {
     const binding = this.stateStore.binding(threadId);
     if (!binding) return;
+    const workspaceRoots = runtime.workspaceRoots
+      ?? runtime.workspace_roots
+      ?? runtime.workspace?.roots
+      ?? [];
+    const runtimeWorkspaceRoots = Array.isArray(workspaceRoots)
+      ? workspaceRoots.map((value) => typeof value === 'string' ? value : value?.path).filter(Boolean)
+      : binding.runtimeWorkspaceRoots ?? [];
     this.stateStore.setBinding(threadId, {
       runtimeSettings: this.#runtimeSettingsFromResume(runtime, binding.runtimeSettings),
+      runtimeWorkspaceRoots,
       cwd: runtime.cwd ?? binding.cwd,
       name: runtime.thread?.name ?? binding.name,
       taskStatus: runtime.thread?.status?.type ?? binding.taskStatus,
@@ -954,6 +982,239 @@ export class DiscordController {
       .setTitle('Codex review')
       .addComponents(userInputField('value', labels[kind] ?? 'Review target'));
     await interaction.showModal(modal);
+  }
+
+  #assertFileSharingEnabled() {
+    if (this.config.fileShareEnabled === false) throw new Error('ローカルファイル共有は設定で無効です。');
+  }
+
+  #allowedFileRoots(binding, { includeSiblingProjects = false } = {}) {
+    const projectRoots = typeof this.stateStore.projectCategories === 'function'
+      ? this.stateStore.projectCategories().map((project) => project.path)
+      : [];
+    const roots = [
+      binding?.cwd,
+      ...(binding?.runtimeWorkspaceRoots ?? []),
+      ...projectRoots,
+    ].filter((value) => value && value !== '(no project)');
+    if (includeSiblingProjects) {
+      const distinctProjects = [...new Map([binding?.cwd, ...projectRoots]
+        .filter(Boolean)
+        .map((projectRoot) => [path.win32.normalize(projectRoot).toLocaleLowerCase('en-US'), projectRoot]))
+        .values()];
+      const parentCounts = new Map();
+      for (const projectRoot of distinctProjects) {
+        const parent = path.win32.dirname(projectRoot);
+        const key = parent.toLocaleLowerCase('en-US');
+        parentCounts.set(key, { path: parent, count: (parentCounts.get(key)?.count ?? 0) + 1 });
+      }
+      for (const parent of parentCounts.values()) {
+        const userHome = /^[a-z]:\\Users\\[^\\]+\\?$/i.test(parent.path);
+        if (parent.count >= 2 && path.win32.dirname(parent.path) !== parent.path && !userHome) {
+          roots.push(parent.path);
+        }
+      }
+    }
+    return [...new Set(roots)];
+  }
+
+  #fileSession(key, userId, type = null) {
+    const session = this.pendingActions.get(key);
+    if (!session || session.userId !== userId || (type && session.type !== type)) {
+      throw new Error('ファイル画面は期限切れです。もう一度開いてください。');
+    }
+    if (Date.now() - session.createdAt > 30 * 60_000) {
+      this.pendingActions.delete(key);
+      throw new Error('ファイル画面は期限切れです。もう一度開いてください。');
+    }
+    return session;
+  }
+
+  #fileBrowserEntries(entries) {
+    const maximum = this.config.fileShareMaxBytes ?? 512_000_000;
+    return entries.map((entry) => entry.kind === 'file' && entry.size > maximum
+      ? {
+        ...entry,
+        downloadable: false,
+        lockedReason: `転送上限 ${formatFileSize(maximum)} を超えるファイル`,
+      }
+      : entry);
+  }
+
+  async #startFileBrowser(interaction, threadId) {
+    this.#assertFileSharingEnabled();
+    const binding = this.stateStore.binding(threadId);
+    if (!binding) throw new Error('このタスクはまだDiscordに同期されていません。');
+    if (!binding.cwd) throw new Error('このタスクには参照できる作業フォルダがありません。');
+    const listing = await listProjectDirectory(binding.cwd);
+    const key = randomKey();
+    const session = {
+      type: 'fileBrowser',
+      key,
+      userId: interaction.user.id,
+      threadId,
+      channelId: binding.channelId,
+      root: listing.root,
+      relativeDirectory: listing.relativeDirectory,
+      entries: this.#fileBrowserEntries(listing.entries),
+      page: 0,
+      createdAt: Date.now(),
+    };
+    this.pendingActions.set(key, session);
+    await interaction.editReply(fileBrowserPayload(session));
+  }
+
+  async #reloadFileBrowser(session, relativeDirectory = session.relativeDirectory) {
+    const listing = await listProjectDirectory(session.root, relativeDirectory);
+    session.relativeDirectory = listing.relativeDirectory;
+    session.entries = this.#fileBrowserEntries(listing.entries);
+    session.page = 0;
+    session.createdAt = Date.now();
+    return session;
+  }
+
+  #linkedReferences(binding, message) {
+    const references = [];
+    const records = binding?.turnMessages ?? {};
+    for (const record of Object.values(records)) {
+      for (const entry of Object.values(record.assistantEntries ?? {})) {
+        if (!(entry.messageIds ?? []).includes(message.id)) continue;
+        references.push(...(entry.localFiles ?? extractLocalFileReferences(entry.text)));
+      }
+      const finalIds = new Set([
+        ...(record.finalMessageIds ?? []),
+        record.cardMessageId,
+        record.liveMessageId,
+      ].filter(Boolean));
+      if (finalIds.has(message.id)) references.push(...(record.finalLocalFiles ?? []));
+    }
+    if (references.length === 0) {
+      for (const embed of message.embeds ?? []) {
+        references.push(...extractLocalFileReferences(embed.description));
+      }
+    }
+    const seen = new Set();
+    return references.filter((reference) => {
+      const key = String(reference.target).toLocaleLowerCase('en-US');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  async #showLinkedFilePicker(interaction) {
+    this.#assertFileSharingEnabled();
+    const binding = this.stateStore.bindingByChannel(interaction.channelId);
+    if (!binding) throw new Error('このメッセージはCodexタスクチャンネルにありません。');
+    const references = this.#linkedReferences(binding, interaction.message);
+    if (references.length === 0) throw new Error('このカードに取得可能なローカルファイルリンクはありません。');
+    await interaction.deferReply({ ephemeral: true });
+    const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+    const items = await Promise.all(references.map(async (reference) => {
+      try {
+        const file = await resolveShareFile(reference.target, roots);
+        const maximum = this.config.fileShareMaxBytes ?? 512_000_000;
+        if (file.size > maximum) {
+          return {
+            reference,
+            file: null,
+            error: `転送上限 ${formatFileSize(maximum)} を超えるファイル`,
+          };
+        }
+        return { reference, file, error: null };
+      } catch (error) {
+        return { reference, file: null, error: error.message };
+      }
+    }));
+    const key = randomKey();
+    const session = {
+      type: 'linkedFiles',
+      key,
+      userId: interaction.user.id,
+      threadId: binding.threadId,
+      channelId: binding.channelId,
+      items,
+      page: 0,
+      createdAt: Date.now(),
+    };
+    this.pendingActions.set(key, session);
+    await interaction.editReply(linkedFilePickerPayload(session));
+  }
+
+  #discordMessageUrl(channelId, messageId) {
+    return `https://discord.com/channels/${this.config.guildId}/${channelId}/${messageId}`;
+  }
+
+  async #sendLocalFile(channel, file, userId) {
+    const transfer = await inspectFileTransfer(file, {
+      chunkBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+    });
+    const details = [
+      '**Codex local file**',
+      `Path: \`${truncate(transfer.relativePath, 1200)}\``,
+      `Size: ${formatFileSize(transfer.size)}`,
+      `SHA-256: \`${transfer.sha256}\``,
+    ];
+    let firstMessage;
+    if (!transfer.split) {
+      const content = await readTransferPart(transfer, transfer.parts[0]);
+      firstMessage = await channel.send({
+        content: details.join('\n'),
+        files: [new AttachmentBuilder(content, { name: safeAttachmentName(transfer.name) })],
+        allowedMentions: { parse: [] },
+      });
+    } else {
+      details.push(
+        `Parts: ${transfer.parts.length} (raw binary chunks)`,
+        '全パートを番号順にバイナリ結合し、manifestのSHA-256で検証してください。',
+      );
+      firstMessage = await channel.send(messageOptions(details.join('\n')));
+      const perMessage = this.config.fileShareAttachmentsPerMessage ?? 4;
+      for (let index = 0; index < transfer.parts.length; index += perMessage) {
+        const group = transfer.parts.slice(index, index + perMessage);
+        const files = [];
+        for (const part of group) {
+          files.push(new AttachmentBuilder(
+            await readTransferPart(transfer, part),
+            { name: transferPartName(transfer.name, part.index, transfer.parts.length) },
+          ));
+        }
+        await channel.send({
+          content: `**${transfer.name}** parts ${group[0].index + 1}-${group.at(-1).index + 1}/${transfer.parts.length}`,
+          files,
+          allowedMentions: { parse: [] },
+        });
+      }
+      const manifest = Buffer.from(`${JSON.stringify(transferManifest(transfer), null, 2)}\n`, 'utf8');
+      await channel.send({
+        content: `**${transfer.name}** transfer manifest`,
+        files: [new AttachmentBuilder(manifest, { name: safeAttachmentName(transfer.name, '.codex-transfer.json') })],
+        allowedMentions: { parse: [] },
+      });
+    }
+    this.#log('local-file-downloaded', {
+      userId,
+      channelId: channel.id,
+      relativePath: transfer.relativePath,
+      size: transfer.size,
+      parts: transfer.parts.length,
+      sha256: transfer.sha256,
+    });
+    return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
+  }
+
+  async #downloadFile(interaction, file, threadId) {
+    const binding = this.stateStore.binding(threadId);
+    if (!binding) throw new Error('ファイルの投稿先タスクが見つかりません。');
+    const channel = binding.channelId === interaction.channelId && interaction.channel
+      ? interaction.channel
+      : await this.client.channels.fetch(binding.channelId);
+    if (!channel?.isTextBased?.() && typeof channel?.send !== 'function') {
+      throw new Error('ファイルの投稿先タスクチャンネルが利用できません。');
+    }
+    const url = await this.#sendLocalFile(channel, file, interaction.user.id);
+    await interaction.followUp(messageOptions(`タスクチャンネルへ投稿しました。\n${url}`, { ephemeral: true }));
   }
 
   async #handleCommand(interaction) {
@@ -1241,8 +1502,66 @@ export class DiscordController {
     }
   }
 
+  async #handleFilesCommand(interaction) {
+    await this.infrastructureReady;
+    await interaction.deferReply({ ephemeral: true });
+    const threadId = this.#resolveThreadId(interaction);
+    await this.#startFileBrowser(interaction, threadId);
+  }
+
   async #handleSelect(interaction) {
     const uiParts = interaction.customId.split(':');
+    if (uiParts[0] === 'cx' && uiParts[1] === 'files') {
+      const action = uiParts[2];
+      const session = this.#fileSession(
+        uiParts[3],
+        interaction.user.id,
+        action === 'browse' ? 'fileBrowser' : 'linkedFiles',
+      );
+      const selected = Number.parseInt(interaction.values[0], 10);
+      if (!Number.isInteger(selected)) throw new Error('選択されたファイル項目が不正です。');
+      if (action === 'browse') {
+        const entry = session.entries[selected];
+        if (!entry) throw new Error('選択されたファイル項目は期限切れです。Refreshしてください。');
+        if (entry.lockedReason) {
+          await interaction.reply(messageOptions(`ダウンロードできません: ${entry.lockedReason}`, { ephemeral: true }));
+          return;
+        }
+        await interaction.deferUpdate();
+        if (entry.navigable) {
+          await this.#reloadFileBrowser(session, entry.relativePath);
+          await interaction.editReply(fileBrowserPayload(session));
+          return;
+        }
+        try {
+          const target = path.win32.join(session.root, entry.relativePath);
+          const file = await resolveShareFile(target, [session.root]);
+          await this.#downloadFile(interaction, file, session.threadId);
+        } catch (error) {
+          await interaction.followUp(messageOptions(`ダウンロードできません: ${error.message}`, { ephemeral: true }));
+        }
+        return;
+      }
+      if (action === 'linkedpick') {
+        const item = session.items[selected];
+        if (!item) throw new Error('選択されたリンクは期限切れです。カードから開き直してください。');
+        if (item.error) {
+          await interaction.reply(messageOptions(`ダウンロードできません: ${item.error}`, { ephemeral: true }));
+          return;
+        }
+        await interaction.deferUpdate();
+        try {
+          const binding = this.stateStore.binding(session.threadId);
+          const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+          const file = await resolveShareFile(item.reference.target, roots);
+          await this.#downloadFile(interaction, file, session.threadId);
+        } catch (error) {
+          await interaction.followUp(messageOptions(`ダウンロードできません: ${error.message}`, { ephemeral: true }));
+        }
+        return;
+      }
+      return;
+    }
     if (uiParts[0] === 'cx' && uiParts[1] === 'ctl') {
       const action = uiParts[2];
       const threadId = uiParts[3];
@@ -1423,6 +1742,51 @@ export class DiscordController {
   async #handleButton(interaction) {
     const parts = interaction.customId.split(':');
     if (parts[0] !== 'cx') return;
+    if (parts[1] === 'files') {
+      if (parts[2] === 'linked') {
+        await this.#showLinkedFilePicker(interaction);
+        return;
+      }
+      if (parts[2] === 'nav') {
+        const session = this.#fileSession(parts[3], interaction.user.id, 'fileBrowser');
+        const action = parts[4];
+        await interaction.deferUpdate();
+        if (action === 'close') {
+          this.pendingActions.delete(parts[3]);
+          await interaction.editReply({ content: 'ファイルブラウザを閉じました。', embeds: [], components: [] });
+          return;
+        }
+        if (action === 'up') {
+          const parent = session.relativeDirectory ? path.win32.dirname(session.relativeDirectory) : '';
+          await this.#reloadFileBrowser(session, parent === '.' ? '' : parent);
+        } else if (action === 'refresh') {
+          await this.#reloadFileBrowser(session);
+        } else if (action === 'prev') {
+          session.page = Math.max(0, session.page - 1);
+        } else if (action === 'next') {
+          session.page += 1;
+        }
+        session.createdAt = Date.now();
+        await interaction.editReply(fileBrowserPayload(session));
+        return;
+      }
+      if (parts[2] === 'linkednav') {
+        const session = this.#fileSession(parts[3], interaction.user.id, 'linkedFiles');
+        const action = parts[4];
+        await interaction.deferUpdate();
+        if (action === 'close') {
+          this.pendingActions.delete(parts[3]);
+          await interaction.editReply({ content: 'リンク一覧を閉じました。', embeds: [], components: [] });
+          return;
+        }
+        if (action === 'prev') session.page = Math.max(0, session.page - 1);
+        if (action === 'next') session.page += 1;
+        session.createdAt = Date.now();
+        await interaction.editReply(linkedFilePickerPayload(session));
+        return;
+      }
+      return;
+    }
     if (parts[1] === 'ui') {
       const surface = parts[2];
       const action = parts[3];
@@ -1471,6 +1835,11 @@ export class DiscordController {
         if (action === 'controls') {
           await interaction.deferReply({ ephemeral: true });
           await this.#showTaskControls(interaction, threadId);
+          return;
+        }
+        if (action === 'files') {
+          await interaction.deferReply({ ephemeral: true });
+          await this.#startFileBrowser(interaction, threadId);
           return;
         }
         if (action === 'archive') {
@@ -2070,7 +2439,7 @@ export class DiscordController {
       projectId: target.project.id,
       subscribe: !archived && (!existingBinding || existingBinding.archived),
     });
-    if (created || existingBinding?.transcriptVersion !== 10) {
+    if (created || existingBinding?.transcriptVersion !== 11) {
       await this.#reconcileThreadTranscript(thread.id, { channel, archived });
     }
     await this.#ensureTaskPanel(thread, channel, archived);
@@ -2195,9 +2564,14 @@ export class DiscordController {
     };
     const actualEmbed = normalizeEmbed(message.embeds[0]);
     const expectedEmbed = normalizeEmbed(options.embeds[0]);
+    const componentData = (component) => (typeof component?.toJSON === 'function' ? component.toJSON() : component);
     return message.content === (options.content ?? '')
       && message.embeds.length === 1
       && isDeepStrictEqual(actualEmbed, expectedEmbed)
+      && isDeepStrictEqual(
+        (message.components ?? []).map(componentData),
+        (options.components ?? []).map(componentData),
+      )
       && (expectsAttachment ? message.attachments.size > 0 : message.attachments.size === 0);
   }
 
@@ -2240,6 +2614,7 @@ export class DiscordController {
 
   #assistantMessageCardOptions(binding, turn, item, existingMessage = null) {
     const value = String(item.text ?? '').trim() || '(empty)';
+    const localFiles = extractLocalFileReferences(value);
     const embed = new EmbedBuilder()
       .setTitle('Codex message')
       .setColor(COLORS.neutral)
@@ -2257,13 +2632,14 @@ export class DiscordController {
     const options = {
       content: '',
       embeds: [embed],
+      components: linkedFilesComponents(localFiles.length),
       attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
       allowedMentions: { parse: [] },
     };
     if (value.length > 3900 && !matchingAttachment) {
       options.files = [this.#textAttachment(value, fullTextName)];
     }
-    return { options, expectsAttachment: value.length > 3900 };
+    return { options, expectsAttachment: value.length > 3900, localFiles };
   }
 
   async #ensureAssistantMessageCard(binding, turn, item, channel, messages, preferredMessageId = null) {
@@ -2315,6 +2691,7 @@ export class DiscordController {
       text: item.text,
       phase: item.phase,
       messageIds: [message.id],
+      localFiles: card.localFiles,
     };
     const patch = {
       assistantEntries,
@@ -2491,6 +2868,7 @@ export class DiscordController {
     }
 
     const value = String(finalText || turn.error?.message || 'このターンにはassistantメッセージが記録されていません。');
+    const localFiles = extractLocalFileReferences(value);
     const embed = new EmbedBuilder()
       .setTitle(`Codex turn ${turn.status === 'completed' ? 'completed' : turn.status}`)
       .setColor(turn.status === 'completed' ? COLORS.completed : COLORS.error)
@@ -2507,6 +2885,7 @@ export class DiscordController {
     const options = {
       content: '',
       embeds: [embed],
+      components: linkedFilesComponents(localFiles.length),
       attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
       allowedMentions: { parse: [] },
     };
@@ -2545,6 +2924,7 @@ export class DiscordController {
       liveMessageId: null,
       cardMessageId: message.id,
       finalMessageIds: [message.id],
+      finalLocalFiles: localFiles,
       status: turn.status,
       finalizedAt: new Date().toISOString(),
     });
@@ -2568,10 +2948,12 @@ export class DiscordController {
         && candidate.embeds.some((embed) => embed.title === 'Codex running')
         && (!view.currentMessageId || this.#embedAssistantMessageId(candidate) === view.currentMessageId));
     }
+    const localFiles = extractLocalFileReferences(view.text);
+    const components = linkedFilesComponents(localFiles.length);
     if (message) {
-      await message.edit({ content: '', embeds: [this.#turnEmbed(view)], attachments: [], allowedMentions: { parse: [] } });
+      await message.edit({ content: '', embeds: [this.#turnEmbed(view)], components, attachments: [], allowedMentions: { parse: [] } });
     } else {
-      message = await channel.send({ embeds: [this.#turnEmbed(view)], allowedMentions: { parse: [] } });
+      message = await channel.send({ embeds: [this.#turnEmbed(view)], components, allowedMentions: { parse: [] } });
     }
     messages.set(message.id, message);
     view.messageId = message.id;
@@ -2587,6 +2969,7 @@ export class DiscordController {
         text: view.text,
         phase: view.currentPhase,
         messageIds: [message.id],
+        localFiles,
       };
       patch.assistantEntries = assistantEntries;
       patch.assistantMessageIds = [...new Set(Object.values(assistantEntries)
@@ -2749,7 +3132,7 @@ export class DiscordController {
     const latestCompleted = completedTurns.at(-1);
     const latestUsers = latestCompleted ? this.#userMessagesFromThread({ turns: [latestCompleted] }) : [];
     this.stateStore.setBinding(threadId, {
-      transcriptVersion: 10,
+      transcriptVersion: 11,
       snapshotInitialized: true,
       lastCompletedTurnId: latestCompleted?.id ?? binding.lastCompletedTurnId ?? null,
       lastCompletionMessageId: this.stateStore.turnRecord(threadId, latestCompleted?.id)?.finalMessageIds?.[0]
@@ -3522,7 +3905,7 @@ export class DiscordController {
     const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
     if (!channel) return;
     const latestBinding = this.stateStore.binding(binding.threadId);
-    const needsHistory = latestBinding?.transcriptVersion !== 10 || missedCompletion?.needsCompletionMessage;
+    const needsHistory = latestBinding?.transcriptVersion !== 11 || missedCompletion?.needsCompletionMessage;
     const hasActiveTurn = (thread.turns ?? []).some((turn) => turn.status === 'inProgress');
     if (needsHistory) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });

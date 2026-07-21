@@ -4,6 +4,7 @@ import process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { AppServerClient } from '../src/app-server-client.mjs';
 import { dataDir, loadConfig } from '../src/config.mjs';
+import { extractLocalFileReferences } from '../src/local-file-share.mjs';
 import {
   completionTextFromSession,
   finalTextFromTurn,
@@ -55,6 +56,10 @@ function userEmbedIdentity(message) {
   return null;
 }
 
+function hasLinkedFilesButton(message) {
+  return message.components.some((row) => row.components.some((component) => component.customId === 'cx:files:linked'));
+}
+
 async function fetchHistory(channel) {
   const result = new Map();
   let before;
@@ -83,7 +88,7 @@ try {
   const guild = await client.guilds.fetch(config.guildId);
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
     stats.channels += 1;
-    if (binding.transcriptVersion !== 10) errors.push(`${threadId}: transcriptVersion is not 10.`);
+    if (binding.transcriptVersion !== 11) errors.push(`${threadId}: transcriptVersion is not 11.`);
     if (!binding.projectId) errors.push(`${threadId}: projectId is missing.`);
     const channel = await guild.channels.fetch(binding.channelId).catch(() => null);
     if (!channel?.isTextBased()) {
@@ -207,6 +212,10 @@ try {
         if (card.embeds[0]?.description !== truncate(value, 3900)) {
           errors.push(`${threadId}/${turnId}/${itemId}: past assistant card does not match app-server state.`);
         }
+        const expectedLocalFiles = extractLocalFileReferences(value);
+        if (hasLinkedFilesButton(card) !== (expectedLocalFiles.length > 0)) {
+          errors.push(`${threadId}/${turnId}/${itemId}: assistant card linked-file button does not match its text.`);
+        }
         const attachmentNames = [...card.attachments.values()].map((attachment) => attachment.name);
         const fullTextName = `codex-turn-${turnId}-${itemId}-assistant.txt`;
         const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
@@ -253,6 +262,10 @@ try {
           const actualText = card?.embeds[0]?.description ?? '';
           if (actualText !== truncate(expectedText, 3900)) {
             errors.push(`${threadId}/${turnId}: past card message does not match the authoritative completion text.`);
+          }
+          const expectedLocalFiles = extractLocalFileReferences(expectedText);
+          if (card && hasLinkedFilesButton(card) !== (expectedLocalFiles.length > 0)) {
+            errors.push(`${threadId}/${turnId}: final card linked-file button does not match its text.`);
           }
           const attachmentNames = [...(card?.attachments.values() ?? [])].map((attachment) => attachment.name);
           const duplicateAttachmentNames = attachmentNames.filter((name, index) => attachmentNames.indexOf(name) !== index);
