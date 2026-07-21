@@ -20,6 +20,9 @@ outbound connection to Discord.
   panels expose delivery mode, watch level, detailed status, task-scoped
   pending requests, a task control center, archive/restore, and confirmed
   interrupt, plus a paged project-file browser.
+- Reposts and pins the task control panel immediately below each terminal turn
+  card. The previous bot-owned task panel is removed only after the replacement
+  ID is persisted, so mobile users always find controls at the latest position.
 - Provides a dropdown-first task control center backed by live app-server
   catalogs for model, reasoning effort, named permission profile, and
   Plan/Default mode. Additional screens expose Fast/service tier, personality,

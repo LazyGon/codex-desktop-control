@@ -6,6 +6,171 @@ import os from 'node:os';
 import path from 'node:path';
 import { ChannelType } from 'discord.js';
 import { DiscordController } from '../src/discord-controller.mjs';
+import { taskPanelMarker } from '../src/discord-panels.mjs';
+
+test('completed turns replace the pinned task panel below the final card exactly once', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  codex.threadMetadata = async () => ({ thread: { path: null } });
+  codex.readThread = async () => ({
+    thread: {
+      turns: [{
+        id: 'turn-complete',
+        status: 'completed',
+        items: [
+          { type: 'userMessage', id: 'persisted-user', content: [{ type: 'text', text: 'Do the work.' }] },
+          { type: 'agentMessage', id: 'final-1', phase: 'final_answer', text: 'Finished.' },
+        ],
+      }],
+    },
+  });
+  const binding = {
+    threadId: 'thread-panel',
+    channelId: 'task-channel',
+    name: 'Panel task',
+    cwd: 'C:\\work',
+    watchLevel: 'normal',
+    archived: false,
+    taskStatus: 'active',
+    controlPanelMessageId: 'panel-old',
+    lastPanelCompletionTurnId: null,
+    turnMessages: {},
+  };
+  const stateStore = {
+    binding: (threadId) => (threadId === binding.threadId ? structuredClone(binding) : null),
+    turnRecord: (threadId, turnId) => binding.turnMessages[turnId] ? structuredClone(binding.turnMessages[turnId]) : null,
+    setTurnRecord: (threadId, turnId, patch) => {
+      binding.turnMessages[turnId] = { ...binding.turnMessages[turnId], ...patch };
+    },
+    setBinding: (threadId, patch) => { Object.assign(binding, patch); },
+  };
+
+  const channelMessages = new Map();
+  const sent = [];
+  let nextMessage = 1;
+  const collection = (source) => Object.assign(new Map(source), {
+    last: () => [...source.values()].at(-1) ?? null,
+    find: (predicate) => [...source.values()].find(predicate),
+  });
+  const makeMessage = (id, options) => {
+    const message = {
+      id,
+      url: `https://discord.test/channels/guild/task-channel/${id}`,
+      author: { id: 'bot-user', bot: true },
+      content: options.content ?? '',
+      embeds: (options.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
+      components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
+      attachments: new Map(),
+      pinned: false,
+      edit: async (next) => {
+        message.content = next.content ?? message.content;
+        if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+        if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
+        return message;
+      },
+      pin: async () => { message.pinned = true; return message; },
+      unpin: async () => { message.pinned = false; return message; },
+      delete: async () => { channelMessages.delete(message.id); },
+    };
+    channelMessages.set(id, message);
+    return message;
+  };
+  const oldPanel = makeMessage('panel-old', {
+    embeds: [{ footer: { text: taskPanelMarker(binding.threadId) } }],
+  });
+  oldPanel.pinned = true;
+  const channel = {
+    id: 'task-channel',
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? channelMessages.get(value) ?? null
+        : collection(channelMessages)),
+      fetchPinned: async () => collection(new Map([...channelMessages].filter(([, message]) => message.pinned))),
+    },
+    send: async (options) => {
+      const message = makeMessage(`task-message-${nextMessage++}`, options);
+      sent.push(message);
+      return message;
+    },
+  };
+  client.channels = { fetch: async () => channel };
+
+  const completionMessages = new Map();
+  const completions = {
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? completionMessages.get(value) ?? null
+        : collection(completionMessages)),
+    },
+    send: async (options) => {
+      const message = {
+        id: `completion-${completionMessages.size + 1}`,
+        author: { id: 'bot-user', bot: true },
+        content: options.content,
+      };
+      completionMessages.set(message.id, message);
+      return message;
+    },
+  };
+
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      allowedUserIds: ['user-1'],
+      completionMentionUserId: 'user-1',
+      liveUpdateIntervalMs: 10,
+    },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({ completions });
+  controller.canPinControlPanels = true;
+  controller.attach();
+
+  const notification = {
+    method: 'turn/completed',
+    params: {
+      threadId: binding.threadId,
+      turn: {
+        id: 'turn-complete',
+        status: 'completed',
+        items: [
+          { type: 'userMessage', id: 'live-user', content: [{ type: 'text', text: 'Do the work.' }] },
+          { type: 'agentMessage', id: 'final-1', phase: 'final_answer', text: 'Finished.' },
+        ],
+      },
+    },
+  };
+  codex.emit('notification', notification);
+  for (let attempt = 0; attempt < 100 && binding.lastPanelCompletionTurnId !== 'turn-complete'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(binding.lastPanelCompletionTurnId, 'turn-complete');
+  assert.equal(channelMessages.has('panel-old'), false);
+  const panel = channelMessages.get(binding.controlPanelMessageId);
+  assert.ok(panel);
+  assert.equal(panel.pinned, true);
+  assert.equal(panel.embeds[0].footer.text, taskPanelMarker(binding.threadId));
+  assert.equal(panel.embeds[0].fields.find((field) => field.name === 'Status').value, 'idle');
+  assert.deepEqual(Object.keys(binding.turnMessages['turn-complete'].userEntries), ['persisted-user']);
+  assert.equal(binding.turnMessages['turn-complete'].userEntries['persisted-user'].messageIds.length, 1);
+  const finalIndex = sent.findIndex((message) => message.embeds[0]?.title === 'Codex turn completed');
+  const panelIndex = sent.findIndex((message) => message.id === panel.id);
+  assert.ok(finalIndex >= 0 && panelIndex > finalIndex);
+
+  const firstPanelId = panel.id;
+  codex.emit('notification', notification);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(binding.controlPanelMessageId, firstPanelId);
+  assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === taskPanelMarker(binding.threadId)).length, 1);
+  if (controller.taskSyncDebounceTimer) clearTimeout(controller.taskSyncDebounceTimer);
+});
 
 test('ordinary allowed-user messages in bound task channels are delivered once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));

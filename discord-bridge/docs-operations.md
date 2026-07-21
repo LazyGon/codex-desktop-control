@@ -30,7 +30,8 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    or one text file up to 200 KB, can be attached to an ordinary message.
 5. Watch the latest turn card. It shows current commentary, reasoning, and work
    state. When the next commentary starts, the previous post becomes a compact
-   past card. Turn completion leaves a final card with task and turn identity.
+   past card. Turn completion leaves a final card with task and turn identity,
+   then reposts the pinned task control panel directly below it.
 6. Respond to approval or input cards when they appear.
 7. Use `Project files` in the pinned task panel to browse the task working
    directory. Select a directory to open it or a file to post it into the

@@ -99,7 +99,9 @@ unbound channels in control, archive, or unrelated categories.
 `codex-remote` and every task channel contain a pinned control panel. Task
 panels provide delivery-mode and watch-level selects plus status refresh,
 pending requests, a task control center, archive/restore, and confirmed
-interrupt actions. They also provide a project-file browser, while assistant
+interrupt actions. After every turn ends, the task panel is reposted and pinned
+below the final card so its controls remain at the latest channel position.
+They also provide a project-file browser, while assistant
 cards expose safe local file links for download to the private task channel.
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
 The task control center exposes model, reasoning effort,

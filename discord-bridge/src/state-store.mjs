@@ -61,6 +61,7 @@ export class StateStore {
       binding.snapshotInitialized ??= true;
       binding.turnMessages ??= {};
       binding.controlPanelMessageId ??= null;
+      binding.lastPanelCompletionTurnId ??= null;
     }
     this.value.infrastructure.archiveCategoryIds ??= [];
     this.value.infrastructure.controlPanelMessageId ??= null;

@@ -2310,6 +2310,68 @@ export class DiscordController {
     });
   }
 
+  async #repostTaskPanelAfterCompletion(threadId, turnId, channel) {
+    const key = `task:${threadId}`;
+    const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      const binding = this.stateStore.binding(threadId);
+      if (!binding || binding.lastPanelCompletionTurnId === turnId) return null;
+      const marker = taskPanelMarker(threadId);
+      let oldPanel = binding.controlPanelMessageId
+        ? await channel.messages.fetch(binding.controlPanelMessageId).catch(() => null)
+        : null;
+      if (oldPanel && this.#panelMarker(oldPanel) !== marker) oldPanel = null;
+      if (!oldPanel && typeof channel.messages.fetchPinned === 'function') {
+        const pinned = await channel.messages.fetchPinned().catch(() => null);
+        oldPanel = pinned
+          ? [...pinned.values()].find((candidate) => candidate.author.id === this.client.user.id
+            && this.#panelMarker(candidate) === marker) ?? null
+          : null;
+      }
+
+      const completedBinding = { ...binding, taskStatus: 'idle' };
+      const thread = this.#threadFromBinding(completedBinding);
+      const newPanel = await channel.send(taskPanelPayload({ thread, binding: completedBinding }));
+      if (this.canPinControlPanels && typeof newPanel.pin === 'function') {
+        try {
+          await newPanel.pin('Keep the latest completed Codex task controls available');
+        } catch (error) {
+          await newPanel.delete().catch(() => {});
+          this.#log('control-panel-pin-failed', {
+            channelId: channel.id,
+            messageId: newPanel.id,
+            error: error.message,
+          });
+          throw error;
+        }
+      }
+      this.stateStore.setBinding(threadId, {
+        controlPanelMessageId: newPanel.id,
+        lastPanelCompletionTurnId: turnId,
+        taskStatus: 'idle',
+      });
+      if (oldPanel && oldPanel.id !== newPanel.id && oldPanel.author.id === this.client.user.id) {
+        await oldPanel.delete().catch(async (error) => {
+          if (error.code === 10008) return;
+          await oldPanel.edit({ components: [] }).catch(() => {});
+          if (oldPanel.pinned && typeof oldPanel.unpin === 'function') await oldPanel.unpin().catch(() => {});
+          this.#log('superseded-task-panel-delete-failed', {
+            channelId: channel.id,
+            messageId: oldPanel.id,
+            error: error.message,
+          });
+        });
+      }
+      return newPanel;
+    });
+    this.panelSyncPromises.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.panelSyncPromises.get(key) === operation) this.panelSyncPromises.delete(key);
+    }
+  }
+
   #projectCategoryName(descriptor) {
     const collision = this.stateStore.projectCategories()
       .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
@@ -3121,6 +3183,7 @@ export class DiscordController {
       requiredByTurn.get(value.turn.id).push(value.item);
     }
 
+    const latestCompleted = completedTurns.at(-1);
     if (!activeOnly) {
       for (const turn of completedTurns) {
         await this.#ensureTurnUserMessages(binding, turn, channel, messages);
@@ -3133,6 +3196,11 @@ export class DiscordController {
         ) || turn.error?.message;
         await this.#ensureTurnFinalMessages(binding, turn, finalText, channel, messages);
       }
+    } else if (latestCompleted) {
+      // Live notification item IDs can differ from the stable IDs returned by
+      // thread/read. Reconcile only the latest completed user cards here so a
+      // reconnect converges without backfilling old commentary.
+      await this.#ensureTurnUserMessages(binding, latestCompleted, channel, messages);
     }
 
     if (activeTurn) {
@@ -3166,7 +3234,6 @@ export class DiscordController {
     }
     await this.#cleanupLegacyTranscriptMessages(channel, messages, protectedIds);
     if (activeOnly) return { thread, latestCompleted: completedTurns.at(-1) };
-    const latestCompleted = completedTurns.at(-1);
     const latestUsers = latestCompleted ? this.#userMessagesFromThread({ turns: [latestCompleted] }) : [];
     this.stateStore.setBinding(threadId, {
       transcriptVersion: 11,
@@ -3461,11 +3528,17 @@ export class DiscordController {
     view.text = finalTextFromTurn(turn, completionText)
       || turn.error?.message
       || 'このターンにはassistantメッセージが記録されていません。';
-    await this.#ensureTurnUserMessages(binding, turn, channel, messages);
+    let stableTurn = turn;
+    if (typeof this.codex.readThread === 'function') {
+      const persisted = await this.codex.readThread(binding.threadId).catch(() => null);
+      const persistedTurn = persisted?.thread?.turns?.find((candidate) => candidate.id === turn.id);
+      if (persistedTurn?.items?.length) stableTurn = { ...turn, items: persistedTurn.items };
+    }
+    await this.#ensureTurnUserMessages(binding, stableTurn, channel, messages);
     const finalText = view.text;
     const completionMessage = await this.#ensureTurnFinalMessages(
       binding,
-      turn,
+      stableTurn,
       finalText,
       channel,
       messages,
@@ -3474,6 +3547,14 @@ export class DiscordController {
     this.stateStore.setBinding(binding.threadId, {
       lastCompletedTurnId: turn.id,
       lastCompletionMessageId: completionMessage.id,
+      taskStatus: 'idle',
+    });
+    await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
+      this.#log('task-panel-completion-repost-failed', {
+        threadId: binding.threadId,
+        turnId: turn.id,
+        error: error.stack ?? error.message,
+      });
     });
     if (turn.status === 'completed') {
       await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
@@ -3948,6 +4029,15 @@ export class DiscordController {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });
     } else if (hasActiveTurn) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel, activeOnly: true });
+    }
+    if (missedCompletion?.turn?.id) {
+      await this.#repostTaskPanelAfterCompletion(binding.threadId, missedCompletion.turn.id, channel).catch((error) => {
+        this.#log('task-panel-restored-completion-repost-failed', {
+          threadId: binding.threadId,
+          turnId: missedCompletion.turn.id,
+          error: error.stack ?? error.message,
+        });
+      });
     }
     if (!missedCompletion?.needsCompletionNotice) return;
 
