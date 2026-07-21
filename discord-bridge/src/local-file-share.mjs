@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 const BLOCKED_DIRECTORY_NAMES = new Map([
@@ -286,92 +285,7 @@ export async function resolveShareFile(targetValue, roots) {
   };
 }
 
-export async function inspectFileTransfer(file, { chunkBytes, maxBytes }) {
-  if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) throw new Error('Invalid transfer chunk size.');
-  if (file.size > maxBytes) throw new Error(`ファイルが転送上限を超えています (${file.size} > ${maxBytes} bytes)。`);
-  const totalParts = Math.max(1, Math.ceil(file.size / chunkBytes));
-  const wholeHash = createHash('sha256');
-  const parts = [];
-  const handle = await fs.promises.open(file.path, 'r');
-  try {
-    let offset = 0;
-    for (let index = 0; index < totalParts; index += 1) {
-      const size = file.size === 0 ? 0 : Math.min(chunkBytes, file.size - offset);
-      const buffer = Buffer.alloc(size);
-      if (size > 0) {
-        const { bytesRead } = await handle.read(buffer, 0, size, offset);
-        if (bytesRead !== size) throw new Error('ファイル読み取り中にサイズが変化しました。');
-      }
-      wholeHash.update(buffer);
-      parts.push({
-        index,
-        offset,
-        size,
-        sha256: createHash('sha256').update(buffer).digest('hex'),
-      });
-      offset += size;
-    }
-  } finally {
-    await handle.close();
-  }
-  const current = await fs.promises.stat(file.path);
-  if (current.size !== file.size || current.mtime.toISOString() !== file.mtime) {
-    throw new Error('検査中にファイルが更新されました。もう一度選択してください。');
-  }
-  return {
-    ...file,
-    chunkBytes,
-    split: totalParts > 1,
-    sha256: wholeHash.digest('hex'),
-    parts,
-  };
-}
-
-export async function readTransferPart(transfer, part) {
-  const handle = await fs.promises.open(transfer.path, 'r');
-  try {
-    const buffer = Buffer.alloc(part.size);
-    if (part.size > 0) {
-      const { bytesRead } = await handle.read(buffer, 0, part.size, part.offset);
-      if (bytesRead !== part.size) throw new Error('ファイル読み取り中にサイズが変化しました。');
-    }
-    const hash = createHash('sha256').update(buffer).digest('hex');
-    if (hash !== part.sha256) throw new Error('検査後にファイル内容が変化しました。もう一度選択してください。');
-    return buffer;
-  } finally {
-    await handle.close();
-  }
-}
-
 export function safeAttachmentName(fileName, suffix = '') {
   const safeName = String(fileName).replace(/[\x00-\x1f<>:"/\\|?*]/g, '_');
   return `${safeName.slice(0, Math.max(1, 180 - suffix.length))}${suffix}`;
-}
-
-export function transferPartName(fileName, index, total) {
-  const width = Math.max(3, String(total).length);
-  const suffix = `.part${String(index + 1).padStart(width, '0')}-of-${String(total).padStart(width, '0')}`;
-  return safeAttachmentName(fileName, suffix);
-}
-
-export function transferManifest(transfer) {
-  return {
-    schema: 'codex-discord-file-transfer/v1',
-    format: transfer.split ? 'raw-concatenation-v1' : 'single-file-v1',
-    originalName: transfer.name,
-    relativePath: transfer.relativePath,
-    size: transfer.size,
-    modifiedAt: transfer.mtime,
-    sha256: transfer.sha256,
-    chunkBytes: transfer.chunkBytes,
-    parts: transfer.parts.map((part) => ({
-      name: transfer.split
-        ? transferPartName(transfer.name, part.index, transfer.parts.length)
-        : transfer.name,
-      index: part.index + 1,
-      offset: part.offset,
-      size: part.size,
-      sha256: part.sha256,
-    })),
-  };
 }

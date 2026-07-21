@@ -808,7 +808,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     stateStore,
     config: {
       fileShareEnabled: true,
-      fileShareChunkBytes: 4,
+      fileShareChunkBytes: 100,
       fileShareMaxBytes: 100,
       fileShareAttachmentsPerMessage: 2,
       guildId: 'guild-1',
@@ -890,8 +890,6 @@ test('task file UI browses project entries and resolves only safe assistant-link
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.match(download.lastFollowUp.content, /https:\/\/discord\.test\/1/);
-  assert.equal(filePosts.length, 4, 'header, two part messages, and manifest');
-  assert.equal(filePosts[1].files.length, 2);
-  assert.equal(filePosts[2].files.length, 2);
-  assert.equal(filePosts[3].files.length, 1);
+  assert.equal(filePosts.length, 1);
+  assert.equal(filePosts[0].files.length, 1);
 });

@@ -38,9 +38,11 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    task autocomplete. On an assistant card, use `Linked files` to select a
    local file that Codex linked in its message.
 
-Files larger than one attachment are posted as numbered raw chunks followed by
-a `.codex-transfer.json` manifest. Download every part, concatenate them in
-numeric order, and compare the result with the manifest's whole-file SHA-256.
+Files that fit in one attachment are posted directly. Larger files are posted
+as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
+volume into the same folder and open the `.7z.001` file with a 7z-compatible
+phone or desktop app. The manifest records the original-file and per-volume
+SHA-256 hashes.
 Entries marked `LOCK` remain indexed but cannot be downloaded because they are
 secret/protected, outside the project boundary, or a filesystem link.
 The project browser itself never leaves the task working directory. A file

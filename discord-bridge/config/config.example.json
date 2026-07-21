@@ -21,6 +21,7 @@
   "fileShareChunkBytes": 7500000,
   "fileShareMaxBytes": 512000000,
   "fileShareAttachmentsPerMessage": 4,
+  "fileShareArchiverPath": null,
   "autoStartSharedDesktop": true,
   "sharedLauncherPath": "..\\launcher\\CodexSharedLauncher.exe",
   "appServerUrl": null

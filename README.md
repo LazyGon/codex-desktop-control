@@ -27,6 +27,7 @@ to a LAN or the internet.
 - Windows 10 or 11 with Codex Desktop installed for the current user.
 - Windows PowerShell 5.1 and the .NET Framework C# compiler.
 - Node.js 22 or newer with `npm` available on `PATH`.
+- 7-Zip for file transfers larger than one Discord attachment.
 - A private Discord server and a Discord application with a bot.
 
 Enable **Message Content Intent** on the Discord application's **Bot** page if
@@ -100,7 +101,7 @@ panels provide delivery-mode and watch-level selects plus status refresh,
 pending requests, a task control center, archive/restore, and confirmed
 interrupt actions. They also provide a project-file browser, while assistant
 cards expose safe local file links for download to the private task channel.
-Large files are split into ordered Discord attachments with a SHA-256 manifest.
+Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
 The task control center exposes model, reasoning effort,
 permission profile, Plan/Default mode, Fast/service tier, personality, memory,
 goal, compact, fork, review, and app-server background-terminal controls. The

@@ -31,6 +31,7 @@ const defaults = {
   fileShareChunkBytes: 7_500_000,
   fileShareMaxBytes: 512_000_000,
   fileShareAttachmentsPerMessage: 4,
+  fileShareArchiverPath: null,
   autoStartSharedDesktop: true,
   sharedLauncherPath: defaultSharedLauncherPath,
   appServerUrl: null,
@@ -96,6 +97,11 @@ export function loadConfig() {
     || config.fileShareAttachmentsPerMessage < 1
     || config.fileShareAttachmentsPerMessage > 10) {
     errors.push('fileShareAttachmentsPerMessage must be an integer from 1 to 10.');
+  }
+  if (config.fileShareArchiverPath
+    && (!path.win32.isAbsolute(config.fileShareArchiverPath)
+      || path.win32.basename(config.fileShareArchiverPath).toLocaleLowerCase('en-US') !== '7z.exe')) {
+    errors.push('fileShareArchiverPath must be an absolute path to 7z.exe or null.');
   }
   if (errors.length) throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);
   return config;

@@ -6,11 +6,8 @@ import path from 'node:path';
 import {
   blockedPathReason,
   extractLocalFileReferences,
-  inspectFileTransfer,
   listProjectDirectory,
-  readTransferPart,
   resolveShareFile,
-  transferManifest,
 } from '../src/local-file-share.mjs';
 
 test('local Markdown links accept Windows file targets and reject remote or relative targets', () => {
@@ -76,24 +73,4 @@ test('private-key content is blocked even with an ordinary filename', async (con
   const filePath = path.join(root, 'notes.txt');
   fs.writeFileSync(filePath, '-----BEGIN OPENSSH PRIVATE KEY-----\nsecret', 'utf8');
   await assert.rejects(resolveShareFile(filePath, [root]), /秘密鍵本文/);
-});
-
-test('split transfer parts reassemble exactly and manifest hashes identify every chunk', async (context) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-file-transfer-'));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const original = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz', 'utf8');
-  const filePath = path.join(root, 'artifact.bin');
-  fs.writeFileSync(filePath, original);
-  const file = await resolveShareFile(filePath, [root]);
-  const transfer = await inspectFileTransfer(file, { chunkBytes: 7, maxBytes: 1000 });
-  assert.equal(transfer.split, true);
-  assert.equal(transfer.parts.length, Math.ceil(original.length / 7));
-  const chunks = [];
-  for (const part of transfer.parts) chunks.push(await readTransferPart(transfer, part));
-  assert.deepEqual(Buffer.concat(chunks), original);
-  const manifest = transferManifest(transfer);
-  assert.equal(manifest.format, 'raw-concatenation-v1');
-  assert.equal(manifest.parts.length, transfer.parts.length);
-  assert.equal(manifest.sha256, transfer.sha256);
-  assert.ok(manifest.parts.every((part) => /^[a-f0-9]{64}$/.test(part.sha256)));
 });

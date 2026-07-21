@@ -47,14 +47,19 @@ import {
 } from './discord-file-ui.mjs';
 import {
   extractLocalFileReferences,
-  inspectFileTransfer,
   listProjectDirectory,
-  readTransferPart,
   resolveShareFile,
   safeAttachmentName,
-  transferManifest,
-  transferPartName,
 } from './local-file-share.mjs';
+import {
+  cleanupStaleSplitArchives,
+  createSplit7zArchive,
+  disposeSplitArchive,
+  hashResolvedFile,
+  readArchiveVolume,
+  readHashedFile,
+  splitArchiveManifest,
+} from './split-archive.mjs';
 import {
   accountUsageEmbed,
   goalPayload,
@@ -106,6 +111,7 @@ export class DiscordController {
     this.stateStore = stateStore;
     this.config = config;
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
+    this.fileTransferTempRoot = path.join(path.dirname(logDir), 'data', 'file-transfers');
     this.pendingRequests = new Map();
     this.pendingActions = new Map();
     this.turnViews = new Map();
@@ -154,6 +160,11 @@ export class DiscordController {
   }
 
   async ready() {
+    const removedStaleTransfers = await cleanupStaleSplitArchives(this.fileTransferTempRoot).catch((error) => {
+      this.#log('file-transfer-cleanup-error', { error: error.message });
+      return 0;
+    });
+    if (removedStaleTransfers > 0) this.#log('file-transfer-cleanup', { removed: removedStaleTransfers });
     this.infrastructureReady = this.#ensureInfrastructure();
     const infrastructure = await this.infrastructureReady;
     await infrastructure.guild.commands.set(commandPayload);
@@ -1146,62 +1157,88 @@ export class DiscordController {
   }
 
   async #sendLocalFile(channel, file, userId) {
-    const transfer = await inspectFileTransfer(file, {
-      chunkBytes: this.config.fileShareChunkBytes ?? 7_500_000,
-      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
-    });
-    const details = [
-      '**Codex local file**',
-      `Path: \`${truncate(transfer.relativePath, 1200)}\``,
-      `Size: ${formatFileSize(transfer.size)}`,
-      `SHA-256: \`${transfer.sha256}\``,
-    ];
-    let firstMessage;
-    if (!transfer.split) {
-      const content = await readTransferPart(transfer, transfer.parts[0]);
-      firstMessage = await channel.send({
-        content: details.join('\n'),
+    const volumeBytes = this.config.fileShareChunkBytes ?? 7_500_000;
+    const maxBytes = this.config.fileShareMaxBytes ?? 512_000_000;
+    if (file.size <= volumeBytes) {
+      const transfer = await hashResolvedFile(file, maxBytes);
+      const content = await readHashedFile(transfer);
+      const message = await channel.send({
+        content: [
+          '**Codex local file**',
+          `Path: \`${truncate(transfer.relativePath, 1200)}\``,
+          `Size: ${formatFileSize(transfer.size)}`,
+          `SHA-256: \`${transfer.sha256}\``,
+        ].join('\n'),
         files: [new AttachmentBuilder(content, { name: safeAttachmentName(transfer.name) })],
         allowedMentions: { parse: [] },
       });
-    } else {
-      details.push(
-        `Parts: ${transfer.parts.length} (raw binary chunks)`,
-        '全パートを番号順にバイナリ結合し、manifestのSHA-256で検証してください。',
-      );
-      firstMessage = await channel.send(messageOptions(details.join('\n')));
+      this.#log('local-file-downloaded', {
+        userId,
+        channelId: channel.id,
+        relativePath: transfer.relativePath,
+        size: transfer.size,
+        volumes: 1,
+        format: 'direct-file-v1',
+        sha256: transfer.sha256,
+      });
+      return message.url ?? this.#discordMessageUrl(channel.id, message.id);
+    }
+
+    const archive = await createSplit7zArchive(file, {
+      volumeBytes,
+      maxBytes,
+      tempRoot: this.fileTransferTempRoot,
+      archiverPath: this.config.fileShareArchiverPath,
+    });
+    try {
+      const archiveSize = archive.volumes.reduce((total, volume) => total + volume.size, 0);
+      const details = [
+        '**Codex local file archive**',
+        `Path: \`${truncate(archive.original.relativePath, 1200)}\``,
+        `Original: ${formatFileSize(archive.original.size)}`,
+        `Archive: ${formatFileSize(archiveSize)} / 7z / ${archive.volumes.length} volume(s)`,
+        `Original SHA-256: \`${archive.original.sha256}\``,
+        archive.volumes.length > 1
+          ? `全volumeを同じフォルダへ保存し、\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`
+          : `\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`,
+      ];
+      const firstMessage = await channel.send(messageOptions(details.join('\n')));
       const perMessage = this.config.fileShareAttachmentsPerMessage ?? 4;
-      for (let index = 0; index < transfer.parts.length; index += perMessage) {
-        const group = transfer.parts.slice(index, index + perMessage);
+      for (let index = 0; index < archive.volumes.length; index += perMessage) {
+        const group = archive.volumes.slice(index, index + perMessage);
         const files = [];
-        for (const part of group) {
+        for (const volume of group) {
           files.push(new AttachmentBuilder(
-            await readTransferPart(transfer, part),
-            { name: transferPartName(transfer.name, part.index, transfer.parts.length) },
+            await readArchiveVolume(volume),
+            { name: volume.name },
           ));
         }
         await channel.send({
-          content: `**${transfer.name}** parts ${group[0].index + 1}-${group.at(-1).index + 1}/${transfer.parts.length}`,
+          content: `**${archive.archiveName}** volumes ${group[0].index + 1}-${group.at(-1).index + 1}/${archive.volumes.length}`,
           files,
           allowedMentions: { parse: [] },
         });
       }
-      const manifest = Buffer.from(`${JSON.stringify(transferManifest(transfer), null, 2)}\n`, 'utf8');
+      const manifest = Buffer.from(`${JSON.stringify(splitArchiveManifest(archive), null, 2)}\n`, 'utf8');
       await channel.send({
-        content: `**${transfer.name}** transfer manifest`,
-        files: [new AttachmentBuilder(manifest, { name: safeAttachmentName(transfer.name, '.codex-transfer.json') })],
+        content: `**${archive.archiveName}** transfer manifest`,
+        files: [new AttachmentBuilder(manifest, { name: safeAttachmentName(file.name, '.7z-manifest.json') })],
         allowedMentions: { parse: [] },
       });
+      this.#log('local-file-downloaded', {
+        userId,
+        channelId: channel.id,
+        relativePath: archive.original.relativePath,
+        size: archive.original.size,
+        archiveSize,
+        volumes: archive.volumes.length,
+        format: archive.format,
+        sha256: archive.original.sha256,
+      });
+      return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
+    } finally {
+      await disposeSplitArchive(archive);
     }
-    this.#log('local-file-downloaded', {
-      userId,
-      channelId: channel.id,
-      relativePath: transfer.relativePath,
-      size: transfer.size,
-      parts: transfer.parts.length,
-      sha256: transfer.sha256,
-    });
-    return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
   }
 
   async #downloadFile(interaction, file, threadId) {

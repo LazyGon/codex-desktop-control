@@ -54,8 +54,8 @@ outbound connection to Discord.
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
 - Uploads files up to the configured transfer maximum. Files above one Discord
-  attachment are split into ordered raw chunks and accompanied by a JSON
-  manifest containing whole-file and per-part SHA-256 hashes.
+  attachment are packaged as ordered 7z volumes and accompanied by a JSON
+  manifest containing original-file and per-volume SHA-256 hashes.
 - Uses the last public assistant message when an older completed turn has no
   explicit `final_answer`, instead of displaying a missing-text placeholder.
 - Synchronizes the Codex task name into its Discord channel name and prefixes
@@ -175,6 +175,12 @@ re-authorization using the URL printed by the installer. Discord grants
 The token is stored with Windows DPAPI for the current user and a restricted
 file ACL. The plaintext token exists only in the bridge child process
 environment.
+
+Small file downloads are attached directly. Large downloads require 7-Zip on
+the Bridge PC; its usual installation paths are detected automatically, or an
+absolute `7z.exe` path can be set as `fileShareArchiverPath`. Temporary archive
+volumes are deleted after posting, and stale managed transfer directories are
+removed when the Bridge starts.
 
 ## Operations
 
