@@ -74,6 +74,14 @@ outbound connection to Discord.
   Codex task, then reapplies the normalized status-prefixed channel name.
 - Routes command, file-change, additional-permission, user-input, and MCP
   elicitation requests to Discord buttons, selects, and modals.
+- Handles app-server-backed Codex Desktop client tools for task/project
+  listing, task reads, follow-up delivery, local-project task creation,
+  archive/restore, rename, same-directory fork, and confirmed automation
+  create/update/view/delete. Automation files are validated, written atomically
+  under the current Codex home, and heartbeat targets default to the calling
+  task. Desktop-only pinning, projectless/worktree creation, handoff/wait
+  orchestration, interactive Desktop navigation/terminal access, and tools
+  owned by external connectors fail closed with a specific reason.
 - Confirms `interrupt` before using app-server `turn/interrupt`; it does not
   kill the task process.
 - Reconnects indefinitely, re-subscribes bound tasks, reconciles persisted
@@ -87,9 +95,12 @@ outbound connection to Discord.
   `deliver` input. The same input in an unbound channel under a managed project
   category first creates and binds a new task. After app-server accepts the
   input, the bridge replaces the original Discord message with the same orange
-  user-card format used for Desktop input. One image, or one text file up to
-  200 KB, can be attached to an ordinary message. Slash commands remain
-  available for explicit modes and attachments.
+  user-card format used for Desktop input. Each input carries a stable client
+  message ID, so a delayed app-server `userMessage` item no longer turns an
+  accepted instruction into a false send failure; the provisional card is
+  reconciled to the persisted server item ID when it arrives. One image, or one
+  text file up to 200 KB, can be attached to an ordinary message. Slash commands
+  remain available for explicit modes and attachments.
 - Starts at Windows logon and can start the formal shared Desktop launcher when
   the app-server is absent.
 

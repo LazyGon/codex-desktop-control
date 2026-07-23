@@ -74,6 +74,11 @@ import {
   taskStatusEmbed,
   terminalPayload,
 } from './codex-control-ui.mjs';
+import { AutomationStore } from './automation-store.mjs';
+import {
+  ClientToolRouter,
+  ClientToolUnavailableError,
+} from './client-tool-router.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -109,11 +114,21 @@ function userInputField(id, label, { required = true, secret = false, value = nu
 }
 
 export class DiscordController {
-  constructor({ client, codex, stateStore, config, logDir }) {
+  constructor({
+    client,
+    codex,
+    stateStore,
+    config,
+    logDir,
+    automationStore = new AutomationStore(),
+    clientToolRouter = null,
+  }) {
     this.client = client;
     this.codex = codex;
     this.stateStore = stateStore;
     this.config = config;
+    this.automationStore = automationStore;
+    this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.fileTransferTempRoot = path.join(path.dirname(logDir), 'data', 'file-transfers');
     this.pendingRequests = new Map();
@@ -491,7 +506,12 @@ export class DiscordController {
         true,
         message.id,
       );
-      const result = await this.codex.deliver(binding.threadId, prompt, attachment);
+      const result = await this.codex.deliver(
+        binding.threadId,
+        prompt,
+        attachment,
+        reservation.clientUserMessageId,
+      );
       reservation.turnId ??= result.turnId;
       await this.#ensureReservedUserInputPosted(reservation);
       await message.react('✅').catch(() => {});
@@ -1478,7 +1498,12 @@ export class DiscordController {
       const mirror = this.#reserveUserInput(threadId, prompt, `Discord: ${interaction.user.tag}`);
       let result;
       try {
-        result = await this.codex[subcommand](threadId, prompt, attachment);
+        result = await this.codex[subcommand](
+          threadId,
+          prompt,
+          attachment,
+          mirror.clientUserMessageId,
+        );
       } catch (error) {
         this.#removeUserInputReservation(mirror);
         throw error;
@@ -2224,7 +2249,12 @@ export class DiscordController {
       const mirror = this.#reserveUserInput(action.threadId, prompt, `Discord: ${interaction.user.tag}`);
       let result;
       try {
-        result = await this.codex[action.mode](action.threadId, prompt);
+        result = await this.codex[action.mode](
+          action.threadId,
+          prompt,
+          null,
+          mirror.clientUserMessageId,
+        );
       } catch (error) {
         this.#removeUserInputReservation(mirror);
         throw error;
@@ -3694,15 +3724,33 @@ export class DiscordController {
     if (!completed && params.item?.type === 'userMessage') {
       const text = (params.item.content ?? []).map((part) => part.text ?? '').filter(Boolean).join('\n');
       if (text) {
-        const reservation = this.#claimUserInputReservation(binding.threadId, text);
+        const reservation = this.#claimUserInputReservation(
+          binding.threadId,
+          text,
+          params.item.clientId,
+        );
         if (reservation) {
           reservation.turnId ??= params.turnId;
           reservation.userItemId ??= params.item.id;
           reservation.text = text;
         }
-        const mirrored = reservation
-          ? await this.#ensureReservedUserInputPosted(reservation)
-          : await this.#postUserInput(binding.threadId, params.turnId, params.item.id, text, 'Codex Desktop');
+        let mirrored;
+        if (reservation?.state === 'posted'
+          && params.item.id
+          && reservation.postedItemId !== params.item.id) {
+          mirrored = await this.#postUserInput(
+            binding.threadId,
+            params.turnId,
+            params.item.id,
+            text,
+            reservation.source,
+          );
+          reservation.postedItemId = params.item.id;
+        } else {
+          mirrored = reservation
+            ? await this.#ensureReservedUserInputPosted(reservation)
+            : await this.#postUserInput(binding.threadId, params.turnId, params.item.id, text, 'Codex Desktop');
+        }
         if (mirrored && params.item.id) {
           this.stateStore.setBinding(binding.threadId, { lastMirroredUserItemId: params.item.id });
         }
@@ -3971,15 +4019,50 @@ export class DiscordController {
         return;
       }
       if (request.method === 'item/tool/call') {
-        this.codex.respondToServerRequest(request.id, {
-          success: false,
-          contentItems: [{
-            type: 'inputText',
-            text: `Client-side dynamic tool ${request.params?.namespace ?? 'default'}/${request.params?.tool ?? 'unknown'} is not available through Codex Discord Remote. Continue without it or request work that uses app-server tools.`,
-          }],
-        });
-        if (binding) {
-          await this.#postTaskMessage(binding, `**Client tool unavailable through Discord**\n${request.params?.namespace ?? 'default'}/${request.params?.tool ?? 'unknown'}`);
+        const namespace = request.params?.namespace ?? 'default';
+        const tool = request.params?.tool ?? 'unknown';
+        try {
+          const result = await this.clientToolRouter.execute(
+            namespace,
+            tool,
+            request.params?.arguments,
+            { threadId },
+          );
+          this.codex.respondToServerRequest(request.id, {
+            success: true,
+            contentItems: [{
+              type: 'inputText',
+              text: JSON.stringify(result),
+            }],
+          });
+          this.#log('client-tool-completed', {
+            requestId: request.id,
+            threadId,
+            namespace,
+            tool,
+          });
+        } catch (error) {
+          this.codex.respondToServerRequest(request.id, {
+            success: false,
+            contentItems: [{
+              type: 'inputText',
+              text: error.message,
+            }],
+          });
+          this.#log('client-tool-failed', {
+            requestId: request.id,
+            threadId,
+            namespace,
+            tool,
+            unavailable: error instanceof ClientToolUnavailableError,
+            error: error.message,
+          });
+          if (binding && error instanceof ClientToolUnavailableError) {
+            await this.#postTaskMessage(
+              binding,
+              `**Client tool unavailable through Discord**\n\`${namespace}/${tool}\`\n${error.message}`,
+            );
+          }
         }
         return;
       }
@@ -4326,6 +4409,8 @@ export class DiscordController {
       visibleMessageId,
       turnId: null,
       userItemId: null,
+      clientUserMessageId: `discord-${randomKey()}`,
+      postedItemId: null,
       at: Date.now(),
     };
     this.recentUserInputs.push(record);
@@ -4337,10 +4422,14 @@ export class DiscordController {
     if (index >= 0) this.recentUserInputs.splice(index, 1);
   }
 
-  #claimUserInputReservation(threadId, text) {
+  #claimUserInputReservation(threadId, text, clientUserMessageId = null) {
     this.#pruneUserInputReservations();
     const record = this.recentUserInputs.find((candidate) => candidate.threadId === threadId
-      && candidate.text === String(text).trim() && !candidate.echoSeen);
+      && !candidate.echoSeen
+      && (
+        (clientUserMessageId && candidate.clientUserMessageId === clientUserMessageId)
+        || candidate.text === String(text).trim()
+      ));
     if (record) record.echoSeen = true;
     return record ?? null;
   }
@@ -4348,18 +4437,37 @@ export class DiscordController {
   async #ensureReservedUserInputPosted(record) {
     if (!record.postPromise) {
       record.state = 'posting';
-      record.postPromise = this.#waitForReservationIdentity(record)
+      record.postPromise = this.#waitForReservationTurnId(record)
         .then(async () => {
           if (!record.turnId) throw new Error('Codex did not return a turn ID for the user input.');
-          if (!record.userItemId) throw new Error('Codex did not publish an item ID for the user input.');
-          return this.#postUserInput(
+          const itemId = record.userItemId ?? record.clientUserMessageId;
+          if (!record.userItemId) {
+            this.#log('user-input-provisional-id', {
+              threadId: record.threadId,
+              turnId: record.turnId,
+              clientUserMessageId: record.clientUserMessageId,
+            });
+          }
+          const mirrored = await this.#postUserInput(
             record.threadId,
             record.turnId,
-            record.userItemId,
+            itemId,
             record.text,
             record.source,
             record.visibleMessageId,
           );
+          record.postedItemId = itemId;
+          if (record.userItemId && record.userItemId !== record.postedItemId) {
+            await this.#postUserInput(
+              record.threadId,
+              record.turnId,
+              record.userItemId,
+              record.text,
+              record.source,
+            );
+            record.postedItemId = record.userItemId;
+          }
+          return mirrored;
         })
         .then((mirrored) => {
           record.state = 'posted';
@@ -4375,9 +4483,9 @@ export class DiscordController {
     return record.postPromise;
   }
 
-  async #waitForReservationIdentity(record) {
+  async #waitForReservationTurnId(record) {
     for (let attempt = 0;
-      attempt < 100 && (!record.turnId || !record.userItemId);
+      attempt < 100 && !record.turnId;
       attempt += 1) {
       await sleep(50);
     }

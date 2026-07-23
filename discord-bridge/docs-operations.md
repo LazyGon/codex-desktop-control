@@ -81,9 +81,29 @@ Permission changes, context compact, fork, goal removal, and background
 terminal termination always require confirmation. A terminal can be terminated
 only when it is listed by the selected task's app-server background-terminal
 inventory. Discord does not expose arbitrary shell execution, raw PID kill,
-task deletion, filesystem writes or deletion, global configuration mutation,
-or the deprecated rollback API. The only filesystem surface is bounded read-only file
-browsing and download; it does not expose arbitrary paths, writes, or deletion.
+task deletion, arbitrary filesystem writes or deletion, global configuration
+mutation, or the deprecated rollback API. The bounded filesystem surfaces are
+read-only project browsing/download and validated Codex automation files under
+`$CODEX_HOME\automations`. Confirmed `codex_app/automation_update` create,
+update, view, and delete calls use atomic writes and safe automation IDs.
+`suggested_create` and `suggested_update` require the Desktop confirmation UI
+and therefore fail closed through Discord.
+
+Client-side dynamic tools are routed by capability rather than accepted
+generically:
+
+- Supported through app-server equivalents: `list_threads`, `read_thread`,
+  `send_message_to_thread`, `list_projects`, local-project `create_thread`,
+  `set_thread_archived`, `set_thread_title`, and same-directory `fork_thread`.
+- Supported through the bounded local store: `automation_update`.
+- Rejected with a specific reason: Desktop-only pinning, projectless/worktree
+  creation, worktree/remote handoff, cursor-based background waits, Desktop
+  navigation/terminal/runtime-dependency operations, unknown `codex_app` tools,
+  and tools owned by external connectors.
+
+This rejection is intentional: the Bridge does not inherit a Desktop UI
+session or connector executor and never exposes a generic client-tool or shell
+escape hatch.
 
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
@@ -97,6 +117,14 @@ An unbound channel becomes a task only when it is inside a managed project
 category. The first valid post creates and binds one task before delivery;
 follow-up posts in that channel are processed in order. Control, archive, and
 unrelated categories do not create tasks from ordinary messages.
+
+Discord input uses an app-server `clientUserMessageId` as its immediate stable
+identity. The Bridge posts the orange user card after `turn/start` or
+`turn/steer` returns a turn ID, even if the persisted `userMessage` notification
+is delayed by active tool work. When that notification arrives, its `clientId`
+is used to replace the provisional identity with the server item ID on the
+existing card. Failure to receive a server item ID within five seconds is
+therefore no longer reported as an instruction-send failure.
 
 When a turn completes, `codex-completions` starts by mentioning the configured
 user with `タスクが完了しました。`, puts a one-line final-answer summary on the

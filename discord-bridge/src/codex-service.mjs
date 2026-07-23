@@ -264,34 +264,46 @@ export class CodexService extends EventEmitter {
     return (result.data ?? []).find((turn) => turn.status === 'inProgress') ?? null;
   }
 
-  async deliver(threadId, prompt, attachment = null) {
+  async deliver(threadId, prompt, attachment = null, clientUserMessageId = null) {
     await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
-    if (currentTurn) return this.steer(threadId, prompt, attachment, currentTurn);
-    return this.send(threadId, prompt, attachment);
+    if (currentTurn) {
+      return this.steer(threadId, prompt, attachment, clientUserMessageId, currentTurn);
+    }
+    return this.send(threadId, prompt, attachment, clientUserMessageId);
   }
 
-  async send(threadId, prompt, attachment = null) {
+  async send(threadId, prompt, attachment = null, clientUserMessageId = null) {
     await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
     if (currentTurn) throw new Error(`Task already has active turn ${currentTurn.id}. Use deliver or steer.`);
-    const result = await this.client.call('turn/start', {
+    const params = {
       threadId,
       input: textInput(prompt, attachment),
-    }, 60_000);
+    };
+    if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
+    const result = await this.client.call('turn/start', params, 60_000);
     return { mode: 'send', turnId: result.turn?.id ?? null, result };
   }
 
-  async steer(threadId, prompt, attachment = null, knownTurn = null) {
+  async steer(
+    threadId,
+    prompt,
+    attachment = null,
+    clientUserMessageId = null,
+    knownTurn = null,
+  ) {
     await this.resumeThread(threadId);
     const currentTurn = knownTurn ?? await this.activeTurn(threadId);
     if (!currentTurn) throw new Error('Task has no active turn to steer. Use deliver or send.');
     if (attachment) throw new Error('Attachments cannot be added with steer. Use deliver on an idle task.');
-    const result = await this.client.call('turn/steer', {
+    const params = {
       threadId,
       expectedTurnId: currentTurn.id,
       input: textInput(prompt),
-    });
+    };
+    if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
+    const result = await this.client.call('turn/steer', params);
     return { mode: 'steer', turnId: currentTurn.id, result };
   }
 

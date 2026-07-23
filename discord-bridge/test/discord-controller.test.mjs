@@ -214,17 +214,14 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   let delivered = null;
   let resolveDelivery;
   const delivery = new Promise((resolve) => { resolveDelivery = resolve; });
-  codex.deliver = async (threadId, prompt, attachment) => {
-    delivered = { threadId, prompt, attachment };
+  codex.deliver = async (threadId, prompt, attachment, clientUserMessageId) => {
+    delivered = {
+      threadId,
+      prompt,
+      attachment,
+      clientUserMessageId,
+    };
     resolveDelivery();
-    setImmediate(() => codex.emit('notification', {
-      method: 'item/started',
-      params: {
-        threadId,
-        turnId: 'turn-1',
-        item: { type: 'userMessage', id: 'user-item-1', content: [{ type: 'text', text: prompt }] },
-      },
-    }));
     return { mode: 'steer', turnId: 'turn-1' };
   };
   const turnRecords = new Map();
@@ -310,7 +307,10 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   for (let attempt = 0; attempt < 50 && !reactions.includes('✅'); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.deepEqual(delivered, { threadId: 'thread-1', prompt: 'run the requested task', attachment: null });
+  assert.equal(delivered.threadId, 'thread-1');
+  assert.equal(delivered.prompt, 'run the requested task');
+  assert.equal(delivered.attachment, null);
+  assert.match(delivered.clientUserMessageId, /^discord-[a-f0-9]{12}$/);
   assert.deepEqual(reactions, ['⏳', '✅'], JSON.stringify(replies));
   assert.deepEqual(replies, []);
   assert.equal(originalDeleted, true);
@@ -319,8 +319,39 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.equal(userCard.embeds[0].color, 0xe67e22);
   assert.equal(userCard.embeds[0].description, 'run the requested task');
   assert.deepEqual(userCard.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);
+  assert.equal(
+    userCard.embeds[0].fields.find((field) => field.name === 'Message').value,
+    `\`${delivered.clientUserMessageId}\``,
+  );
   assert.deepEqual(turnRecords.get('thread-1:turn-1').userMessageIds, [userCard.id]);
+  assert.deepEqual(
+    turnRecords.get('thread-1:turn-1').userEntries[delivered.clientUserMessageId].messageIds,
+    [userCard.id],
+  );
+
+  codex.emit('notification', {
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: {
+        type: 'userMessage',
+        id: 'user-item-1',
+        clientId: delivered.clientUserMessageId,
+        content: [{ type: 'text', text: delivered.prompt }],
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 100
+    && !turnRecords.get('thread-1:turn-1')?.userEntries?.['user-item-1']; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.deepEqual(turnRecords.get('thread-1:turn-1').userEntries['user-item-1'].messageIds, [userCard.id]);
+  assert.equal(turnRecords.get('thread-1:turn-1').userEntries[delivered.clientUserMessageId], undefined);
+  assert.equal(
+    userCard.embeds[0].fields.find((field) => field.name === 'Message').value,
+    '`user-item-1`',
+  );
   for (let attempt = 0; attempt < 100
     && !turnRecords.get('thread-1:turn-1')?.liveMessageId; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -30,6 +30,8 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const startedThreads = [];
   const namedThreads = [];
   const controlCalls = [];
+  const turnStarts = [];
+  const turnSteers = [];
   server.on('connection', (socket) => {
     peer = socket;
     socket.on('message', (data) => {
@@ -91,6 +93,15 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
         result = request.params.cursor === 'page-2'
           ? { data: [{ id: 'thread-2', cwd: 'C:/work' }], nextCursor: null }
           : { data: [{ id: 'thread-1', cwd: 'C:/work' }], nextCursor: 'page-2' };
+      }
+      if (request.method === 'thread/turns/list') result = { data: [], nextCursor: null };
+      if (request.method === 'turn/start') {
+        turnStarts.push(request.params);
+        result = { turn: { id: 'turn-started' } };
+      }
+      if (request.method === 'turn/steer') {
+        turnSteers.push(request.params);
+        result = { turnId: request.params.expectedTurnId };
       }
       socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
     });
@@ -154,6 +165,28 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     'thread/settings/update',
     { threadId: 'thread-1', model: 'gpt-test' },
   ]]);
+
+  const sent = await service.send('thread-1', 'start input', null, 'client-start');
+  const steered = await service.steer(
+    'thread-1',
+    'steer input',
+    null,
+    'client-steer',
+    { id: 'turn-active' },
+  );
+  assert.equal(sent.turnId, 'turn-started');
+  assert.equal(steered.turnId, 'turn-active');
+  assert.deepEqual(turnStarts, [{
+    threadId: 'thread-1',
+    input: [{ type: 'text', text: 'start input' }],
+    clientUserMessageId: 'client-start',
+  }]);
+  assert.deepEqual(turnSteers, [{
+    threadId: 'thread-1',
+    expectedTurnId: 'turn-active',
+    input: [{ type: 'text', text: 'steer input' }],
+    clientUserMessageId: 'client-steer',
+  }]);
 
   const notificationPromise = new Promise((resolve) => service.once('notification', resolve));
   peer.send(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'live-turn' } } }));
