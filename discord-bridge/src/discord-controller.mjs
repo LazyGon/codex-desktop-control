@@ -55,8 +55,10 @@ import {
   cleanupStaleSplitArchives,
   createSplit7zArchive,
   createSplit7zProjectArchive,
+  createSplitZipArchive,
   disposeSplitArchive,
   hashResolvedFile,
+  linkedFilesArchiveManifest,
   projectArchiveManifest,
   readArchiveVolume,
   readHashedFile,
@@ -1243,6 +1245,64 @@ export class DiscordController {
     }
   }
 
+  async #sendLinkedFilesArchive(channel, files, skippedCount, userId, threadId) {
+    const archive = await createSplitZipArchive(files, {
+      volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+      tempRoot: this.fileTransferTempRoot,
+      archiverPath: this.config.fileShareArchiverPath,
+    });
+    try {
+      const details = [
+        '**Codex linked files ZIP**',
+        `Files: ${archive.files.length}`,
+        `Source: ${formatFileSize(archive.sourceBytes)}`,
+        `ZIP: ${formatFileSize(archive.archiveBytes)} / ${archive.volumes.length} volume(s)`,
+        ...(skippedCount > 0 ? [`Skipped unavailable links: ${skippedCount}`] : []),
+        archive.volumes.length > 1
+          ? `Place every volume in one folder and open \`${archive.volumes[0].name}\` with a ZIP/7z-compatible app.`
+          : `Open \`${archive.volumes[0].name}\` with a ZIP-compatible app.`,
+      ];
+      const firstMessage = await channel.send(messageOptions(details.join('\n')));
+      for (const volume of archive.volumes) {
+        await channel.send({
+          content: `**${archive.archiveName}** volume ${volume.index + 1}/${archive.volumes.length}`,
+          files: [new AttachmentBuilder(
+            await readArchiveVolume(volume),
+            { name: volume.name },
+          )],
+          allowedMentions: { parse: [] },
+        });
+      }
+      const manifest = Buffer.from(
+        `${JSON.stringify(linkedFilesArchiveManifest(archive), null, 2)}\n`,
+        'utf8',
+      );
+      await channel.send({
+        content: `**${archive.archiveName}** transfer manifest`,
+        files: [new AttachmentBuilder(
+          manifest,
+          { name: safeAttachmentName('linked-files', '.zip-manifest.json') },
+        )],
+        allowedMentions: { parse: [] },
+      });
+      this.#log('linked-files-archive-downloaded', {
+        userId,
+        channelId: channel.id,
+        threadId,
+        files: archive.files.length,
+        skipped: skippedCount,
+        sourceBytes: archive.sourceBytes,
+        archiveBytes: archive.archiveBytes,
+        volumes: archive.volumes.length,
+        format: archive.format,
+      });
+      return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
+    } finally {
+      await disposeSplitArchive(archive);
+    }
+  }
+
   async #sendProjectArchive(channel, binding, userId) {
     this.#assertFileSharingEnabled();
     if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
@@ -1331,6 +1391,32 @@ export class DiscordController {
     }
     const url = await this.#sendLocalFile(channel, file, interaction.user.id);
     await interaction.followUp(messageOptions(`タスクチャンネルへ投稿しました。\n${url}`, { ephemeral: true }));
+  }
+
+  async #downloadLinkedFiles(interaction, session) {
+    const binding = this.stateStore.binding(session.threadId);
+    if (!binding) throw new Error('The linked-file task is no longer available.');
+    const channel = binding.channelId === interaction.channelId && interaction.channel
+      ? interaction.channel
+      : await this.client.channels.fetch(binding.channelId);
+    if (!channel?.isTextBased?.() && typeof channel?.send !== 'function') {
+      throw new Error('The linked-file task channel is unavailable.');
+    }
+    const eligible = session.items.filter((item) => item.file && !item.error);
+    if (eligible.length === 0) throw new Error('There are no downloadable linked files.');
+    const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+    const files = [];
+    for (const item of eligible) {
+      files.push(await resolveShareFile(item.reference.target, roots));
+    }
+    const url = await this.#sendLinkedFilesArchive(
+      channel,
+      files,
+      session.items.length - eligible.length,
+      interaction.user.id,
+      session.threadId,
+    );
+    await interaction.followUp(messageOptions(`Linked files were posted as a ZIP.\n${url}`, { ephemeral: true }));
   }
 
   async #handleCommand(interaction) {
@@ -1890,6 +1976,14 @@ export class DiscordController {
         const session = this.#fileSession(parts[3], interaction.user.id, 'linkedFiles');
         const action = parts[4];
         await interaction.deferUpdate();
+        if (action === 'download') {
+          try {
+            await this.#downloadLinkedFiles(interaction, session);
+          } catch (error) {
+            await interaction.followUp(messageOptions(`ZIP download failed: ${error.message}`, { ephemeral: true }));
+          }
+          return;
+        }
         if (action === 'close') {
           this.pendingActions.delete(parts[3]);
           await interaction.editReply({ content: 'リンク一覧を閉じました。', embeds: [], components: [] });

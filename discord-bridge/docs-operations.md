@@ -41,6 +41,11 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    directory, tap `📦 Download project`, review the secret-exposure warning,
    and confirm `Archiveを作成`.
 
+The `Linked files` picker also provides `Download all as ZIP`. It archives all
+currently permitted links, preserves each project-relative path, skips entries
+shown as locked, and posts a SHA-256 manifest with the ZIP or numbered ZIP
+volumes.
+
 Files that fit in one attachment are posted directly. Larger files are posted
 as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
 volume into the same folder and open the `.7z.001` file with a 7z-compatible

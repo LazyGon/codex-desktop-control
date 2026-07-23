@@ -44,6 +44,17 @@ test('file selectors use native Discord emojis for folders, files, and locked en
     linked.components[0].components[0].options.map((option) => option.emoji.name),
     ['📄', '🔒'],
   );
+  assert.equal(linked.components[1].components[0].custom_id, 'cx:files:linkednav:linked-icons:download');
+  assert.equal(linked.components[1].components[0].label, 'Download all as ZIP (1)');
+  assert.equal(linked.components[1].components[0].disabled, false);
+  const lockedOnly = json(linkedFilePickerPayload({
+    key: 'locked-links',
+    threadId: 'thread-1',
+    page: 0,
+    items: [{ reference: { label: '.env' }, file: null, error: 'secret' }],
+  }));
+  assert.equal(lockedOnly.components[1].components[0].label, 'Download all as ZIP (0)');
+  assert.equal(lockedOnly.components[1].components[0].disabled, true);
 });
 
 test('project browser pages entries and exposes navigation controls', () => {
@@ -79,6 +90,7 @@ test('linked-file picker paginates more than 25 references', () => {
   assert.equal(payload.components[0].components[0].options.length, 1);
   assert.equal(payload.components[0].components[0].options[0].value, '25');
   assert.deepEqual(payload.components[1].components.map((component) => component.custom_id), [
+    'cx:files:linkednav:links:download',
     'cx:files:linkednav:links:prev',
     'cx:files:linkednav:links:next',
     'cx:files:linkednav:links:close',

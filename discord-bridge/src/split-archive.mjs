@@ -177,6 +177,144 @@ export async function createSplit7zArchive(file, {
   }
 }
 
+function safeArchiveRootName(value) {
+  const safe = String(value ?? '')
+    .replace(/[\x00-\x1f<>:"/\\|?*]/g, '_')
+    .replace(/[ .]+$/g, '')
+    .trim();
+  return safe || 'files';
+}
+
+function relativeArchivePath(value) {
+  const normalized = path.win32.normalize(String(value ?? '')).replace(/^\.\\/, '');
+  if (!normalized
+    || path.win32.isAbsolute(normalized)
+    || normalized === '..'
+    || normalized.startsWith('..\\')
+    || /[\r\n]/.test(normalized)) {
+    throw new Error(`Linked file has an unsafe archive path: ${value}`);
+  }
+  return normalized;
+}
+
+function linkedFileArchiveEntries(files) {
+  const rootNames = new Map();
+  const usedRootNames = new Set();
+  const seenFiles = new Set();
+  const entries = [];
+  for (const file of files) {
+    const fileKey = path.win32.normalize(file.path).toLocaleLowerCase('en-US');
+    if (seenFiles.has(fileKey)) continue;
+    seenFiles.add(fileKey);
+    const rootKey = path.win32.normalize(file.root).toLocaleLowerCase('en-US');
+    let archiveRoot = rootNames.get(rootKey);
+    if (!archiveRoot) {
+      const base = safeArchiveRootName(path.win32.basename(file.root));
+      archiveRoot = base;
+      for (let suffix = 2; usedRootNames.has(archiveRoot.toLocaleLowerCase('en-US')); suffix += 1) {
+        archiveRoot = `${base}-${suffix}`;
+      }
+      rootNames.set(rootKey, archiveRoot);
+      usedRootNames.add(archiveRoot.toLocaleLowerCase('en-US'));
+    }
+    entries.push({
+      file,
+      archivePath: path.win32.join(archiveRoot, relativeArchivePath(file.relativePath)),
+    });
+  }
+  return entries;
+}
+
+export async function createSplitZipArchive(files, {
+  volumeBytes,
+  maxBytes,
+  tempRoot,
+  archiverPath = null,
+  archiveName = 'linked-files.zip',
+}) {
+  if (!Number.isSafeInteger(volumeBytes) || volumeBytes <= 0) throw new Error('Invalid archive volume size.');
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error('Invalid transfer size limit.');
+  const executable = discover7Zip(archiverPath);
+  if (!executable) {
+    throw new Error('Downloading all linked files as ZIP requires 7-Zip. Install 7z.exe or configure fileShareArchiverPath.');
+  }
+  const entries = linkedFileArchiveEntries(files);
+  if (entries.length === 0) throw new Error('There are no downloadable linked files.');
+  const sourceBytes = entries.reduce((total, entry) => total + entry.file.size, 0);
+  if (sourceBytes > maxBytes) {
+    throw new Error(`Linked files exceed the transfer limit (${sourceBytes} > ${maxBytes} bytes).`);
+  }
+  const resolvedTempRoot = path.resolve(tempRoot);
+  await fs.promises.mkdir(resolvedTempRoot, { recursive: true });
+  const directory = await fs.promises.mkdtemp(path.join(resolvedTempRoot, TRANSFER_DIRECTORY_PREFIX));
+  assertManagedTransferDirectory(resolvedTempRoot, directory);
+  const stagingRoot = path.join(directory, 'linked-files');
+  const listPath = path.join(directory, 'linked-files.utf8.lst');
+  const safeArchiveName = safeAttachmentName(
+    String(archiveName).toLocaleLowerCase('en-US').endsWith('.zip') ? archiveName : `${archiveName}.zip`,
+  );
+  const archivePath = path.join(directory, safeArchiveName);
+  try {
+    await fs.promises.mkdir(stagingRoot);
+    const prepared = [];
+    for (const entry of entries) {
+      const hashed = await hashResolvedFile(entry.file, maxBytes);
+      const stagedPath = path.join(stagingRoot, entry.archivePath);
+      await fs.promises.mkdir(path.dirname(stagedPath), { recursive: true });
+      await fs.promises.copyFile(hashed.path, stagedPath, fs.constants.COPYFILE_EXCL);
+      const stagedSha256 = await sha256File(stagedPath);
+      if (stagedSha256 !== hashed.sha256) {
+        throw new Error(`Linked file changed while preparing the ZIP: ${hashed.relativePath}`);
+      }
+      const current = await fs.promises.stat(hashed.path);
+      if (current.size !== hashed.size || current.mtime.toISOString() !== hashed.mtime) {
+        throw new Error(`Linked file changed while preparing the ZIP: ${hashed.relativePath}`);
+      }
+      prepared.push({ ...hashed, archivePath: entry.archivePath });
+    }
+    await fs.promises.writeFile(
+      listPath,
+      `${prepared.map((file) => file.archivePath).join('\n')}\n`,
+      'utf8',
+    );
+    await run7Zip(executable, [
+      'a',
+      '-tzip',
+      '-mx=1',
+      '-bd',
+      '-bso0',
+      '-bsp0',
+      '-y',
+      '-scsUTF-8',
+      `-v${volumeBytes}b`,
+      archivePath,
+      `@${listPath}`,
+    ], stagingRoot);
+    const { volumes, archiveBytes } = await collectArchiveVolumes(
+      directory,
+      safeArchiveName,
+      archivePath,
+      volumeBytes,
+      maxBytes,
+    );
+    return {
+      tempRoot: resolvedTempRoot,
+      directory,
+      executable,
+      format: volumes.length > 1 ? 'split-zip-linked-files-v1' : 'single-zip-linked-files-v1',
+      volumeBytes,
+      archiveName: safeArchiveName,
+      archiveBytes,
+      sourceBytes,
+      files: prepared,
+      volumes,
+    };
+  } catch (error) {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 export async function scanProjectTree(projectRoot, maxBytes) {
   const root = path.resolve(projectRoot);
   const rootStat = await fs.promises.lstat(root);
@@ -362,5 +500,36 @@ export function projectArchiveManifest(archive) {
     extraction: archive.volumes.length > 1
       ? `Place every volume together and open ${archive.volumes[0].name} with a 7z-compatible app.`
       : `Open ${archive.volumes[0].name} with a 7z-compatible app.`,
+  };
+}
+
+export function linkedFilesArchiveManifest(archive) {
+  return {
+    schema: 'codex-discord-linked-files-transfer/v1',
+    format: archive.format,
+    fileCount: archive.files.length,
+    sourceBytes: archive.sourceBytes,
+    files: archive.files.map((file) => ({
+      relativePath: file.relativePath,
+      archivePath: file.archivePath,
+      size: file.size,
+      modifiedAt: file.mtime,
+      sha256: file.sha256,
+    })),
+    archive: {
+      type: 'zip',
+      compressionLevel: 'fast',
+      size: archive.archiveBytes,
+      volumeBytes: archive.volumeBytes,
+      volumes: archive.volumes.map((volume) => ({
+        name: volume.name,
+        index: volume.index + 1,
+        size: volume.size,
+        sha256: volume.sha256,
+      })),
+    },
+    extraction: archive.volumes.length > 1
+      ? `Place every volume together and open ${archive.volumes[0].name} with a ZIP/7z-compatible app.`
+      : `Open ${archive.volumes[0].name} with a ZIP-compatible app.`,
   };
 }

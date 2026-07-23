@@ -52,7 +52,9 @@ outbound connection to Discord.
   to absolute local Windows files. The resulting dropdown resolves only files
   inside managed Codex project trees (including explicitly linked sibling
   repositories under a parent shared by managed projects) and posts the
-  selected file to its private task channel.
+  selected file to its private task channel. The same picker offers
+  `Download all as ZIP`, which packages every permitted link while excluding
+  locked or unsafe entries.
 - Browses one directory level at a time from a task's project root through the
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
@@ -188,6 +190,11 @@ the Bridge PC; its usual installation paths are detected automatically, or an
 absolute `7z.exe` path can be set as `fileShareArchiverPath`. Temporary archive
 volumes are deleted after posting, and stale managed transfer directories are
 removed when the Bridge starts.
+
+Linked-file ZIP downloads use the same transfer ceiling and 7-Zip executable.
+Archive entries retain their project root and relative path so links from
+different projects, including same-named files, remain distinct. A SHA-256
+manifest records every source file and ZIP volume.
 
 Project archive volumes are posted one per Discord message so a slow outbound
 connection does not force one request to carry several attachments. Discord

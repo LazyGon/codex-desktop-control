@@ -82,6 +82,7 @@ export function linkedFilePickerPayload(session) {
   const page = Math.min(Math.max(0, session.page ?? 0), pageCount - 1);
   const start = page * FILE_BROWSER_PAGE_SIZE;
   const visible = session.items.slice(start, start + FILE_BROWSER_PAGE_SIZE);
+  const downloadableCount = session.items.filter((item) => item.file && !item.error).length;
   const embed = new EmbedBuilder()
     .setTitle('Linked files')
     .setColor(0x5865f2)
@@ -96,13 +97,23 @@ export function linkedFilePickerPayload(session) {
       .setDescription(truncate(item.error ? `取得不可: ${item.error}` : item.file.relativePath, 100, ''))
       .setValue(String(start + index))));
   const components = [new ActionRowBuilder().addComponents(menu)];
+  const actions = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cx:files:linkednav:${session.key}:download`)
+      .setLabel(`Download all as ZIP (${downloadableCount})`)
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(downloadableCount === 0),
+  );
   if (pageCount > 1) {
-    components.push(new ActionRowBuilder().addComponents(
+    actions.addComponents(
       new ButtonBuilder().setCustomId(`cx:files:linkednav:${session.key}:prev`).setLabel('Prev').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
       new ButtonBuilder().setCustomId(`cx:files:linkednav:${session.key}:next`).setLabel('Next').setStyle(ButtonStyle.Secondary).setDisabled(page >= pageCount - 1),
-      new ButtonBuilder().setCustomId(`cx:files:linkednav:${session.key}:close`).setLabel('Close').setStyle(ButtonStyle.Secondary),
-    ));
+    );
   }
+  actions.addComponents(
+    new ButtonBuilder().setCustomId(`cx:files:linkednav:${session.key}:close`).setLabel('Close').setStyle(ButtonStyle.Secondary),
+  );
+  components.push(actions);
   return {
     embeds: [embed],
     components,

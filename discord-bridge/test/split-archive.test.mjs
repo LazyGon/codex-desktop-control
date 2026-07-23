@@ -10,8 +10,10 @@ import {
   cleanupStaleSplitArchives,
   createSplit7zArchive,
   createSplit7zProjectArchive,
+  createSplitZipArchive,
   discover7Zip,
   disposeSplitArchive,
+  linkedFilesArchiveManifest,
   projectArchiveManifest,
   readArchiveVolume,
   scanProjectTree,
@@ -67,6 +69,74 @@ test('7z volumes stay under the Discord limit and extract to the exact original 
   } finally {
     await disposeSplitArchive(archive);
   }
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+});
+
+test('linked files ZIP preserves project-relative paths and duplicate file names', async (context) => {
+  const executable = discover7Zip();
+  if (!executable) {
+    context.skip('7z.exe is not installed');
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-linked-zip-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const projectA = path.join(root, 'project-a');
+  const projectB = path.join(root, 'project-b');
+  const tempRoot = path.join(root, 'transfers');
+  const output = path.join(root, 'output');
+  fs.mkdirSync(path.join(projectA, 'reports'), { recursive: true });
+  fs.mkdirSync(path.join(projectB, 'reports'), { recursive: true });
+  fs.mkdirSync(output);
+  fs.writeFileSync(path.join(projectA, 'reports', 'result.txt'), 'alpha', 'utf8');
+  fs.writeFileSync(path.join(projectB, 'reports', 'result.txt'), 'beta', 'utf8');
+  const files = await Promise.all([
+    resolveShareFile(path.join(projectA, 'reports', 'result.txt'), [projectA]),
+    resolveShareFile(path.join(projectB, 'reports', 'result.txt'), [projectB]),
+  ]);
+  const archive = await createSplitZipArchive(files, {
+    volumeBytes: 100_000,
+    maxBytes: 200_000,
+    tempRoot,
+    archiverPath: executable,
+  });
+  try {
+    assert.equal(archive.format, 'single-zip-linked-files-v1');
+    assert.equal(archive.volumes.length, 1);
+    assert.equal(archive.volumes[0].name, 'linked-files.zip');
+    assert.deepEqual(
+      archive.files.map((file) => file.archivePath),
+      [
+        path.join('project-a', 'reports', 'result.txt'),
+        path.join('project-b', 'reports', 'result.txt'),
+      ],
+    );
+    const manifest = linkedFilesArchiveManifest(archive);
+    assert.equal(manifest.schema, 'codex-discord-linked-files-transfer/v1');
+    assert.equal(manifest.fileCount, 2);
+    assert.equal(manifest.archive.type, 'zip');
+    assert.ok(manifest.files.every((file) => /^[a-f0-9]{64}$/.test(file.sha256)));
+
+    const extraction = spawnSync(executable, [
+      'x',
+      '-y',
+      `-o${output}`,
+      archive.volumes[0].path,
+    ], { encoding: 'utf8', windowsHide: true });
+    assert.equal(extraction.status, 0, `${extraction.stdout}\n${extraction.stderr}`);
+    assert.equal(fs.readFileSync(path.join(output, 'project-a', 'reports', 'result.txt'), 'utf8'), 'alpha');
+    assert.equal(fs.readFileSync(path.join(output, 'project-b', 'reports', 'result.txt'), 'utf8'), 'beta');
+  } finally {
+    await disposeSplitArchive(archive);
+  }
+  await assert.rejects(
+    createSplitZipArchive(files, {
+      volumeBytes: 100_000,
+      maxBytes: 8,
+      tempRoot,
+      archiverPath: executable,
+    }),
+    /exceed the transfer limit/,
+  );
   assert.deepEqual(fs.readdirSync(tempRoot), []);
 });
 

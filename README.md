@@ -103,6 +103,9 @@ interrupt actions. After every turn ends, the task panel is reposted and pinned
 below the final card so its controls remain at the latest channel position.
 They also provide a project-file browser, while assistant
 cards expose safe local file links for download to the private task channel.
+The linked-file picker can download every permitted link as one ZIP (or
+numbered ZIP volumes), while preserving the same secret, link, and project
+boundary checks used for individual downloads.
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
 The task panel's `📦 Download project` action creates a confirmed full working
 directory archive, including `.git` and protected regular files, as split 7z

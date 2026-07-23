@@ -1047,6 +1047,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     deferUpdate: async function deferUpdate() { this.deferred = true; },
     editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
     reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+    followUp: async function followUp(payload) { this.lastFollowUp = payload; return payload; },
   });
 
   const browser = interaction(`cx:ui:task:files:${binding.threadId}`);
@@ -1104,18 +1105,36 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.equal(filePosts[0].files.length, 1);
 
   if (discover7Zip()) {
+    const zipStart = filePosts.length;
+    const zipButton = linked.lastReply.components[1].toJSON().components[0];
+    assert.equal(zipButton.custom_id.startsWith('cx:files:linkednav:'), true);
+    assert.equal(zipButton.custom_id.endsWith(':download'), true);
+    assert.equal(zipButton.label, 'Download all as ZIP (1)');
+    const zipDownload = interaction(zipButton.custom_id);
+    client.emit('interactionCreate', zipDownload);
+    for (let attempt = 0; attempt < 200 && !zipDownload.lastFollowUp; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.match(zipDownload.lastFollowUp.content, /https:\/\/discord\.test\//);
+    assert.match(filePosts[zipStart].content, /Codex linked files ZIP/);
+    assert.match(filePosts[zipStart].content, /Skipped unavailable links: 1/);
+    const zipAttachments = filePosts.slice(zipStart).flatMap((post) => post.files ?? []);
+    assert.ok(zipAttachments.some((file) => file.name === 'linked-files.zip'));
+    assert.ok(zipAttachments.some((file) => file.name === 'linked-files.zip-manifest.json'));
+
+    const projectStart = filePosts.length;
     const confirmedProject = interaction(projectConfirm.custom_id);
     client.emit('interactionCreate', confirmedProject);
     for (let attempt = 0; attempt < 200 && !/投稿しました/.test(confirmedProject.lastReply?.content ?? ''); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.match(confirmedProject.lastReply.content, /https:\/\/discord\.test\/2/);
-    assert.match(filePosts[1].content, /Codex project archive/);
-    assert.match(filePosts[1].content, /Includes: `\.git`/);
-    const volumePosts = filePosts.slice(2, -1);
+    assert.match(confirmedProject.lastReply.content, /https:\/\/discord\.test\//);
+    assert.match(filePosts[projectStart].content, /Codex project archive/);
+    assert.match(filePosts[projectStart].content, /Includes: `\.git`/);
+    const volumePosts = filePosts.slice(projectStart + 1, -1);
     assert.ok(volumePosts.length > 1);
     assert.ok(volumePosts.every((post) => post.files?.length === 1));
-    const projectAttachments = filePosts.slice(2).flatMap((post) => post.files ?? []);
+    const projectAttachments = filePosts.slice(projectStart + 1).flatMap((post) => post.files ?? []);
     assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z.001')));
     assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z-manifest.json')));
   }

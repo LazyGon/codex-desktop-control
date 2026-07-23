@@ -105,6 +105,11 @@ review, and background terminals. Rename a task channel to rename the
 Codex task. The next sync normalizes the channel name and restores its status
 emoji prefix.
 
+Assistant-card `Linked files` pickers provide individual downloads and a
+`Download all as ZIP` action. The ZIP contains only links that pass the normal
+project-boundary, secret-file, and filesystem-link checks. Unavailable entries
+remain excluded and visible as locked items.
+
 Permission changes, compact, fork, goal removal, and background-terminal
 termination require an explicit confirmation. Terminal termination is limited
 to processes returned by `thread/backgroundTerminals/list`; there is no raw
