@@ -7,7 +7,9 @@ Codex Desktop, local controller commands, and a private Discord remote UI.
 
 - `launcher/`: builds and installs the **Codex Shared Server** launcher. It
   starts the bundled app-server on `ws://127.0.0.1:8798`, starts Desktop with
-  `CODEX_APP_SERVER_WS_URL`, verifies the Desktop connection, and owns cleanup.
+  `CODEX_APP_SERVER_WS_URL`, reconciles app-server task working directories
+  with Desktop's local-project sidebar state before Desktop starts, verifies
+  the Desktop connection, and owns cleanup.
 - `control/`: lists, reads, resumes, starts, steers, interrupts, and watches
   tasks on the shared app-server.
 - `discord-bridge/`: persistent private Discord UI for task display, control,
@@ -80,6 +82,33 @@ Two ascending tones mean the Desktop connection to the shared app-server was
 verified. The Bridge starts at logon and can also start the shared launcher when
 the app-server is absent.
 
+If this checkout's healthy app-server is already listening, the launcher
+validates its state, listener PID, executable, supervisor, package version, and
+`/readyz` response. It then skips app-server startup and opens only Codex
+Desktop on that existing connection. A server owned by another checkout or an
+inconsistent state file is never adopted.
+
+Before each Desktop start, the launcher reads the Bridge's managed project
+paths and the app-server's active and archived task lists. While Desktop is
+still stopped, it creates any missing local-project records and assigns tasks
+to the project whose path exactly matches the task working directory. The
+global Desktop state is backed up under `launcher/state/project-sync-backups/`
+before an atomic update. This keeps tasks created from Discord visible in the
+project sidebar after a restart without changing their Codex history or runtime
+settings.
+
+For a one-shot repair that waits for the current task to finish, gracefully
+stops the Bridge, closes Desktop, reopens only Desktop on the existing
+app-server, and verifies both the repaired assignment and Bridge reconnection:
+
+```powershell
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
+  '-NoProfile -ExecutionPolicy Bypass -File ".\launcher\Restart-CodexSharedWithProjectRepair.ps1" -WaitForThreadId ACTIVE_THREAD_ID -VerifyThreadId REPAIR_THREAD_ID'
+```
+
+The result is written to
+`launcher/state/project-repair-last.json`.
+
 ```powershell
 .\control\codex-control.cmd status
 .\control\codex-control.cmd list --limit 10
@@ -148,6 +177,8 @@ paths, even in a private repository.
 ## Verification
 
 ```powershell
+node --test .\launcher\sync-desktop-projects.test.mjs
+node --check .\launcher\read-thread-status.mjs
 npm --prefix .\discord-bridge run check
 npm --prefix .\discord-bridge test
 powershell.exe -NoProfile -File .\control\Test-CodexControl.ps1

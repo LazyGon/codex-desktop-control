@@ -26,7 +26,10 @@ $modeName = if ($SelfTest) { 'selftest' } else { 'desktop' }
 $logPath = Join-Path $logRoot "$runStamp-$modeName.log"
 $serverStdoutPath = Join-Path $logRoot "$runStamp-app-server.stdout.log"
 $serverStderrPath = Join-Path $logRoot "$runStamp-app-server.stderr.log"
-$statePath = Join-Path $stateRoot 'current.json'
+$stateFileName = if ($SelfTest) { "selftest-$Port-current.json" } else { 'current.json' }
+$statePath = Join-Path $stateRoot $stateFileName
+$projectSyncResultPath = Join-Path $stateRoot 'project-sync-last.json'
+$projectSyncBackupRoot = Join-Path $stateRoot 'project-sync-backups'
 
 function Write-LauncherLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -300,11 +303,214 @@ function Test-DesktopWebSocketConnection {
 }
 
 function Write-RuntimeState {
-    param([Parameter(Mandatory)][System.Collections.IDictionary]$State)
+    param([Parameter(Mandatory)][object]$State)
 
     $temporaryPath = "$statePath.tmp"
     $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
     Move-Item -LiteralPath $temporaryPath -Destination $statePath -Force
+}
+
+function Set-RuntimeStateValue {
+    param(
+        [Parameter(Mandatory)][object]$State,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object]$Value
+    )
+
+    if ($State -is [System.Collections.IDictionary]) {
+        $State[$Name] = $Value
+        return
+    }
+    if ($null -ne $State.PSObject.Properties[$Name]) {
+        $State.$Name = $Value
+        return
+    }
+    $State | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+}
+
+function Invoke-DesktopProjectSync {
+    param([Parameter(Mandatory)][string]$WebSocketUrl)
+
+    $syncScript = Join-Path $launcherRoot 'sync-desktop-projects.mjs'
+    $bridgeStatePath = Join-Path (Split-Path -Parent $launcherRoot) 'discord-bridge\data\state.json'
+    $codexStateRoot = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'
+    }
+    else {
+        [IO.Path]::GetFullPath($env:CODEX_HOME)
+    }
+    $globalStatePath = Join-Path $codexStateRoot '.codex-global-state.json'
+    $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
+
+    if (-not (Test-Path -LiteralPath $syncScript -PathType Leaf)) {
+        throw "Desktop project sync script was not found: $syncScript"
+    }
+    if (-not (Test-Path -LiteralPath $bridgeStatePath -PathType Leaf)) {
+        Write-LauncherLog "Desktop project sync skipped because Bridge state does not exist yet: $bridgeStatePath"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $globalStatePath -PathType Leaf)) {
+        Write-LauncherLog "Desktop project sync skipped because Desktop state does not exist yet: $globalStatePath"
+        return
+    }
+
+    $syncOutput = @(
+        & $nodeExecutable $syncScript `
+            --endpoint $WebSocketUrl `
+            --global-state $globalStatePath `
+            --bridge-state $bridgeStatePath `
+            --result $projectSyncResultPath `
+            --backup-directory $projectSyncBackupRoot 2>&1
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Desktop project sync failed: $($syncOutput -join [Environment]::NewLine)"
+    }
+    Write-LauncherLog "Desktop project sync completed. $($syncOutput -join ' ')"
+}
+
+function Get-ReusableRuntimeState {
+    param(
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [Parameter(Mandatory)][int]$PortNumber
+    )
+
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $expectedWebSocketUrl = "ws://127.0.0.1:$PortNumber"
+        $expectedReadyUrl = "http://127.0.0.1:$PortNumber/readyz"
+        if (
+            [int]$state.port -ne $PortNumber -or
+            $state.websocketUrl -ne $expectedWebSocketUrl -or
+            $state.readyUrl -ne $expectedReadyUrl
+        ) {
+            throw 'The recorded endpoint does not match the requested loopback endpoint.'
+        }
+        if (
+            $state.packageVersion -ne $PackageInfo.Version -or
+            $state.desktopExecutable -ne $PackageInfo.DesktopExecutable -or
+            $state.serverExecutable -ne $PackageInfo.ServerExecutable
+        ) {
+            throw 'The recorded runtime does not match the installed Codex package and this launcher cache.'
+        }
+
+        $listener = @(
+            Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |
+                Where-Object { $_.LocalAddress -eq '127.0.0.1' }
+        )
+        if ($listener.Count -ne 1 -or [int]$listener[0].OwningProcess -ne [int]$state.serverProcessId) {
+            throw 'The loopback listener owner does not match launcher state.'
+        }
+
+        $server = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.serverProcessId)" -ErrorAction Stop
+        if (
+            $null -eq $server -or
+            -not $server.ExecutablePath -or
+            $server.ExecutablePath -ne $PackageInfo.ServerExecutable
+        ) {
+            throw 'The live app-server executable does not match this launcher cache.'
+        }
+
+        $supervisor = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.supervisorProcessId)" -ErrorAction Stop
+        if (
+            $null -eq $supervisor -or
+            -not $supervisor.CommandLine -or
+            $supervisor.CommandLine -notmatch [regex]::Escape($PSCommandPath)
+        ) {
+            throw 'The recorded shared-launcher supervisor is not alive or is owned by another launcher.'
+        }
+
+        $readyResponse = Invoke-WebRequest -UseBasicParsing -Uri $expectedReadyUrl -TimeoutSec 2
+        if ($readyResponse.StatusCode -ne 200) {
+            throw "The app-server ready endpoint returned HTTP $($readyResponse.StatusCode)."
+        }
+
+        return $state
+    }
+    catch {
+        Write-LauncherLog "Existing runtime is not reusable: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Start-DesktopOnRuntime {
+    param(
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [Parameter(Mandatory)][object]$RuntimeState,
+        [Parameter(Mandatory)][int]$PortNumber
+    )
+
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
+    Write-RuntimeState -State $RuntimeState
+
+    Invoke-DesktopProjectSync -WebSocketUrl $RuntimeState.websocketUrl
+    Set-UserWebSocketEnvironment -WebSocketUrl $RuntimeState.websocketUrl
+    Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
+    Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
+
+    $appsFolderTarget = "shell:AppsFolder\$($PackageInfo.ApplicationUserModelId)"
+    Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $appsFolderTarget | Out-Null
+    Write-LauncherLog "Desktop package activation requested. appId=$($PackageInfo.ApplicationUserModelId)"
+
+    $desktopRoots = @()
+    $launchWatch = [Diagnostics.Stopwatch]::StartNew()
+    while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
+        $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+        if ($desktopRoots.Count -gt 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($desktopRoots.Count -eq 0) {
+        throw 'Codex Desktop did not start within 30 seconds.'
+    }
+
+    Set-RuntimeStateValue `
+        -State $RuntimeState `
+        -Name 'desktopProcessIds' `
+        -Value @($desktopRoots | ForEach-Object { [int]$_.ProcessId })
+    Write-RuntimeState -State $RuntimeState
+    Write-LauncherLog "Desktop root detected. pid=$($RuntimeState.desktopProcessIds -join ',')"
+
+    $connectionVerified = $false
+    $connectionWatch = [Diagnostics.Stopwatch]::StartNew()
+    while ($connectionWatch.Elapsed.TotalSeconds -lt 30) {
+        if (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) {
+            $connectionVerified = $true
+            break
+        }
+
+        $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+        $rootIds = @($currentRoots | ForEach-Object { [int]$_.ProcessId })
+        $localServers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
+        if ($localServers.Count -gt 0) {
+            Write-LauncherLog "Desktop spawned a private stdio app-server instead of using WebSocket. pid=$($localServers.ProcessId -join ',')"
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    if (-not $connectionVerified) {
+        Show-LauncherMessage -Message "Codex started, but the shared app-server connection could not be verified.`n`nCodex remains open. See:`n$logPath" -Icon 16
+        throw 'Desktop WebSocket connection was not verified.'
+    }
+
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
+    Set-RuntimeStateValue `
+        -State $RuntimeState `
+        -Name 'desktopProcessIds' `
+        -Value @(Get-CodexDesktopProcessIds -DesktopExecutable $PackageInfo.DesktopExecutable)
+    Write-RuntimeState -State $RuntimeState
+    Write-LauncherLog 'Desktop WebSocket connection verified.'
+
+    [pscustomobject]@{
+        RuntimeState = $RuntimeState
+        DesktopProcessIds = @($RuntimeState.desktopProcessIds)
+    }
 }
 
 function Remove-RuntimeStateIfOwned {
@@ -450,20 +656,9 @@ $serverProcessId = 0
 $exitCode = 1
 $packageInfo = $null
 $registeredWebSocketUrl = $null
+$startupHandled = $false
 
 try {
-    $mutexName = "Local\CodexSharedServerLauncher-$Port"
-    $mutex = [Threading.Mutex]::new($false, $mutexName)
-    try {
-        $ownsMutex = $mutex.WaitOne(0)
-    }
-    catch [Threading.AbandonedMutexException] {
-        $ownsMutex = $true
-    }
-    if (-not $ownsMutex) {
-        throw "Another Codex Shared Server launcher already owns port $Port."
-    }
-
     $packageInfo = Get-CodexPackageInfo
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
 
@@ -473,8 +668,36 @@ try {
         Write-LauncherLog "Desktop is already running. pid=$processList. No process was stopped."
         Show-LauncherMessage -Message "Codex Desktop is already running (PID $processList).`n`nQuit Codex normally, then click Codex Shared Server again. No process was stopped." -Icon 48
         $exitCode = 2
+        $startupHandled = $true
     }
-    else {
+    elseif (-not $SelfTest) {
+        $reusableRuntime = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port
+        if ($null -ne $reusableRuntime) {
+            Write-LauncherLog "Reusing healthy owned app-server. pid=$($reusableRuntime.serverProcessId)"
+            $null = Start-DesktopOnRuntime `
+                -PackageInfo $packageInfo `
+                -RuntimeState $reusableRuntime `
+                -PortNumber $Port
+            Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
+            Invoke-LauncherSignal -Kind Ready
+            $exitCode = 0
+            $startupHandled = $true
+        }
+    }
+
+    if (-not $startupHandled) {
+        $mutexName = "Local\CodexSharedServerLauncher-$Port"
+        $mutex = [Threading.Mutex]::new($false, $mutexName)
+        try {
+            $ownsMutex = $mutex.WaitOne(0)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $ownsMutex = $true
+        }
+        if (-not $ownsMutex) {
+            throw "Another Codex Shared Server launcher already owns port $Port, but its runtime could not be safely reused."
+        }
+
         Assert-PortAvailable -PortNumber $Port
 
         $serverArguments = @(
@@ -533,59 +756,11 @@ try {
             $exitCode = 0
         }
         else {
-            Set-UserWebSocketEnvironment -WebSocketUrl $runtimeState.websocketUrl
             $registeredWebSocketUrl = $runtimeState.websocketUrl
-            Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
-            Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
-
-            $appsFolderTarget = "shell:AppsFolder\$($packageInfo.ApplicationUserModelId)"
-            Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $appsFolderTarget | Out-Null
-            Write-LauncherLog "Desktop package activation requested. appId=$($packageInfo.ApplicationUserModelId)"
-
-            $desktopRoots = @()
-            $launchWatch = [Diagnostics.Stopwatch]::StartNew()
-            while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
-                $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
-                if ($desktopRoots.Count -gt 0) {
-                    break
-                }
-                Start-Sleep -Milliseconds 250
-            }
-            if ($desktopRoots.Count -eq 0) {
-                throw 'Codex Desktop did not start within 30 seconds.'
-            }
-
-            $runtimeState['desktopProcessIds'] = @($desktopRoots | ForEach-Object { [int]$_.ProcessId })
-            Write-RuntimeState -State $runtimeState
-            Write-LauncherLog "Desktop root detected. pid=$($runtimeState.desktopProcessIds -join ',')"
-
-            $connectionVerified = $false
-            $connectionWatch = [Diagnostics.Stopwatch]::StartNew()
-            while ($connectionWatch.Elapsed.TotalSeconds -lt 30) {
-                if (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port) {
-                    $connectionVerified = $true
-                    break
-                }
-
-                $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
-                $rootIds = @($currentRoots | ForEach-Object { [int]$_.ProcessId })
-                $localServers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
-                if ($localServers.Count -gt 0) {
-                    Write-LauncherLog "Desktop spawned a private stdio app-server instead of using WebSocket. pid=$($localServers.ProcessId -join ',')"
-                    break
-                }
-                Start-Sleep -Milliseconds 500
-            }
-
-            if (-not $connectionVerified) {
-                Show-LauncherMessage -Message "Codex started, but the shared app-server connection could not be verified.`n`nCodex remains open. See:`n$logPath" -Icon 16
-                throw 'Desktop WebSocket connection was not verified.'
-            }
-
-            $runtimeState['desktopConnectionVerified'] = $true
-            $runtimeState['desktopProcessIds'] = Get-CodexDesktopProcessIds -DesktopExecutable $packageInfo.DesktopExecutable
-            Write-RuntimeState -State $runtimeState
-            Write-LauncherLog 'Desktop WebSocket connection verified.'
+            $null = Start-DesktopOnRuntime `
+                -PackageInfo $packageInfo `
+                -RuntimeState $runtimeState `
+                -PortNumber $Port
             Invoke-LauncherSignal -Kind Ready
 
             $missingSince = $null
@@ -597,7 +772,7 @@ try {
                 elseif ($null -eq $missingSince) {
                     $missingSince = Get-Date
                 }
-                elseif (((Get-Date) - $missingSince).TotalSeconds -ge 10) {
+                elseif (((Get-Date) - $missingSince).TotalSeconds -ge 60) {
                     break
                 }
                 Start-Sleep -Seconds 1
@@ -660,7 +835,7 @@ finally {
         $mutex.Dispose()
     }
 
-    if (-not $SelfTest -and $exitCode -eq 0) {
+    if (-not $SelfTest -and $exitCode -eq 0 -and $serverProcessId -ne 0) {
         Invoke-LauncherSignal -Kind Stopped
     }
     Write-LauncherLog "Launcher finished. exitCode=$exitCode"

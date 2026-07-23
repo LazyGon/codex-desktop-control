@@ -4,10 +4,39 @@
 
 1. Quit any normally started Codex Desktop.
 2. Start **Codex Shared Server** from the Start menu or taskbar.
-3. Wait for two ascending tones. They mean the Desktop connection to the
+3. The launcher either starts the shared app-server or validates and reuses the
+   healthy app-server already owned by this checkout. It reconciles managed
+   project paths and task assignments while Desktop is still stopped, and then
+   starts Desktop.
+4. Wait for two ascending tones. They mean the Desktop connection to the
    shared app-server was verified.
-4. Two descending tones on exit mean the app-server and transient environment
-   were cleaned up.
+5. Two descending tones on exit mean an app-server owned by that launcher
+   session and its transient environment were cleaned up. A Desktop-only attach
+   does not take over or clean up the existing server.
+
+The most recent reconciliation result is stored in
+`launcher\state\project-sync-last.json`. Backups of the Desktop global state
+are stored in `launcher\state\project-sync-backups\`. A reconciliation failure
+stops startup before Desktop opens, so the existing Desktop state is not
+silently replaced or partially updated. On a first installation, reconciliation
+is skipped until both Desktop and Bridge have created their initial state files.
+
+Launcher self-tests use a port-specific runtime-state file and never replace
+the live `launcher\state\current.json`.
+
+For a one-shot offline repair, use
+`launcher\Restart-CodexSharedWithProjectRepair.ps1` from a detached hidden
+PowerShell process. It waits for the named active task to finish before
+stopping anything, revalidates the live Desktop connection and listener owner,
+stops the Bridge through its graceful request, requests a normal Desktop close,
+and keeps the owned app-server alive while Desktop is replaced. If the verified
+Desktop root remains alive after the normal close timeout, the repair terminates
+only that exact root PID after rechecking its executable and command line. It
+then starts the shared launcher in Desktop-only reuse mode and restarts the
+Bridge. `-WaitForThreadId` names the current task that must finish first;
+`-VerifyThreadId` names the task whose repaired project assignment must be
+proved after Desktop reattaches. The final result is written to
+`launcher\state\project-repair-last.json`.
 
 ## Discover and catch up a phone-created task
 
