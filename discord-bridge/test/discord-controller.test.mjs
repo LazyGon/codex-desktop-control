@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ChannelType } from 'discord.js';
 import { DiscordController } from '../src/discord-controller.mjs';
-import { taskPanelMarker } from '../src/discord-panels.mjs';
+import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
 
 test('completed turns replace the pinned task panel below the final card exactly once', async (context) => {
@@ -192,6 +192,9 @@ test('completed turns replace the pinned task panel below the final card exactly
   const finalIndex = sent.findIndex((message) => message.embeds[0]?.title === 'Codex turn completed');
   const panelIndex = sent.findIndex((message) => message.id === panel.id);
   assert.ok(finalIndex >= 0 && panelIndex > finalIndex);
+  assert.equal(sent[finalIndex].embeds[0].color, 0x1971c2);
+  assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
+  assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
   const firstPanelId = panel.id;
   codex.emit('notification', notification);

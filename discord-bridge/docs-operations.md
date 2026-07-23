@@ -20,7 +20,8 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    `Codex Archived`.
 3. Review orange user cards, final assistant cards, and commentary cards captured
    while the task was live. `🟢` in the channel name means a turn is running;
-   `⚫` means stopped.
+   `⚫` means stopped. Pinned control panels are purple, while completed result
+   cards are blue.
 4. Use the pinned task panel's delivery-mode select, or post an ordinary
    message for automatic delivery. Slash commands remain available for explicit
    task IDs, search, and attachments.

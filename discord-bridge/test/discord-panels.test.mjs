@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CONTROL_PANEL_COLOR,
   CONTROL_PANEL_MARKER,
   controlPanelPayload,
   taskPanelMarker,
@@ -24,6 +25,7 @@ test('control panel exposes status, usage, resources, sync, pending, and task na
       { threadId: 'thread-archived', name: 'Archived task', cwd: 'C:\\work', taskStatus: 'idle', archived: true },
     ],
   }));
+  assert.equal(payload.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(payload.embeds[0].footer.text, CONTROL_PANEL_MARKER);
   assert.deepEqual(payload.components[0].components.map((component) => component.custom_id), [
     'cx:ui:control:status',
@@ -53,6 +55,7 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
     thread,
     binding: { threadId: thread.id, watchLevel: 'normal', archived: false },
   }));
+  assert.equal(active.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(active.embeds[0].footer.text, taskPanelMarker(thread.id));
   assert.equal(active.components[0].components[0].custom_id, `cx:ui:task:compose:${thread.id}`);
   assert.deepEqual(active.components[0].components[0].options.map((option) => option.value), [
@@ -80,6 +83,7 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
     thread: { ...thread, status: { type: 'idle' } },
     binding: { threadId: thread.id, watchLevel: 'quiet', archived: true },
   }));
+  assert.equal(archived.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(archived.components[0].components[0].disabled, true);
   assert.equal(archived.components[1].components[0].options.find((option) => option.default).value, 'quiet');
   assert.equal(archived.components[2].components[2].disabled, true);

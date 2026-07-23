@@ -19,7 +19,8 @@ outbound connection to Discord.
   resource inventory, full sync, pending requests, and task navigation. Task
   panels expose delivery mode, watch level, detailed status, task-scoped
   pending requests, a task control center, archive/restore, and confirmed
-  interrupt, plus a paged project-file browser.
+  interrupt, plus a paged project-file browser. Control panels use a dedicated
+  purple embed color; completed result cards remain blue.
 - Reposts and pins the task control panel immediately below each terminal turn
   card. The previous bot-owned task panel is removed only after the replacement
   ID is persisted, so mobile users always find controls at the latest position.

@@ -14,13 +14,14 @@ import {
 
 export const CONTROL_PANEL_MARKER = 'Codex Remote UI / control-panel';
 export const taskPanelMarker = (threadId) => `Codex Remote UI / task-panel / ${threadId}`;
+export const CONTROL_PANEL_COLOR = 0x7048e8;
 
 export function controlPanelPayload({ bindings, connected, pendingCount, projectCount }) {
   const active = bindings.filter((binding) => !binding.archived);
   const archived = bindings.filter((binding) => binding.archived);
   const embed = new EmbedBuilder()
     .setTitle('Codex Remote')
-    .setColor(connected ? 0x2b8a3e : 0xc92a2a)
+    .setColor(connected ? CONTROL_PANEL_COLOR : 0xc92a2a)
     .addFields(
       { name: 'app-server', value: connected ? 'Connected' : 'Reconnecting', inline: true },
       { name: 'Active', value: String(active.length), inline: true },
@@ -73,7 +74,7 @@ export function taskPanelPayload({ thread, binding }) {
   const marker = taskPanelMarker(thread.id);
   const embed = new EmbedBuilder()
     .setTitle(truncate(thread.name ?? thread.preview ?? 'Codex task', 256, ''))
-    .setColor(archived ? 0x5865f2 : active ? 0x2b8a3e : 0x1971c2)
+    .setColor(CONTROL_PANEL_COLOR)
     .addFields(
       { name: 'Status', value: archived ? 'archived' : threadStatusLabel(thread.status), inline: true },
       { name: 'Watch', value: watchLevel, inline: true },

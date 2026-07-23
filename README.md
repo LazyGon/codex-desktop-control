@@ -101,6 +101,8 @@ panels provide delivery-mode and watch-level selects plus status refresh,
 pending requests, a task control center, archive/restore, and confirmed
 interrupt actions. After every turn ends, the task panel is reposted and pinned
 below the final card so its controls remain at the latest channel position.
+Pinned control panels use a dedicated purple embed color, while completed
+Codex result cards remain blue, so the two surfaces are visually distinct.
 They also provide a project-file browser, while assistant
 cards expose safe local file links for download to the private task channel.
 The linked-file picker can download every permitted link as one ZIP (or

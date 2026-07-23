@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { ChannelType, Client, GatewayIntentBits } from 'discord.js';
 import { dataDir, loadConfig } from '../src/config.mjs';
+import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
 
 const config = loadConfig();
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -62,6 +63,9 @@ try {
       return null;
     }
     if (!message.pinned) errors.push(`${channel.name}: control panel ${messageId} is not pinned.`);
+    if (message.embeds[0]?.color !== CONTROL_PANEL_COLOR) {
+      errors.push(`${channel.name}: control panel ${messageId} does not use the dedicated control color.`);
+    }
     if (!message.embeds.some((embed) => embed.footer?.text === marker)) {
       errors.push(`${channel.name}: control panel ${messageId} has the wrong identity marker.`);
     }
