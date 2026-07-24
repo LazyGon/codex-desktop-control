@@ -138,8 +138,9 @@ The Bridge also creates a private `Others` category with a `transfer-text`
 channel. A message there from an authorized user or Discord webhook is stored
 verbatim as UTF-8 under `discord-bridge/data/transfer-text/<timestamp>.txt`.
 Only the latest timestamped text file is retained; the next accepted message
-replaces it. This channel is a local text inbox and never sends content to
-Codex.
+replaces it. After the local write succeeds, the source Discord message is
+deleted. A failed write leaves the message in Discord. This channel is a local
+text inbox and never sends content to Codex.
 
 `codex-remote` and every task channel contain a pinned control panel. Task
 panels provide delivery-mode and watch-level selects plus status refresh,

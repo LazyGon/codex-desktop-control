@@ -490,9 +490,14 @@ test('transfer-text accepts authorized users and webhooks while rejecting other 
   const codex = new EventEmitter();
   codex.deliver = async () => { throw new Error('transfer-text must not deliver to Codex'); };
   const stored = [];
+  const transferEvents = [];
   const textTransferStore = {
     ensureDirectory: async () => directory,
     store: async (text, timestamp) => {
+      if (text === 'failed payload') {
+        transferEvents.push('store-failed:failed payload');
+        throw new Error('simulated local write failure');
+      }
       const record = {
         path: path.join(directory, `${timestamp}.txt`),
         filename: `${timestamp}.txt`,
@@ -500,6 +505,7 @@ test('transfer-text accepts authorized users and webhooks while rejecting other 
         bytes: Buffer.byteLength(text),
       };
       stored.push({ text, timestamp, record });
+      transferEvents.push(`stored:${text}`);
       return record;
     },
   };
@@ -541,6 +547,7 @@ test('transfer-text accepts authorized users and webhooks while rejecting other 
         createdTimestamp,
         react: async (emoji) => { reactions.push(emoji); },
         reply: async (options) => { replies.push(options); },
+        delete: async () => { transferEvents.push(`deleted:${id}`); },
       },
       reactions,
       replies,
@@ -572,13 +579,20 @@ test('transfer-text accepts authorized users and webhooks while rejecting other 
     author: { id: 'other-bot', bot: true },
     createdTimestamp: 1003,
   });
+  const failed = makeMessage({
+    id: 'failed-message',
+    content: 'failed payload',
+    author: { id: 'user-1', bot: false },
+    createdTimestamp: 1004,
+  });
 
   client.emit('messageCreate', webhook.message);
   client.emit('messageCreate', authorized.message);
   client.emit('messageCreate', unauthorized.message);
   client.emit('messageCreate', otherBot.message);
+  client.emit('messageCreate', failed.message);
   for (let attempt = 0; attempt < 100
-    && (stored.length < 2 || unauthorized.replies.length < 1); attempt += 1) {
+    && (stored.length < 2 || unauthorized.replies.length < 1 || failed.reactions.length < 1); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
@@ -586,13 +600,21 @@ test('transfer-text accepts authorized users and webhooks while rejecting other 
     { text: 'webhook payload', timestamp: 1000 },
     { text: 'authorized payload', timestamp: 1001 },
   ]);
-  assert.deepEqual(webhook.reactions, ['✅']);
-  assert.deepEqual(authorized.reactions, ['✅']);
+  assert.deepEqual(transferEvents, [
+    'stored:webhook payload',
+    'deleted:webhook-message',
+    'stored:authorized payload',
+    'deleted:authorized-message',
+    'store-failed:failed payload',
+  ]);
+  assert.deepEqual(webhook.reactions, []);
+  assert.deepEqual(authorized.reactions, []);
   assert.equal(unauthorized.replies.length, 1);
   assert.match(unauthorized.replies[0].content, /拒否しました/);
   assert.deepEqual(unauthorized.replies[0].allowedMentions, { parse: [] });
   assert.deepEqual(otherBot.reactions, []);
   assert.deepEqual(otherBot.replies, []);
+  assert.deepEqual(failed.reactions, ['❌']);
 });
 
 test('ordinary messages in an unbound managed-project channel create and reuse one Codex task', async (context) => {

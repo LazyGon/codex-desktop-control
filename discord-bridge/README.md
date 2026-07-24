@@ -17,7 +17,8 @@ outbound connection to Discord.
 - Creates a private `Others` category with a `transfer-text` channel. Messages
   from configured authorized users or Discord webhooks are written verbatim as
   UTF-8 to `data/transfer-text/<timestamp>.txt`; only the newest timestamped
-  text file is retained. This inbox does not create or deliver a Codex task.
+  text file is retained. The source Discord message is deleted only after the
+  local write succeeds. This inbox does not create or deliver a Codex task.
 - Pins one persistent control panel in `codex-remote` and one in every task
   channel. The global panel exposes status, account usage, read-only Codex
   resource inventory, full sync, pending requests, and task navigation. Task
@@ -313,7 +314,8 @@ time is deferred before execution.
   ignores other bot messages, and writes only the message body to the fixed
   runtime inbox. Embeds and attachments are not stored. A successful write
   creates one numeric millisecond timestamp `.txt` file and removes the prior
-  timestamped text file.
+  timestamped text file, then deletes the source Discord message. A failed
+  local write leaves the Discord message in place.
 - Slash commands, buttons, selects, and modal submissions use the same
   `authorizedUserIds` check. Completion recipients are configured independently
   through `completionMentionUserIds`; each Discord prompt also records and

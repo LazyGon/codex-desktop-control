@@ -130,9 +130,10 @@ unrelated categories do not create tasks from ordinary messages.
 It accepts a body from an authorized human or Discord webhook and stores it
 verbatim as UTF-8 at `data\transfer-text\<timestamp>.txt`. The timestamp is a
 numeric millisecond value. Exactly one generated `.txt` file is kept: after a
-new file is safely written, the previous timestamped file is removed. Other
-bots are ignored, and attachments or embeds without a message body are not
-stored or sent to Codex.
+new file is safely written, the previous timestamped file is removed and the
+source Discord message is deleted. If the local write fails, the Discord
+message remains for recovery. Other bots are ignored, and attachments or
+embeds without a message body are not stored or sent to Codex.
 
 Discord input uses an app-server `clientUserMessageId` as its immediate stable
 identity. The Bridge posts the orange user card after `turn/start` or

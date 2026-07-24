@@ -334,7 +334,7 @@ export class DiscordController {
       ? await ensureTextChannel(
         state.infrastructure.transferTextChannelId,
         this.config.transferTextChannelName,
-        'Stores the latest authorized user or webhook message as a local UTF-8 text file',
+        'Stores the latest authorized user or webhook message locally, then deletes the Discord source',
         transferCategory,
       )
       : null;
@@ -636,18 +636,9 @@ export class DiscordController {
       return;
     }
 
+    let stored;
     try {
-      const stored = await this.textTransferStore.store(content, message.createdTimestamp);
-      await message.react('✅').catch(() => {});
-      this.#log('transfer-text-stored', {
-        channelId: message.channelId,
-        messageId: message.id,
-        userId: isWebhook ? null : message.author.id,
-        webhookId: message.webhookId ?? null,
-        filename: stored.filename,
-        path: stored.path,
-        bytes: stored.bytes,
-      });
+      stored = await this.textTransferStore.store(content, message.createdTimestamp);
     } catch (error) {
       await message.react('❌').catch(() => {});
       await this.#postAlert(
@@ -656,6 +647,30 @@ export class DiscordController {
       ).catch(() => {});
       throw error;
     }
+
+    try {
+      await message.delete();
+    } catch (error) {
+      if (error.code !== 10008) {
+        await message.react('❌').catch(() => {});
+        await this.#postAlert(
+          `transfer-textはローカル保存済みですが、Discordメッセージの削除に失敗しました: ${message.id}\n${truncate(error.message, 1700)}`,
+          'error',
+        ).catch(() => {});
+        throw error;
+      }
+    }
+
+    this.#log('transfer-text-stored', {
+      channelId: message.channelId,
+      messageId: message.id,
+      userId: isWebhook ? null : message.author.id,
+      webhookId: message.webhookId ?? null,
+      filename: stored.filename,
+      path: stored.path,
+      bytes: stored.bytes,
+      sourceMessageDeleted: true,
+    });
   }
 
   async #handleChannelUpdate(oldChannel, newChannel) {
