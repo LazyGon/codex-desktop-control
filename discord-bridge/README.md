@@ -63,6 +63,11 @@ outbound connection to Discord.
   `📦 Download project` button. After an explicit secret-exposure confirmation,
   the Bridge includes `.git` and protected regular files, skips filesystem
   links and special entries, and posts ordered 7z volumes plus a JSON manifest.
+- Downloads only the task working directory's root `.git` entry from the
+  `🗃️ Download .git` button. The archive preserves `<project>/.git`, excludes
+  working-tree files and nested repositories, supports normal `.git`
+  directories and worktree `.git` files, and uses the same confirmation,
+  link-exclusion, volume, and manifest safeguards.
 - Uploads files up to the configured transfer maximum. Files above one Discord
   attachment are packaged as ordered 7z volumes and accompanied by a JSON
   manifest containing original-file and per-volume SHA-256 hashes.
@@ -287,6 +292,10 @@ time is deferred before execution.
   regular file under the task working directory, including `.git` and likely
   secrets. It still excludes symbolic links, junctions, and special filesystem
   entries, and verifies source size and modification time after archiving.
+- `🗃️ Download .git` is the narrower deliberate exception. It includes only
+  the root `.git` directory or worktree gitfile after warning that Git history,
+  remote URLs, hooks, configuration, and credentials may be exposed. It does
+  not include ordinary working-tree files or nested repositories.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
   and user allowlist. Unbound control, archive, and unrelated channels never

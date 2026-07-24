@@ -129,6 +129,11 @@ export function taskPanelPayload({ thread, binding }) {
           .setLabel('Download project')
           .setEmoji('📦')
           .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`cx:ui:task:git:${thread.id}`)
+          .setLabel('Download .git')
+          .setEmoji('🗃️')
+          .setStyle(ButtonStyle.Secondary),
       ),
     ],
     allowedMentions: { parse: [] },

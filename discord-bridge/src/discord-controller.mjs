@@ -54,9 +54,11 @@ import {
 import {
   cleanupStaleSplitArchives,
   createSplit7zArchive,
+  createSplit7zGitArchive,
   createSplit7zProjectArchive,
   createSplitZipArchive,
   disposeSplitArchive,
+  gitArchiveManifest,
   hashResolvedFile,
   linkedFilesArchiveManifest,
   projectArchiveManifest,
@@ -1400,6 +1402,85 @@ export class DiscordController {
     }
   }
 
+  async #sendGitArchive(channel, binding, userId) {
+    this.#assertFileSharingEnabled();
+    if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
+    this.#log('git-archive-started', {
+      userId,
+      channelId: channel.id,
+      threadId: binding.threadId,
+      projectRoot: binding.cwd,
+    });
+    const archive = await createSplit7zGitArchive(binding.cwd, {
+      volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+      tempRoot: this.fileTransferTempRoot,
+      archiverPath: this.config.fileShareArchiverPath,
+    });
+    try {
+      this.#log('git-archive-prepared', {
+        userId,
+        channelId: channel.id,
+        threadId: binding.threadId,
+        files: archive.project.files.length,
+        sourceBytes: archive.project.sourceBytes,
+        archiveBytes: archive.archiveBytes,
+        volumes: archive.volumes.length,
+        gitEntryType: archive.project.gitEntryType,
+      });
+      const firstMessage = await channel.send(messageOptions([
+        '**Codex .git archive**',
+        `Project: \`${truncate(archive.project.projectName, 500)}\``,
+        `Files: ${archive.project.files.length} / Source: ${formatFileSize(archive.project.sourceBytes)}`,
+        `Archive: ${formatFileSize(archive.archiveBytes)} / 7z / ${archive.volumes.length} volume(s)`,
+        `Includes only: \`${archive.project.projectName}/.git\` (${archive.project.gitEntryType})`,
+        `Skipped filesystem links/special entries: ${archive.project.skippedLinks.length + archive.project.skippedSpecial.length}`,
+        archive.volumes.length > 1
+          ? `全volumeを同じフォルダへ保存し、\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`
+          : `\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`,
+      ].join('\n')));
+      for (const volume of archive.volumes) {
+        await channel.send({
+          content: `**${archive.archiveName}** volume ${volume.index + 1}/${archive.volumes.length}`,
+          files: [new AttachmentBuilder(await readArchiveVolume(volume), { name: volume.name })],
+          allowedMentions: { parse: [] },
+        });
+        this.#log('git-archive-volume-uploaded', {
+          userId,
+          channelId: channel.id,
+          threadId: binding.threadId,
+          volume: volume.index + 1,
+          volumes: archive.volumes.length,
+          bytes: volume.size,
+        });
+      }
+      const manifest = Buffer.from(`${JSON.stringify(gitArchiveManifest(archive), null, 2)}\n`, 'utf8');
+      await channel.send({
+        content: `**${archive.archiveName}** .git manifest`,
+        files: [new AttachmentBuilder(manifest, {
+          name: safeAttachmentName(archive.project.projectName, '.git.7z-manifest.json'),
+        })],
+        allowedMentions: { parse: [] },
+      });
+      this.#log('git-archive-downloaded', {
+        userId,
+        channelId: channel.id,
+        threadId: binding.threadId,
+        projectName: archive.project.projectName,
+        files: archive.project.files.length,
+        sourceBytes: archive.project.sourceBytes,
+        archiveBytes: archive.archiveBytes,
+        volumes: archive.volumes.length,
+        skippedLinks: archive.project.skippedLinks.length,
+        skippedSpecial: archive.project.skippedSpecial.length,
+        gitEntryType: archive.project.gitEntryType,
+      });
+      return firstMessage.url ?? this.#discordMessageUrl(channel.id, firstMessage.id);
+    } finally {
+      await disposeSplitArchive(archive);
+    }
+  }
+
   async #downloadFile(interaction, file, threadId) {
     const binding = this.stateStore.binding(threadId);
     if (!binding) throw new Error('ファイルの投稿先タスクが見つかりません。');
@@ -2092,6 +2173,22 @@ export class DiscordController {
           );
           return;
         }
+        if (action === 'git') {
+          this.#assertFileSharingEnabled();
+          if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
+          const maximum = formatFileSize(this.config.fileShareMaxBytes ?? 512_000_000);
+          await this.#showConfirmation(
+            interaction,
+            { type: 'gitArchive', threadId },
+            [
+              `プロジェクト直下の \`${truncate(path.join(binding.cwd, '.git'), 1200)}\` だけをタスクチャンネルへ投稿しますか？`,
+              'Git履歴、remote URL、設定、hooks、資格情報を含む可能性があります。作業ツリーの通常ファイルは含めません。',
+              `転送上限は ${maximum} です。.git内のsymlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。`,
+            ].join('\n'),
+            '.gitを作成',
+          );
+          return;
+        }
         if (action === 'archive') {
           await interaction.deferReply({ ephemeral: true });
           if (binding.archived) {
@@ -2186,6 +2283,18 @@ export class DiscordController {
         const url = await this.#sendProjectArchive(channel, binding, interaction.user.id);
         await interaction.editReply({
           content: `プロジェクトarchiveを投稿しました: ${url}`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+      if (action.type === 'gitArchive') {
+        const binding = this.#assertTaskPanelInteraction(interaction, action.threadId);
+        const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+        await interaction.editReply({ content: '.git archiveを作成しています...', embeds: [], components: [] });
+        const url = await this.#sendGitArchive(channel, binding, interaction.user.id);
+        await interaction.editReply({
+          content: `.git archiveを投稿しました: ${url}`,
           embeds: [],
           components: [],
         });

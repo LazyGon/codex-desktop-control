@@ -9,13 +9,16 @@ import { resolveShareFile } from '../src/local-file-share.mjs';
 import {
   cleanupStaleSplitArchives,
   createSplit7zArchive,
+  createSplit7zGitArchive,
   createSplit7zProjectArchive,
   createSplitZipArchive,
   discover7Zip,
   disposeSplitArchive,
+  gitArchiveManifest,
   linkedFilesArchiveManifest,
   projectArchiveManifest,
   readArchiveVolume,
+  scanGitTree,
   scanProjectTree,
   splitArchiveManifest,
 } from '../src/split-archive.mjs';
@@ -204,6 +207,99 @@ test('project archive includes .git and protected files under the outer project 
   } finally {
     await disposeSplitArchive(archive);
   }
+});
+
+test('.git archive excludes the working tree and preserves the outer project directory', async (context) => {
+  const executable = discover7Zip();
+  if (!executable) {
+    context.skip('7z.exe is not installed');
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-git-archive-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, 'sample-project');
+  const tempRoot = path.join(root, 'transfers');
+  const output = path.join(root, 'output');
+  fs.mkdirSync(path.join(project, '.git', 'objects'), { recursive: true });
+  fs.mkdirSync(path.join(project, 'src'), { recursive: true });
+  fs.mkdirSync(output);
+  fs.writeFileSync(path.join(project, '.git', 'config'), '[remote "origin"]\nurl = example\n', 'utf8');
+  fs.writeFileSync(path.join(project, '.git', 'objects', 'payload.bin'), randomBytes(30_000));
+  fs.writeFileSync(path.join(project, '.env'), 'TOKEN=secret\n', 'utf8');
+  fs.writeFileSync(path.join(project, 'src', 'index.js'), 'console.log("working tree");\n', 'utf8');
+
+  const outside = path.join(root, 'outside.txt');
+  const link = path.join(project, '.git', 'outside-link.txt');
+  fs.writeFileSync(outside, 'outside', 'utf8');
+  let linkCreated = false;
+  try {
+    fs.symlinkSync(outside, link, 'file');
+    linkCreated = true;
+  } catch (error) {
+    if (error.code !== 'EPERM') throw error;
+  }
+
+  const archive = await createSplit7zGitArchive(project, {
+    volumeBytes: 10_000,
+    maxBytes: 100_000,
+    tempRoot,
+    archiverPath: executable,
+  });
+  try {
+    assert.equal(archive.format, 'split-7z-git-v1');
+    assert.match(archive.archiveName, /\.git\.7z$/);
+    assert.ok(archive.volumes.length > 1);
+    assert.ok(archive.project.files.every((file) => file.relativePath === '.git'
+      || file.relativePath.startsWith(`.git${path.sep}`)));
+    assert.equal(archive.project.files.some((file) => file.relativePath === '.env'), false);
+    assert.equal(archive.project.files.some((file) => file.relativePath.startsWith(`src${path.sep}`)), false);
+    if (linkCreated) assert.deepEqual(archive.project.skippedLinks, [path.join('.git', 'outside-link.txt')]);
+
+    const manifest = gitArchiveManifest(archive);
+    assert.equal(manifest.schema, 'codex-discord-git-transfer/v1');
+    assert.equal(manifest.includesOnlyRootGit, true);
+    assert.equal(manifest.gitEntryType, 'directory');
+    assert.equal(manifest.archive.entryRoot, path.join('sample-project', '.git'));
+
+    const extraction = spawnSync(executable, [
+      'x',
+      '-y',
+      `-o${output}`,
+      archive.volumes[0].path,
+    ], { encoding: 'utf8', windowsHide: true });
+    assert.equal(extraction.status, 0, `${extraction.stdout}\n${extraction.stderr}`);
+    const extractedRoot = path.join(output, 'sample-project');
+    assert.equal(
+      fs.readFileSync(path.join(extractedRoot, '.git', 'config'), 'utf8'),
+      '[remote "origin"]\nurl = example\n',
+    );
+    assert.deepEqual(
+      fs.readFileSync(path.join(extractedRoot, '.git', 'objects', 'payload.bin')),
+      fs.readFileSync(path.join(project, '.git', 'objects', 'payload.bin')),
+    );
+    assert.equal(fs.existsSync(path.join(extractedRoot, '.env')), false);
+    assert.equal(fs.existsSync(path.join(extractedRoot, 'src')), false);
+    if (linkCreated) assert.equal(fs.existsSync(path.join(extractedRoot, '.git', 'outside-link.txt')), false);
+  } finally {
+    await disposeSplitArchive(archive);
+  }
+});
+
+test('.git scanner supports a worktree gitfile and rejects a missing root .git', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-gitfile-scan-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, 'worktree');
+  fs.mkdirSync(project);
+  fs.writeFileSync(path.join(project, '.git'), 'gitdir: C:/repo/.git/worktrees/worktree\n', 'utf8');
+  fs.writeFileSync(path.join(project, 'working.txt'), 'not included', 'utf8');
+
+  const snapshot = await scanGitTree(project, 10_000);
+  assert.equal(snapshot.gitEntryType, 'file');
+  assert.deepEqual(snapshot.files.map((file) => file.relativePath), ['.git']);
+
+  const missing = path.join(root, 'missing');
+  fs.mkdirSync(missing);
+  await assert.rejects(scanGitTree(missing, 10_000), /直下に \.git がありません/);
 });
 
 test('project scan enforces the transfer ceiling before archiving', async (context) => {

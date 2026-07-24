@@ -40,7 +40,8 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    task autocomplete. On an assistant card, use `Linked files` to select a
    local file that Codex linked in its message. To retrieve the entire working
    directory, tap `📦 Download project`, review the secret-exposure warning,
-   and confirm `Archiveを作成`.
+   and confirm `Archiveを作成`. To retrieve only Git metadata, tap
+   `🗃️ Download .git` and confirm `.gitを作成`.
 
 The `Linked files` picker also provides `Download all as ZIP`. It archives all
 currently permitted links, preserves each project-relative path, skips entries
@@ -61,6 +62,13 @@ symlinks, junctions, and special filesystem entries. Download every
 single-volume transfer is opened as `.project.7z`. Extraction creates the outer
 project directory. Both source and archive must fit under the configured
 transfer maximum.
+The `.git`-only archive uses `.git.7z.*` volumes and a
+`.git.7z-manifest.json`. Extraction creates `<project>/.git` while excluding
+the rest of the working tree and nested repositories. A normal `.git`
+directory and a worktree `.git` file are both accepted. Root or nested
+filesystem links and special entries are never followed. The confirmation
+warns that Git history, remote URLs, hooks, configuration, and credentials can
+be present.
 The project browser itself never leaves the task working directory. A file
 explicitly linked by Codex may also resolve in a sibling repository under a
 parent shared by managed projects, which covers cross-repository work without

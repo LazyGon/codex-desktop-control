@@ -995,6 +995,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const project = path.join(directory, 'project');
   fs.mkdirSync(project);
+  fs.mkdirSync(path.join(project, '.git', 'objects'), { recursive: true });
   const safePath = path.join(project, 'artifact.txt');
   const secretPath = path.join(project, '.env');
   const siblingProject = path.join(directory, 'sibling-project');
@@ -1003,6 +1004,8 @@ test('task file UI browses project entries and resolves only safe assistant-link
   fs.writeFileSync(safePath, 'artifact', 'utf8');
   fs.writeFileSync(secretPath, 'TOKEN=secret', 'utf8');
   fs.writeFileSync(path.join(project, 'archive-payload.bin'), randomBytes(30_000));
+  fs.writeFileSync(path.join(project, '.git', 'config'), '[core]\nrepositoryformatversion = 0\n', 'utf8');
+  fs.writeFileSync(path.join(project, '.git', 'objects', 'payload.bin'), randomBytes(30_000));
   fs.writeFileSync(siblingPath, 'cross-project', 'utf8');
 
   const client = new EventEmitter();
@@ -1106,6 +1109,19 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.match(projectConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
   assert.equal(projectConfirm.label, 'Archiveを作成');
 
+  const gitDownload = interaction(`cx:ui:task:git:${binding.threadId}`);
+  client.emit('interactionCreate', gitDownload);
+  for (let attempt = 0; attempt < 100 && !gitDownload.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(gitDownload.lastReply.content, /\.git.*だけ/);
+  assert.match(gitDownload.lastReply.content, /Git履歴/);
+  assert.match(gitDownload.lastReply.content, /通常ファイルは含めません/);
+  assert.match(gitDownload.lastReply.content, /symlink・junction/);
+  const gitConfirm = gitDownload.lastReply.components[0].toJSON().components[0];
+  assert.match(gitConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
+  assert.equal(gitConfirm.label, '.gitを作成');
+
   const linked = interaction('cx:files:linked', {
     id: 'assistant-card',
     embeds: [],
@@ -1171,5 +1187,21 @@ test('task file UI browses project entries and resolves only safe assistant-link
     const projectAttachments = filePosts.slice(projectStart + 1).flatMap((post) => post.files ?? []);
     assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z.001')));
     assert.ok(projectAttachments.some((file) => file.name.endsWith('.project.7z-manifest.json')));
+
+    const gitStart = filePosts.length;
+    const confirmedGit = interaction(gitConfirm.custom_id);
+    client.emit('interactionCreate', confirmedGit);
+    for (let attempt = 0; attempt < 200 && !/投稿しました/.test(confirmedGit.lastReply?.content ?? ''); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.match(confirmedGit.lastReply.content, /https:\/\/discord\.test\//);
+    assert.match(filePosts[gitStart].content, /Codex \.git archive/);
+    assert.match(filePosts[gitStart].content, /Includes only: `project\/\.git`/);
+    const gitVolumePosts = filePosts.slice(gitStart + 1, -1);
+    assert.ok(gitVolumePosts.length > 1);
+    assert.ok(gitVolumePosts.every((post) => post.files?.length === 1));
+    const gitAttachments = filePosts.slice(gitStart + 1).flatMap((post) => post.files ?? []);
+    assert.ok(gitAttachments.some((file) => file.name.endsWith('.git.7z.001')));
+    assert.ok(gitAttachments.some((file) => file.name.endsWith('.git.7z-manifest.json')));
   }
 });

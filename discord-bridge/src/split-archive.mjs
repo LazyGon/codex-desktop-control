@@ -366,6 +366,98 @@ export async function scanProjectTree(projectRoot, maxBytes) {
   return { root, projectName, files, sourceBytes, skippedLinks, skippedSpecial };
 }
 
+export async function scanGitTree(projectRoot, maxBytes) {
+  const root = path.resolve(projectRoot);
+  const rootStat = await fs.promises.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('プロジェクトルートは通常のディレクトリである必要があります。');
+  }
+  const projectName = path.basename(root);
+  if (!projectName || /[\r\n]/.test(projectName)) throw new Error('プロジェクトフォルダ名をアーカイブできません。');
+  const gitPath = path.join(root, '.git');
+  let gitStat;
+  try {
+    gitStat = await fs.promises.lstat(gitPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('プロジェクト直下に .git がありません。');
+    throw error;
+  }
+  if (gitStat.isSymbolicLink()) {
+    throw new Error('symlinkまたはjunctionの .git はアーカイブできません。');
+  }
+  if (!gitStat.isDirectory() && !gitStat.isFile()) {
+    throw new Error('.git は通常のディレクトリまたはファイルである必要があります。');
+  }
+  if (gitStat.isFile()) {
+    if (gitStat.size > maxBytes) {
+      throw new Error(`.git が転送上限を超えています (${gitStat.size} > ${maxBytes} bytes)。`);
+    }
+    return {
+      root,
+      projectName,
+      gitEntryType: 'file',
+      files: [{
+        relativePath: '.git',
+        size: gitStat.size,
+        mtimeMs: gitStat.mtimeMs,
+      }],
+      sourceBytes: gitStat.size,
+      skippedLinks: [],
+      skippedSpecial: [],
+    };
+  }
+
+  const files = [];
+  const skippedLinks = [];
+  const skippedSpecial = [];
+  const pending = ['.git'];
+  let sourceBytes = 0;
+  while (pending.length > 0) {
+    const relativeDirectory = pending.pop();
+    const absoluteDirectory = path.join(root, relativeDirectory);
+    const entries = await fs.promises.readdir(absoluteDirectory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (/[\r\n]/.test(entry.name)) throw new Error(`改行を含むファイル名はアーカイブできません: ${entry.name}`);
+      const relativePath = path.join(relativeDirectory, entry.name);
+      const absolutePath = path.join(root, relativePath);
+      const stat = await fs.promises.lstat(absolutePath);
+      if (stat.isSymbolicLink()) {
+        skippedLinks.push(relativePath);
+        continue;
+      }
+      if (stat.isDirectory()) {
+        pending.push(relativePath);
+        continue;
+      }
+      if (!stat.isFile()) {
+        skippedSpecial.push(relativePath);
+        continue;
+      }
+      sourceBytes += stat.size;
+      if (sourceBytes > maxBytes) {
+        throw new Error(`.git が転送上限を超えています (${sourceBytes} > ${maxBytes} bytes)。`);
+      }
+      files.push({
+        relativePath,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      });
+    }
+  }
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  if (files.length === 0) throw new Error('.git にアーカイブ可能な通常ファイルがありません。');
+  return {
+    root,
+    projectName,
+    gitEntryType: 'directory',
+    files,
+    sourceBytes,
+    skippedLinks,
+    skippedSpecial,
+  };
+}
+
 async function verifyProjectSnapshot(snapshot) {
   for (const file of snapshot.files) {
     const current = await fs.promises.lstat(path.join(snapshot.root, file.relativePath));
@@ -438,6 +530,68 @@ export async function createSplit7zProjectArchive(projectRoot, {
   }
 }
 
+export async function createSplit7zGitArchive(projectRoot, {
+  volumeBytes,
+  maxBytes,
+  tempRoot,
+  archiverPath = null,
+}) {
+  if (!Number.isSafeInteger(volumeBytes) || volumeBytes <= 0) throw new Error('Invalid archive volume size.');
+  const resolvedTempRoot = path.resolve(tempRoot);
+  const executable = discover7Zip(archiverPath);
+  if (!executable) {
+    throw new Error('.git転送には7-Zipが必要です。7z.exeをインストールするかfileShareArchiverPathを設定してください。');
+  }
+  const snapshot = await scanGitTree(projectRoot, maxBytes);
+  await fs.promises.mkdir(resolvedTempRoot, { recursive: true });
+  const directory = await fs.promises.mkdtemp(path.join(resolvedTempRoot, TRANSFER_DIRECTORY_PREFIX));
+  assertManagedTransferDirectory(resolvedTempRoot, directory);
+  const archiveName = safeAttachmentName(snapshot.projectName, '.git.7z');
+  const archivePath = path.join(directory, archiveName);
+  const listPath = path.join(directory, 'git-files.utf8.lst');
+  try {
+    const list = snapshot.files
+      .map((file) => path.join(snapshot.projectName, file.relativePath))
+      .join('\n');
+    await fs.promises.writeFile(listPath, `${list}\n`, 'utf8');
+    await run7Zip(executable, [
+      'a',
+      '-t7z',
+      '-mx=1',
+      '-bd',
+      '-bso0',
+      '-bsp0',
+      '-y',
+      '-scsUTF-8',
+      `-v${volumeBytes}b`,
+      archivePath,
+      `@${listPath}`,
+    ], path.dirname(snapshot.root));
+    await verifyProjectSnapshot(snapshot);
+    const { volumes, archiveBytes } = await collectArchiveVolumes(
+      directory,
+      archiveName,
+      archivePath,
+      volumeBytes,
+      maxBytes,
+    );
+    return {
+      tempRoot: resolvedTempRoot,
+      directory,
+      executable,
+      format: volumes.length > 1 ? 'split-7z-git-v1' : 'single-7z-git-v1',
+      volumeBytes,
+      archiveName,
+      archiveBytes,
+      volumes,
+      project: snapshot,
+    };
+  } catch (error) {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 export async function readArchiveVolume(volume) {
   const content = await fs.promises.readFile(volume.path);
   const sha256 = createHash('sha256').update(content).digest('hex');
@@ -488,6 +642,38 @@ export function projectArchiveManifest(archive) {
       type: '7z',
       compressionLevel: 'fast',
       entryRoot: archive.project.projectName,
+      size: archive.archiveBytes,
+      volumeBytes: archive.volumeBytes,
+      volumes: archive.volumes.map((volume) => ({
+        name: volume.name,
+        index: volume.index + 1,
+        size: volume.size,
+        sha256: volume.sha256,
+      })),
+    },
+    extraction: archive.volumes.length > 1
+      ? `Place every volume together and open ${archive.volumes[0].name} with a 7z-compatible app.`
+      : `Open ${archive.volumes[0].name} with a 7z-compatible app.`,
+  };
+}
+
+export function gitArchiveManifest(archive) {
+  return {
+    schema: 'codex-discord-git-transfer/v1',
+    format: archive.format,
+    projectName: archive.project.projectName,
+    gitEntryType: archive.project.gitEntryType,
+    fileCount: archive.project.files.length,
+    sourceBytes: archive.project.sourceBytes,
+    includesOnlyRootGit: archive.project.files.every((file) => file.relativePath === '.git'
+      || file.relativePath.startsWith(`.git${path.sep}`)),
+    includesProtectedFiles: true,
+    skippedLinks: archive.project.skippedLinks,
+    skippedSpecial: archive.project.skippedSpecial,
+    archive: {
+      type: '7z',
+      compressionLevel: 'fast',
+      entryRoot: path.join(archive.project.projectName, '.git'),
       size: archive.archiveBytes,
       volumeBytes: archive.volumeBytes,
       volumes: archive.volumes.map((volume) => ({
