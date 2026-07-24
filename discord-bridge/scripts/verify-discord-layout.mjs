@@ -183,6 +183,7 @@ try {
       [
         `cx:ui:task:compose:${threadId}`,
         `cx:ui:task:watch:${threadId}`,
+        `cx:ui:task:completion:${threadId}`,
         `cx:ui:task:refresh:${threadId}`,
         `cx:ui:task:pending:${threadId}`,
         `cx:ui:task:controls:${threadId}`,

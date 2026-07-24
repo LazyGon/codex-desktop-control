@@ -2239,6 +2239,27 @@ export class DiscordController {
           await interaction.followUp(messageOptions(`通知レベルを **${level}** に設定しました。`, { ephemeral: true }));
           return;
         }
+        if (action === 'completion') {
+          const selection = interaction.values[0];
+          if (!['enabled', 'disabled'].includes(selection)) {
+            throw new Error(`Unknown completion-report setting: ${selection}`);
+          }
+          const enabled = selection === 'enabled';
+          await interaction.deferUpdate();
+          this.stateStore.setBinding(threadId, { completionReportsEnabled: enabled });
+          const result = await this.codex.threadMetadata(threadId).catch(() => null);
+          const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+          await this.#ensureTaskPanel(
+            result?.thread ?? this.#threadFromBinding({ ...binding, completionReportsEnabled: enabled }),
+            channel,
+            binding.archived,
+          );
+          await interaction.followUp(messageOptions(
+            `完了報告への投稿を **${enabled ? 'ON' : 'OFF'}** に設定しました。`,
+            { ephemeral: true },
+          ));
+          return;
+        }
       }
       return;
     }
@@ -3142,6 +3163,7 @@ export class DiscordController {
       cwd: thread.cwd ?? null,
       sessionPath: thread.path ?? existing?.sessionPath ?? null,
       watchLevel: existing?.watchLevel ?? this.config.defaultWatchLevel,
+      completionReportsEnabled: existing?.completionReportsEnabled ?? true,
       lastCompletedTurnId: existing?.lastCompletedTurnId ?? null,
       snapshotInitialized: existing?.snapshotInitialized ?? false,
     });
@@ -4193,7 +4215,13 @@ export class DiscordController {
       });
     });
     if (turn.status === 'completed') {
-      await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
+      const notice = await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
+      if (!notice) {
+        this.#log('completion-notice-suppressed', {
+          threadId: binding.threadId,
+          turnId: turn.id,
+        });
+      }
       this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
     }
     this.turnViews.delete(`${binding.threadId}:${turn.id}`);
@@ -4201,6 +4229,7 @@ export class DiscordController {
   }
 
   async #postCompletionNotice(completionMessage, finalText, threadId, turnId) {
+    if (this.stateStore.binding(threadId)?.completionReportsEnabled === false) return null;
     const { completions } = await this.infrastructureReady;
     const record = this.stateStore.turnRecord(threadId, turnId) ?? {};
     let notice = record.completionNoticeMessageId
@@ -4720,13 +4749,27 @@ export class DiscordController {
     if (!missedCompletion?.needsCompletionNotice) return;
 
     const { turn } = missedCompletion;
+    if (this.stateStore.binding(binding.threadId)?.completionReportsEnabled === false) {
+      this.#log('missed-completion-notice-suppressed', {
+        threadId: binding.threadId,
+        turnId: turn.id,
+      });
+      this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
+      return;
+    }
     const record = this.stateStore.turnRecord(binding.threadId, turn.id);
     const completionMessage = record?.finalMessageIds?.[0]
       ? await channel.messages.fetch(record.finalMessageIds[0]).catch(() => null)
       : null;
     if (!completionMessage) return;
     const finalText = missedCompletion.finalText || turn.error?.message || '(textなし)';
-    await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
+    const notice = await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
+    if (!notice) {
+      this.#log('missed-completion-notice-suppressed', {
+        threadId: binding.threadId,
+        turnId: turn.id,
+      });
+    }
     this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
   }
 

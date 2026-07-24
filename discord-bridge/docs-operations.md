@@ -77,8 +77,9 @@ opening arbitrary-path input.
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
 requests, and task navigation. Each pinned task panel provides delivery mode,
-watch level, detailed status, task-scoped pending requests, a task control
-center, archive/restore, and confirmed interrupt. The control center uses
+watch level, a per-task completion-report selector, detailed status, task-scoped
+pending requests, a task control center, archive/restore, and confirmed
+interrupt. The control center uses
 dropdowns populated from the shared app-server for model, reasoning effort,
 named permission profile, and Plan/Default mode. Its More menu includes Fast/
 service tier, personality, memory, goal, context compact, fork, review, and
@@ -143,13 +144,19 @@ is used to replace the provisional identity with the server item ID on the
 existing card. Failure to receive a server item ID within five seconds is
 therefore no longer reported as an instruction-send failure.
 
-When a turn completes, `codex-completions` starts by mentioning the configured
-user with `タスクが完了しました。`, puts a one-line final-answer summary on the
-second line, and uses the bare completion-message URL as the final line so
-Discord renders its channel-aware compact form.
+When a turn completes and that task's completion-report setting is ON,
+`codex-completions` starts by mentioning the configured user with
+`タスクが完了しました。`, puts a one-line final-answer summary on the second
+line, and uses the bare completion-message URL as the final line so Discord
+renders its channel-aware compact form. The setting defaults to ON. Selecting
+OFF in the pinned task panel leaves final cards in the task channel but skips
+future completion posts, including reconnect recovery for turns completed
+while OFF.
 
 `normal` is the default watch level. `quiet` keeps only completions, errors,
-and requests. `verbose` adds all item and token details to the live view.
+and requests in the task view. `verbose` adds all item and token details to the
+live view. The completion-report selector independently controls
+`codex-completions` posts.
 
 ## Connection recovery
 
@@ -158,11 +165,13 @@ app-server reconnects, every non-archived task is resumed on the same server and
 from persisted history. Historical reconciliation backfills user cards and final
 assistant cards only. Commentary is captured while the turn is actively subscribed;
 already-persisted commentary cards are preserved by task, turn, and item identity.
-A completed turn not matching
-the binding's last known turn ID is posted as a missed completion before normal
-streaming resumes. Final and notification message IDs are persisted separately,
-and visible identity markers are checked during recovery, so interruption
-between Discord delivery and local state persistence does not duplicate a turn.
+A completed turn not matching the binding's last known turn ID is posted as a
+missed completion before normal streaming resumes, unless completion reporting
+was OFF for that task. Suppressed turns are marked handled and are not posted
+later after the setting is re-enabled. Final and notification message IDs are
+persisted separately, and visible identity markers are checked during recovery,
+so interruption between Discord delivery and local state persistence does not
+duplicate a turn.
 
 Use `Get-DiscordBridgeStatus.ps1` when the bot appears offline. Relevant files:
 

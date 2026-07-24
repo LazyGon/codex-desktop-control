@@ -37,6 +37,7 @@ test('completed turns replace the pinned task panel below the final card exactly
     name: 'Panel task',
     cwd: 'C:\\work',
     watchLevel: 'normal',
+    completionReportsEnabled: true,
     archived: false,
     taskStatus: 'active',
     controlPanelMessageId: 'panel-old',
@@ -214,7 +215,158 @@ test('completed turns replace the pinned task panel below the final card exactly
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(binding.controlPanelMessageId, firstPanelId);
   assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === taskPanelMarker(binding.threadId)).length, 1);
+
+  binding.completionReportsEnabled = false;
+  const suppressedNotification = {
+    method: 'turn/completed',
+    params: {
+      threadId: binding.threadId,
+      turn: {
+        id: 'turn-suppressed',
+        status: 'completed',
+        items: [
+          { type: 'userMessage', id: 'suppressed-user', content: [{ type: 'text', text: 'Keep this local.' }] },
+          { type: 'agentMessage', id: 'suppressed-final', phase: 'final_answer', text: 'Not reported.' },
+        ],
+      },
+    },
+  };
+  codex.emit('notification', suppressedNotification);
+  for (let attempt = 0; attempt < 100 && binding.lastPanelCompletionTurnId !== 'turn-suppressed'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(binding.lastPanelCompletionTurnId, 'turn-suppressed');
+  assert.equal(binding.lastNotifiedCompletedTurnId, 'turn-suppressed');
+  assert.equal(binding.turnMessages['turn-suppressed'].finalText, 'Not reported.');
+  assert.equal(completionMessages.size, 1);
+  const suppressedPanel = channelMessages.get(binding.controlPanelMessageId);
+  assert.equal(
+    suppressedPanel.embeds[0].fields.find((field) => field.name === 'Completion report').value,
+    'OFF',
+  );
   if (controller.taskSyncDebounceTimer) clearTimeout(controller.taskSyncDebounceTimer);
+});
+
+test('task panel completion-report selection persists the task setting', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-completion-setting-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const thread = {
+    id: 'thread-completion-setting',
+    name: 'Completion setting',
+    cwd: 'C:\\work',
+    status: { type: 'idle' },
+  };
+  const binding = {
+    threadId: thread.id,
+    channelId: 'task-channel',
+    name: thread.name,
+    cwd: thread.cwd,
+    watchLevel: 'normal',
+    completionReportsEnabled: true,
+    archived: false,
+    taskStatus: 'idle',
+    transcriptVersion: 11,
+    lastPanelCompletionTurnId: 'turn-missed',
+    runtimeSettings: {},
+  };
+  const stateStore = {
+    binding: (threadId) => threadId === binding.threadId ? structuredClone(binding) : null,
+    setBinding: (threadId, patch) => {
+      assert.equal(threadId, binding.threadId);
+      Object.assign(binding, patch);
+    },
+  };
+  const codex = new EventEmitter();
+  codex.threadMetadata = async () => ({ thread });
+  const channelMessages = new Map();
+  const channel = {
+    id: binding.channelId,
+    messages: {
+      fetch: async (value) => (typeof value === 'string' ? channelMessages.get(value) ?? null : new Map(channelMessages)),
+      fetchPinned: async () => new Map(),
+    },
+    send: async (payload) => {
+      const message = {
+        id: 'task-panel',
+        author: { id: client.user.id, bot: true },
+        content: payload.content ?? '',
+        embeds: payload.embeds,
+        components: payload.components,
+        pinned: false,
+        edit: async (next) => Object.assign(message, next),
+      };
+      channelMessages.set(message.id, message);
+      return message;
+    },
+  };
+  client.channels = { fetch: async () => channel };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      guildId: 'guild-1',
+      authorizedUserIds: ['user-1'],
+    },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const interaction = {
+    guildId: 'guild-1',
+    channelId: channel.id,
+    channel,
+    user: { id: 'user-1' },
+    customId: `cx:ui:task:completion:${thread.id}`,
+    values: ['disabled'],
+    deferred: false,
+    replied: false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => true,
+    isButton: () => false,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+    reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+    followUp: async function followUp(payload) { this.lastFollowUp = payload; return payload; },
+  };
+  client.emit('interactionCreate', interaction);
+  for (let attempt = 0; attempt < 100 && !interaction.lastFollowUp; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(binding.completionReportsEnabled, false);
+  assert.match(interaction.lastFollowUp.content, /OFF/);
+  const panel = channelMessages.get(binding.controlPanelMessageId);
+  assert.ok(panel);
+  const embed = panel.embeds[0].toJSON();
+  assert.equal(embed.fields.find((field) => field.name === 'Completion report').value, 'OFF');
+  const completionSelect = panel.components[4].toJSON().components[0];
+  assert.equal(completionSelect.options.find((option) => option.default).value, 'disabled');
+
+  codex.emit('subscriptionRestored', {
+    binding: structuredClone(binding),
+    thread: {
+      ...thread,
+      turns: [{ id: 'turn-missed', status: 'completed', items: [] }],
+    },
+    runtime: {},
+    missedCompletion: {
+      turn: { id: 'turn-missed', status: 'completed', items: [] },
+      finalText: 'Missed while disabled.',
+      needsCompletionMessage: false,
+      needsCompletionNotice: true,
+    },
+  });
+  for (let attempt = 0; attempt < 100 && binding.lastNotifiedCompletedTurnId !== 'turn-missed'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(binding.lastNotifiedCompletedTurnId, 'turn-missed');
 });
 
 test('ordinary allowed-user messages in bound task channels are delivered once', async (context) => {

@@ -143,10 +143,13 @@ deleted. A failed write leaves the message in Discord. This channel is a local
 text inbox and never sends content to Codex.
 
 `codex-remote` and every task channel contain a pinned control panel. Task
-panels provide delivery-mode and watch-level selects plus status refresh,
-pending requests, a task control center, archive/restore, and confirmed
-interrupt actions. After every turn ends, the task panel is reposted and pinned
-below the final card so its controls remain at the latest channel position.
+panels provide delivery-mode, watch-level, and per-task completion-report
+selects plus status refresh, pending requests, a task control center,
+archive/restore, and confirmed interrupt actions. Completion reporting defaults
+to ON; turning it OFF keeps final cards in the task channel but suppresses
+future `codex-completions` posts for that task. After every turn ends, the task
+panel is reposted and pinned below the final card so its controls remain at the
+latest channel position.
 Pinned control panels use a dedicated purple embed color, while completed
 Codex result cards remain blue, so the two surfaces are visually distinct.
 They also provide a project-file browser, while assistant

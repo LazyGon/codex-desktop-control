@@ -44,7 +44,7 @@ test('control panel exposes status, usage, resources, sync, pending, and task na
   ]);
 });
 
-test('task panel exposes mode and watch selects plus safe task and project-file actions', () => {
+test('task panel exposes delivery, watch, and completion selects plus safe file actions', () => {
   const thread = {
     id: 'thread-1',
     name: 'Task one',
@@ -63,6 +63,7 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
   ]);
   assert.equal(active.components[1].components[0].custom_id, `cx:ui:task:watch:${thread.id}`);
   assert.equal(active.components[1].components[0].options.find((option) => option.default).value, 'normal');
+  assert.equal(active.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'ON');
   assert.deepEqual(active.components[2].components.map((component) => component.custom_id), [
     `cx:ui:task:refresh:${thread.id}`,
     `cx:ui:task:pending:${thread.id}`,
@@ -81,10 +82,17 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
   assert.equal(active.components[3].components[2].custom_id, `cx:ui:task:git:${thread.id}`);
   assert.equal(active.components[3].components[2].label, 'Download .git');
   assert.equal(active.components[3].components[2].emoji.name, '🗃️');
+  assert.equal(active.components[4].components[0].custom_id, `cx:ui:task:completion:${thread.id}`);
+  assert.equal(active.components[4].components[0].options.find((option) => option.default).value, 'enabled');
 
   const archived = json(taskPanelPayload({
     thread: { ...thread, status: { type: 'idle' } },
-    binding: { threadId: thread.id, watchLevel: 'quiet', archived: true },
+    binding: {
+      threadId: thread.id,
+      watchLevel: 'quiet',
+      completionReportsEnabled: false,
+      archived: true,
+    },
   }));
   assert.equal(archived.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(archived.components[0].components[0].disabled, true);
@@ -95,4 +103,6 @@ test('task panel exposes mode and watch selects plus safe task and project-file 
   assert.equal(archived.components[3].components[0].disabled ?? false, false);
   assert.equal(archived.components[3].components[1].disabled ?? false, false);
   assert.equal(archived.components[3].components[2].disabled ?? false, false);
+  assert.equal(archived.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'OFF');
+  assert.equal(archived.components[4].components[0].options.find((option) => option.default).value, 'disabled');
 });

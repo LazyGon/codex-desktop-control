@@ -71,6 +71,7 @@ export function taskPanelPayload({ thread, binding }) {
   const archived = Boolean(binding.archived);
   const active = thread.status?.type === 'active';
   const watchLevel = binding.watchLevel ?? 'normal';
+  const completionReportsEnabled = binding.completionReportsEnabled !== false;
   const marker = taskPanelMarker(thread.id);
   const embed = new EmbedBuilder()
     .setTitle(truncate(thread.name ?? thread.preview ?? 'Codex task', 256, ''))
@@ -78,6 +79,7 @@ export function taskPanelPayload({ thread, binding }) {
     .addFields(
       { name: 'Status', value: archived ? 'archived' : threadStatusLabel(thread.status), inline: true },
       { name: 'Watch', value: watchLevel, inline: true },
+      { name: 'Completion report', value: completionReportsEnabled ? 'ON' : 'OFF', inline: true },
       { name: 'Task ID', value: `\`${thread.id}\`` },
       { name: 'Project', value: `\`${truncate(thread.cwd ?? binding.cwd ?? '(none)', 1000)}\`` },
     )
@@ -99,6 +101,21 @@ export function taskPanelPayload({ thread, binding }) {
       .setLabel(level)
       .setValue(level)
       .setDefault(level === watchLevel)));
+  const completionReports = new StringSelectMenuBuilder()
+    .setCustomId(`cx:ui:task:completion:${thread.id}`)
+    .setPlaceholder('完了報告への投稿')
+    .addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel('投稿する')
+        .setDescription('codex-completionsへ完了報告を投稿')
+        .setValue('enabled')
+        .setDefault(completionReportsEnabled),
+      new StringSelectMenuOptionBuilder()
+        .setLabel('投稿しない')
+        .setDescription('結果はタスクチャンネル内だけに残す')
+        .setValue('disabled')
+        .setDefault(!completionReportsEnabled),
+    );
   const actions = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`cx:ui:task:refresh:${thread.id}`).setLabel('Refresh').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`cx:ui:task:pending:${thread.id}`).setLabel('Pending').setStyle(ButtonStyle.Secondary),
@@ -135,6 +152,7 @@ export function taskPanelPayload({ thread, binding }) {
           .setEmoji('🗃️')
           .setStyle(ButtonStyle.Secondary),
       ),
+      new ActionRowBuilder().addComponents(completionReports),
     ],
     allowedMentions: { parse: [] },
   };

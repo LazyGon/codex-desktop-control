@@ -30,6 +30,7 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.snapshot().infrastructure.transferCategoryId, 'others');
     assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
     assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
+    assert.equal(second.binding('thread-1').completionReportsEnabled, true);
     second.setTurnRecord('thread-1', 'turn-1', {
       liveMessageId: 'message-live',
       userMessageIds: ['message-user'],
@@ -78,6 +79,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
     assert.equal(state.bindings['thread-1'].channelId, 'channel-1');
+    assert.equal(state.bindings['thread-1'].completionReportsEnabled, true);
     assert.equal(state.autoCatchupProjects, undefined);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

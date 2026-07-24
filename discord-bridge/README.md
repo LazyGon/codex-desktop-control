@@ -22,10 +22,11 @@ outbound connection to Discord.
 - Pins one persistent control panel in `codex-remote` and one in every task
   channel. The global panel exposes status, account usage, read-only Codex
   resource inventory, full sync, pending requests, and task navigation. Task
-  panels expose delivery mode, watch level, detailed status, task-scoped
-  pending requests, a task control center, archive/restore, and confirmed
-  interrupt, plus a paged project-file browser. Control panels use a dedicated
-  purple embed color; completed result cards remain blue.
+  panels expose delivery mode, watch level, a per-task `codex-completions`
+  report toggle, detailed status, task-scoped pending requests, a task control
+  center, archive/restore, and confirmed interrupt, plus a paged project-file
+  browser. Control panels use a dedicated purple embed color; completed result
+  cards remain blue.
 - Reposts and pins the task control panel immediately below each terminal turn
   card. The previous bot-owned task panel is removed only after the replacement
   ID is persisted, so mobile users always find controls at the latest position.
@@ -96,9 +97,12 @@ outbound connection to Discord.
   kill the task process.
 - Reconnects indefinitely, re-subscribes bound tasks, reconciles persisted
   message IDs with visible Discord IDs, and reports missed completions.
-- Mentions the configured user with `タスクが完了しました。` on the first line
-  in `codex-completions`, posts a one-line final-answer summary on the second
-  line, and uses the bare Discord message URL as the final line.
+- When completion reporting is enabled for the task, mentions the configured
+  user with `タスクが完了しました。` on the first line in `codex-completions`,
+  posts a one-line final-answer summary on the second line, and uses the bare
+  Discord message URL as the final line. Existing and new tasks default to ON;
+  OFF suppresses future completion posts without removing task-channel results
+  or producing delayed reports after reconnect.
 - Reconciles active and archived task lists every 30 seconds, after reconnect,
   and immediately after task lifecycle notifications.
 - Treats ordinary messages from allowed users in bound task channels as Codex
