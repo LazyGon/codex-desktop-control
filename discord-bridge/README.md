@@ -14,6 +14,10 @@ outbound connection to Discord.
   project category as a new task request. It starts the task in that project's
   working directory, derives its title from the channel name, binds the same
   channel, and serializes rapid follow-up messages to prevent duplicate tasks.
+- Creates a private `Others` category with a `transfer-text` channel. Messages
+  from configured authorized users or Discord webhooks are written verbatim as
+  UTF-8 to `data/transfer-text/<timestamp>.txt`; only the newest timestamped
+  text file is retained. This inbox does not create or deliver a Codex task.
 - Pins one persistent control panel in `codex-remote` and one in every task
   channel. The global panel exposes status, account usage, read-only Codex
   resource inventory, full sync, pending requests, and task navigation. Task
@@ -181,14 +185,13 @@ sharded automatically when a category reaches 50 channels.
    .\Install.ps1 -ApplicationId APPLICATION_ID -GuildId SERVER_ID -EnablePlainMessageInput
    ```
 
-To use ordinary task-channel messages as Codex instructions, enable
-**Message Content Intent** on the application's **Bot** page in Discord
-Developer Portal, then install with `-EnablePlainMessageInput`. Without that
-explicit opt-in, slash-command operation continues without the privileged
-intent.
+Enable **Message Content Intent** on the application's **Bot** page in Discord
+Developer Portal. The `Others` / `transfer-text` inbox requires it. Installing
+with `-EnablePlainMessageInput` additionally permits ordinary task-channel
+messages to become Codex instructions.
 
 The root installer first builds and installs the shared Desktop launcher, then
-validates the token and server, defaults the single `authorizedUserId` to the server owner,
+validates the token and server, defaults `authorizedUserIds` to the server owner,
 registers guild-scoped commands, installs a current-user Scheduled Task, starts
 Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
@@ -236,8 +239,9 @@ does not scatter its contents into the destination.
 It deliberately does not use `Stop-Process`.
 
 Logs are append-only JSONL under `logs/`. Runtime state and task/channel
-bindings are atomically persisted under `data/`. Neither location contains the
-Discord bot token.
+bindings are atomically persisted under `data/`. The latest accepted text-inbox
+message is stored under `data/transfer-text/`. None of these locations contains
+the Discord bot token.
 
 ## Verification
 
@@ -275,8 +279,9 @@ time is deferred before execution.
   termination require explicit confirmation. Terminal termination accepts only
   a process ID returned by the selected task's app-server terminal inventory;
   raw PID kill is not exposed.
-- Task deletion, file writes or deletion, global config mutation, and deprecated
-  rollback are not exposed through Discord.
+- Task deletion, arbitrary file writes or deletion, global config mutation, and
+  deprecated rollback are not exposed through Discord. The fixed
+  `data/transfer-text` latest-message inbox is the bounded write exception.
 - File browsing is read-only and rooted at the selected task's working
   directory. Assistant-card downloads accept only paths that Codex actually
   linked and that resolve inside a managed project tree, a parent shared by
@@ -298,15 +303,23 @@ time is deferred before execution.
   not include ordinary working-tree files or nested repositories.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
-  and the single `authorizedUserId` in `config/config.json`. Other users receive
+  and a user in `authorizedUserIds` in `config/config.json`. Other users receive
   a rejection and their content is never sent to Codex. Unbound control,
   archive, and unrelated channels never create tasks. It requires Discord's
-  privileged Message Content Intent. Bot and webhook messages are ignored.
+  privileged Message Content Intent. Bot and webhook messages are ignored in
+  task channels.
+- The sole webhook exception is the configured `Others` / `transfer-text`
+  channel. It accepts messages from any Discord webhook or an authorized human,
+  ignores other bot messages, and writes only the message body to the fixed
+  runtime inbox. Embeds and attachments are not stored. A successful write
+  creates one numeric millisecond timestamp `.txt` file and removes the prior
+  timestamped text file.
 - Slash commands, buttons, selects, and modal submissions use the same
-  `authorizedUserId` check. `completionMentionUserId` must match it, otherwise
-  the Bridge fails closed during configuration loading.
+  `authorizedUserIds` check. Completion recipients are configured independently
+  through `completionMentionUserIds`; each Discord prompt also records and
+  mentions its actual executor when that turn completes.
 - Mentions are disabled in general bot output. Completion notifications allow
-  only the configured `completionMentionUserId`.
+  only the turn executors and configured `completionMentionUserIds`.
 - app-server remains loopback-only and is never tunneled to Discord or a LAN.
 - The app-server protocol and `CODEX_APP_SERVER_WS_URL` integration are
   experimental. The formal launcher and bridge verify connectivity on every

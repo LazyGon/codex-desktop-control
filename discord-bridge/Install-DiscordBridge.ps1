@@ -139,6 +139,9 @@ try {
         controlChannelName = 'codex-remote'
         alertsChannelName = 'codex-alerts'
         completionsChannelName = 'codex-completions'
+        transferCategoryName = 'Others'
+        transferTextChannelName = 'transfer-text'
+        textTransferEnabled = $true
         completionMentionUserIds = @($CompletionMentionUserIds)
         defaultWatchLevel = 'normal'
         taskListLimit = 20

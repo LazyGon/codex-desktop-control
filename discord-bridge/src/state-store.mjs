@@ -15,6 +15,8 @@ function initialState(guildId) {
       controlChannelId: null,
       alertsChannelId: null,
       completionsChannelId: null,
+      transferCategoryId: null,
+      transferTextChannelId: null,
       archiveCategoryIds: [],
     },
     projectCategories: {},
@@ -65,6 +67,8 @@ export class StateStore {
     }
     this.value.infrastructure.archiveCategoryIds ??= [];
     this.value.infrastructure.controlPanelMessageId ??= null;
+    this.value.infrastructure.transferCategoryId ??= null;
+    this.value.infrastructure.transferTextChannelId ??= null;
     this.value.projectCategories ??= {};
     delete this.value.autoCatchupProjects;
     this.#write();

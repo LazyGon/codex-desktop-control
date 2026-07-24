@@ -20,6 +20,9 @@ const defaults = {
   controlChannelName: 'codex-remote',
   alertsChannelName: 'codex-alerts',
   completionsChannelName: 'codex-completions',
+  transferCategoryName: 'Others',
+  transferTextChannelName: 'transfer-text',
+  textTransferEnabled: true,
   authorizedUserIds: null,
   authorizedUserId: null,
   completionMentionUserIds: null,
@@ -117,6 +120,15 @@ export function loadConfig() {
   }
   if (typeof config.plainMessageInputEnabled !== 'boolean') {
     errors.push('plainMessageInputEnabled must be boolean.');
+  }
+  if (typeof config.textTransferEnabled !== 'boolean') {
+    errors.push('textTransferEnabled must be boolean.');
+  }
+  if (typeof config.transferCategoryName !== 'string' || !config.transferCategoryName.trim()) {
+    errors.push('transferCategoryName must be a non-empty string.');
+  }
+  if (typeof config.transferTextChannelName !== 'string' || !config.transferTextChannelName.trim()) {
+    errors.push('transferTextChannelName must be a non-empty string.');
   }
   if (typeof config.fileShareEnabled !== 'boolean') {
     errors.push('fileShareEnabled must be boolean.');

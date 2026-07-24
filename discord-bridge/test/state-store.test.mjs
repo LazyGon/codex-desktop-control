@@ -9,7 +9,12 @@ test('StateStore persists bindings atomically', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-'));
   try {
     const first = new StateStore(directory, '123456789012345');
-    first.setInfrastructure({ controlChannelId: 'control', controlPanelMessageId: 'control-panel' });
+    first.setInfrastructure({
+      controlChannelId: 'control',
+      controlPanelMessageId: 'control-panel',
+      transferCategoryId: 'others',
+      transferTextChannelId: 'transfer-text',
+    });
     first.setBinding('thread-1', {
       channelId: 'channel-1',
       watchLevel: 'normal',
@@ -22,6 +27,8 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.bindingByChannel('channel-1').threadId, 'thread-1');
     assert.equal(second.snapshot().infrastructure.controlChannelId, 'control');
     assert.equal(second.snapshot().infrastructure.controlPanelMessageId, 'control-panel');
+    assert.equal(second.snapshot().infrastructure.transferCategoryId, 'others');
+    assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
     assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
     second.setTurnRecord('thread-1', 'turn-1', {
       liveMessageId: 'message-live',
@@ -68,6 +75,8 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
     const state = new StateStore(directory, '123456789012345').snapshot();
     assert.equal(state.schemaVersion, 4);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
+    assert.equal(state.infrastructure.transferCategoryId, null);
+    assert.equal(state.infrastructure.transferTextChannelId, null);
     assert.equal(state.bindings['thread-1'].channelId, 'channel-1');
     assert.equal(state.autoCatchupProjects, undefined);
   } finally {

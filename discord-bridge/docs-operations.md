@@ -126,6 +126,14 @@ category. The first valid post creates and binds one task before delivery;
 follow-up posts in that channel are processed in order. Control, archive, and
 unrelated categories do not create tasks from ordinary messages.
 
+`Others` / `transfer-text` is a separate local text inbox, not a task channel.
+It accepts a body from an authorized human or Discord webhook and stores it
+verbatim as UTF-8 at `data\transfer-text\<timestamp>.txt`. The timestamp is a
+numeric millisecond value. Exactly one generated `.txt` file is kept: after a
+new file is safely written, the previous timestamped file is removed. Other
+bots are ignored, and attachments or embeds without a message body are not
+stored or sent to Codex.
+
 Discord input uses an app-server `clientUserMessageId` as its immediate stable
 identity. The Bridge posts the orange user card after `turn/start` or
 `turn/steer` returns a turn ID, even if the persisted `userMessage` notification
@@ -160,6 +168,8 @@ Use `Get-DiscordBridgeStatus.ps1` when the bot appears offline. Relevant files:
 - `data\runtime.json`: process, Discord, and app-server status.
 - `data\state.json`: project/category, task/channel, and turn/message identity
   bindings plus completion-notice IDs.
+- `data\transfer-text\<timestamp>.txt`: latest authorized user or webhook text
+  posted to `Others` / `transfer-text`.
 - `logs\bridge-YYYYMMDD.jsonl`: process lifecycle.
 - `logs\codex-YYYYMMDD.jsonl`: app-server RPC lifecycle metadata.
 - `logs\discord-YYYYMMDD.jsonl`: command and interaction metadata.

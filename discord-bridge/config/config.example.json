@@ -10,6 +10,9 @@
   "controlChannelName": "codex-remote",
   "alertsChannelName": "codex-alerts",
   "completionsChannelName": "codex-completions",
+  "transferCategoryName": "Others",
+  "transferTextChannelName": "transfer-text",
+  "textTransferEnabled": true,
   "completionMentionUserIds": [
     "DISCORD_USER_ID"
   ],

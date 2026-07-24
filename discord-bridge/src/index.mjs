@@ -54,7 +54,7 @@ acquireLock();
 if (fs.existsSync(stopRequestPath)) fs.unlinkSync(stopRequestPath);
 
 const gatewayIntents = [GatewayIntentBits.Guilds];
-if (config.plainMessageInputEnabled) {
+if (config.plainMessageInputEnabled || config.textTransferEnabled) {
   gatewayIntents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
 }
 

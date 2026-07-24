@@ -81,6 +81,7 @@ import {
   ClientToolRouter,
   ClientToolUnavailableError,
 } from './client-tool-router.mjs';
+import { TextTransferStore } from './text-transfer-store.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -124,6 +125,7 @@ export class DiscordController {
     logDir,
     automationStore = new AutomationStore(),
     clientToolRouter = null,
+    textTransferStore = null,
   }) {
     this.client = client;
     this.codex = codex;
@@ -142,6 +144,10 @@ export class DiscordController {
     this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.fileTransferTempRoot = path.join(path.dirname(logDir), 'data', 'file-transfers');
+    this.textTransferStore = textTransferStore ?? new TextTransferStore(
+      path.join(path.dirname(logDir), 'data', 'transfer-text'),
+    );
+    this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
     this.pendingRequests = new Map();
     this.pendingActions = new Map();
     this.turnViews = new Map();
@@ -190,6 +196,7 @@ export class DiscordController {
   }
 
   async ready() {
+    if (this.config.textTransferEnabled) await this.textTransferStore.ensureDirectory();
     const removedStaleTransfers = await cleanupStaleSplitArchives(this.fileTransferTempRoot).catch((error) => {
       this.#log('file-transfer-cleanup-error', { error: error.message });
       return 0;
@@ -261,23 +268,47 @@ export class DiscordController {
     }
     for (const category of archiveCategories) await this.#configurePrivateCategory(category, guild);
 
-    const ensureTextChannel = async (storedId, name, topic) => {
+    let transferCategory = null;
+    if (this.config.textTransferEnabled) {
+      transferCategory = state.infrastructure.transferCategoryId
+        ? channels.get(state.infrastructure.transferCategoryId)
+        : null;
+      if (!transferCategory || transferCategory.type !== ChannelType.GuildCategory) {
+        transferCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
+          && channel.name === this.config.transferCategoryName);
+      }
+      if (!transferCategory) {
+        transferCategory = await guild.channels.create({
+          name: this.config.transferCategoryName,
+          type: ChannelType.GuildCategory,
+        });
+      }
+      if (transferCategory.name !== this.config.transferCategoryName) {
+        await transferCategory.setName(
+          this.config.transferCategoryName,
+          'Refresh the text-transfer category name',
+        );
+      }
+      await this.#configurePrivateCategory(transferCategory, guild);
+    }
+
+    const ensureTextChannel = async (storedId, name, topic, parentCategory = controlCategory) => {
       let channel = storedId ? channels.get(storedId) : null;
       if (!channel || channel.type !== ChannelType.GuildText) {
         channel = channels.find((candidate) => candidate?.type === ChannelType.GuildText
-          && candidate.parentId === controlCategory.id && candidate.name === name);
+          && candidate.parentId === parentCategory.id && candidate.name === name);
       }
       if (!channel) {
         channel = await guild.channels.create({
           name,
           type: ChannelType.GuildText,
-          parent: controlCategory.id,
+          parent: parentCategory.id,
           topic,
         });
       }
       if (channel.name !== name) await channel.setName(name, 'Codex Remote 2.0 control-plane migration');
-      if (channel.parentId !== controlCategory.id) {
-        await channel.setParent(controlCategory.id, { lockPermissions: true, reason: 'Move into the Codex control plane' });
+      if (channel.parentId !== parentCategory.id) {
+        await channel.setParent(parentCategory.id, { lockPermissions: true, reason: 'Move into the managed Discord category' });
       }
       if (channel.topic !== topic) await channel.setTopic(topic, 'Refresh Codex Remote control-plane metadata');
       if (!channel.permissionsLocked) await channel.lockPermissions();
@@ -299,11 +330,22 @@ export class DiscordController {
       this.config.completionsChannelName,
       'Codex task completion notifications and links',
     );
+    const transferText = transferCategory
+      ? await ensureTextChannel(
+        state.infrastructure.transferTextChannelId,
+        this.config.transferTextChannelName,
+        'Stores the latest authorized user or webhook message as a local UTF-8 text file',
+        transferCategory,
+      )
+      : null;
+    this.transferTextChannelId = transferText?.id ?? null;
     this.stateStore.setInfrastructure({
       controlCategoryId: controlCategory.id,
       controlChannelId: control.id,
       alertsChannelId: alerts.id,
       completionsChannelId: completions.id,
+      transferCategoryId: transferCategory?.id ?? null,
+      transferTextChannelId: transferText?.id ?? null,
       archiveCategoryIds: archiveCategories.map((category) => category.id),
     });
     if (!completionNotificationsAlreadyConfigured) {
@@ -314,7 +356,7 @@ export class DiscordController {
       });
     }
     return {
-      guild, controlCategory, archiveCategories, control, alerts, completions,
+      guild, controlCategory, archiveCategories, transferCategory, control, alerts, completions, transferText,
     };
   }
 
@@ -484,8 +526,12 @@ export class DiscordController {
   }
 
   async #handleDiscordMessage(message) {
-    if (!this.config.plainMessageInputEnabled || message.author.bot || message.webhookId) return;
     if (message.guildId !== this.config.guildId) return;
+    if (this.config.textTransferEnabled && message.channelId === this.transferTextChannelId) {
+      await this.#handleTransferTextMessage(message);
+      return;
+    }
+    if (!this.config.plainMessageInputEnabled || message.author.bot || message.webhookId) return;
     let binding = this.stateStore.bindingByChannel(message.channelId);
     let channel = null;
     let project = null;
@@ -558,6 +604,57 @@ export class DiscordController {
     } finally {
       const pendingReaction = message.reactions.resolve('⏳');
       await pendingReaction?.users.remove(this.client.user.id).catch(() => {});
+    }
+  }
+
+  async #handleTransferTextMessage(message) {
+    const isWebhook = Boolean(message.webhookId);
+    const isAuthorizedUser = !message.author?.bot && this.#isAuthorizedUser(message.author?.id);
+    if (!isWebhook && !isAuthorizedUser) {
+      if (!message.author?.bot) {
+        this.#log('unauthorized-transfer-text-message', {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          userId: message.author?.id ?? null,
+        });
+        await message.reply(messageOptions(
+          '拒否しました。このチャンネルへテキストを配置できるのは、設定済みの認証ユーザーまたはWebhookだけです。',
+        )).catch(() => {});
+      }
+      return;
+    }
+
+    const content = String(message.content ?? '');
+    if (content.length === 0) {
+      this.#log('empty-transfer-text-message', {
+        channelId: message.channelId,
+        messageId: message.id,
+        webhookId: message.webhookId ?? null,
+      });
+      await message.react('⚠️').catch(() => {});
+      return;
+    }
+
+    try {
+      const stored = await this.textTransferStore.store(content, message.createdTimestamp);
+      await message.react('✅').catch(() => {});
+      this.#log('transfer-text-stored', {
+        channelId: message.channelId,
+        messageId: message.id,
+        userId: isWebhook ? null : message.author.id,
+        webhookId: message.webhookId ?? null,
+        filename: stored.filename,
+        path: stored.path,
+        bytes: stored.bytes,
+      });
+    } catch (error) {
+      await message.react('❌').catch(() => {});
+      await this.#postAlert(
+        `transfer-textのローカル保存に失敗しました: ${message.id}\n${truncate(error.message, 1700)}`,
+        'error',
+      ).catch(() => {});
+      throw error;
     }
   }
 

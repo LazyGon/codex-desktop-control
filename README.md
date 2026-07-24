@@ -32,8 +32,9 @@ to a LAN or the internet.
 - 7-Zip for file transfers larger than one Discord attachment.
 - A private Discord server and a Discord application with a bot.
 
-Enable **Message Content Intent** on the Discord application's **Bot** page if
-ordinary task-channel messages should become Codex instructions.
+Enable **Message Content Intent** on the Discord application's **Bot** page.
+It is required for the `Others` / `transfer-text` inbox and for optional
+ordinary task-channel instructions.
 
 ## Install
 
@@ -132,6 +133,13 @@ independent list of fixed notification subscribers and may be empty. For every
 Discord-submitted prompt, the Bridge also records the actual executor on the
 Codex turn. Its completion notice mentions that turn's executor or executors
 plus the fixed subscribers, with duplicates removed.
+
+The Bridge also creates a private `Others` category with a `transfer-text`
+channel. A message there from an authorized user or Discord webhook is stored
+verbatim as UTF-8 under `discord-bridge/data/transfer-text/<timestamp>.txt`.
+Only the latest timestamped text file is retained; the next accepted message
+replaces it. This channel is a local text inbox and never sends content to
+Codex.
 
 `codex-remote` and every task channel contain a pinned control panel. Task
 panels provide delivery-mode and watch-level selects plus status refresh,

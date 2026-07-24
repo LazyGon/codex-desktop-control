@@ -38,6 +38,13 @@ try {
     || category.name.startsWith(`${config.archiveCategoryName} (`));
   const projectCategories = categories.filter((category) => category.name.startsWith(config.projectCategoryPrefix));
   const controlChannel = textChannels.find((channel) => channel.name === config.controlChannelName);
+  const transferCategory = config.textTransferEnabled
+    ? categories.find((category) => category.name === config.transferCategoryName)
+    : null;
+  const transferTextChannel = config.textTransferEnabled && transferCategory
+    ? textChannels.find((channel) => channel.parentId === transferCategory.id
+      && channel.name === config.transferTextChannelName)
+    : null;
   const taskChannels = textChannels.filter((channel) => channel.topic?.includes('Codex task: '));
   const activeTasks = taskChannels.filter((channel) => channel.topic?.includes('\nState: active'));
   const archivedTasks = taskChannels.filter((channel) => channel.topic?.includes('\nState: archived'));
@@ -59,6 +66,7 @@ try {
     ...(controlCategory ? [controlCategory] : []),
     ...archiveCategories.values(),
     ...projectCategories.values(),
+    ...(transferCategory ? [transferCategory] : []),
   ];
 
   const customIds = (message) => message.components
@@ -90,6 +98,18 @@ try {
   if (!controlCategory) errors.push(`Missing control category: ${config.controlCategoryName}`);
   if (!controlChannel) errors.push(`Missing control channel: ${config.controlChannelName}`);
   if (controlChannel && controlChannel.parentId !== controlCategory?.id) errors.push('Control channel has the wrong parent.');
+  if (config.textTransferEnabled && !transferCategory) {
+    errors.push(`Missing transfer category: ${config.transferCategoryName}`);
+  }
+  if (config.textTransferEnabled && !transferTextChannel) {
+    errors.push(`Missing transfer channel: ${config.transferTextChannelName}`);
+  }
+  if (transferCategory && state.infrastructure.transferCategoryId !== transferCategory.id) {
+    errors.push('Transfer category ID does not match persisted state.');
+  }
+  if (transferTextChannel && state.infrastructure.transferTextChannelId !== transferTextChannel.id) {
+    errors.push('Transfer channel ID does not match persisted state.');
+  }
   if (archiveCategories.size === 0) errors.push(`Missing archive category: ${config.archiveCategoryName}`);
   if (projectCategories.size === 0) errors.push('No project categories were found.');
   const duplicateProjectNames = [...new Set(projectCategories.map((category) => category.name))]
@@ -179,6 +199,11 @@ try {
   process.stdout.write(`${JSON.stringify({
     ok: errors.length === 0,
     control: { category: controlCategory?.name ?? null, channel: controlChannel?.name ?? null },
+    transfer: {
+      enabled: config.textTransferEnabled,
+      category: transferCategory?.name ?? null,
+      channel: transferTextChannel?.name ?? null,
+    },
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },

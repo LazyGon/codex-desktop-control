@@ -480,6 +480,121 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.equal(new Set(turnRecords.get('thread-1:turn-1').assistantMessageIds).size, 2);
 });
 
+test('transfer-text accepts authorized users and webhooks while rejecting other senders', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-transfer-controller-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  client.channels = { fetch: async () => null };
+  const codex = new EventEmitter();
+  codex.deliver = async () => { throw new Error('transfer-text must not deliver to Codex'); };
+  const stored = [];
+  const textTransferStore = {
+    ensureDirectory: async () => directory,
+    store: async (text, timestamp) => {
+      const record = {
+        path: path.join(directory, `${timestamp}.txt`),
+        filename: `${timestamp}.txt`,
+        timestamp,
+        bytes: Buffer.byteLength(text),
+      };
+      stored.push({ text, timestamp, record });
+      return record;
+    },
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore: {
+      bindingByChannel: () => { throw new Error('transfer-text must bypass task binding'); },
+    },
+    config: {
+      guildId: 'guild-1',
+      authorizedUserIds: ['user-1'],
+      textTransferEnabled: true,
+      plainMessageInputEnabled: false,
+    },
+    logDir: directory,
+    textTransferStore,
+  });
+  controller.transferTextChannelId = 'transfer-channel';
+  controller.attach();
+
+  const makeMessage = ({
+    id,
+    content,
+    author,
+    webhookId = null,
+    createdTimestamp,
+  }) => {
+    const reactions = [];
+    const replies = [];
+    return {
+      message: {
+        id,
+        guildId: 'guild-1',
+        channelId: 'transfer-channel',
+        content,
+        author,
+        webhookId,
+        createdTimestamp,
+        react: async (emoji) => { reactions.push(emoji); },
+        reply: async (options) => { replies.push(options); },
+      },
+      reactions,
+      replies,
+    };
+  };
+
+  const webhook = makeMessage({
+    id: 'webhook-message',
+    content: 'webhook payload',
+    author: { id: 'webhook-user', bot: true },
+    webhookId: 'webhook-1',
+    createdTimestamp: 1000,
+  });
+  const authorized = makeMessage({
+    id: 'authorized-message',
+    content: 'authorized payload',
+    author: { id: 'user-1', bot: false },
+    createdTimestamp: 1001,
+  });
+  const unauthorized = makeMessage({
+    id: 'unauthorized-message',
+    content: 'unauthorized payload',
+    author: { id: 'user-2', bot: false },
+    createdTimestamp: 1002,
+  });
+  const otherBot = makeMessage({
+    id: 'bot-message',
+    content: 'bot payload',
+    author: { id: 'other-bot', bot: true },
+    createdTimestamp: 1003,
+  });
+
+  client.emit('messageCreate', webhook.message);
+  client.emit('messageCreate', authorized.message);
+  client.emit('messageCreate', unauthorized.message);
+  client.emit('messageCreate', otherBot.message);
+  for (let attempt = 0; attempt < 100
+    && (stored.length < 2 || unauthorized.replies.length < 1); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.deepEqual(stored.map(({ text, timestamp }) => ({ text, timestamp })), [
+    { text: 'webhook payload', timestamp: 1000 },
+    { text: 'authorized payload', timestamp: 1001 },
+  ]);
+  assert.deepEqual(webhook.reactions, ['✅']);
+  assert.deepEqual(authorized.reactions, ['✅']);
+  assert.equal(unauthorized.replies.length, 1);
+  assert.match(unauthorized.replies[0].content, /拒否しました/);
+  assert.deepEqual(unauthorized.replies[0].allowedMentions, { parse: [] });
+  assert.deepEqual(otherBot.reactions, []);
+  assert.deepEqual(otherBot.replies, []);
+});
+
 test('ordinary messages in an unbound managed-project channel create and reuse one Codex task', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
