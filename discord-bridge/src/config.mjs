@@ -20,7 +20,9 @@ const defaults = {
   controlChannelName: 'codex-remote',
   alertsChannelName: 'codex-alerts',
   completionsChannelName: 'codex-completions',
+  authorizedUserIds: null,
   authorizedUserId: null,
+  completionMentionUserIds: null,
   completionMentionUserId: null,
   defaultWatchLevel: 'normal',
   taskListLimit: 20,
@@ -40,30 +42,40 @@ const defaults = {
 };
 
 export function resolveAuthorizationConfig(config) {
-  const authorizedUserId = config.authorizedUserId
-    ?? config.completionMentionUserId
-    ?? (Array.isArray(config.allowedUserIds) ? config.allowedUserIds[0] : null)
-    ?? null;
-  const completionMentionUserId = config.completionMentionUserId ?? authorizedUserId;
+  const normalizeIds = (values) => [...new Set((values ?? []).filter(Boolean))];
+  const authorizedUserIds = normalizeIds(
+    config.authorizedUserIds
+      ?? (config.authorizedUserId ? [config.authorizedUserId] : null)
+      ?? config.allowedUserIds
+      ?? (config.completionMentionUserId ? [config.completionMentionUserId] : []),
+  );
+  const completionMentionUserIds = normalizeIds(
+    config.completionMentionUserIds
+      ?? (config.completionMentionUserId ? [config.completionMentionUserId] : []),
+  );
   return {
     ...config,
-    authorizedUserId,
-    completionMentionUserId,
-    // Keep the legacy property for older scripts, but never retain additional
-    // users: Discord control is intentionally single-user.
-    allowedUserIds: authorizedUserId ? [authorizedUserId] : [],
+    authorizedUserIds,
+    completionMentionUserIds,
+    // Retain aliases for older scripts while keeping authentication and
+    // notification subscriptions independent.
+    authorizedUserId: authorizedUserIds[0] ?? null,
+    allowedUserIds: authorizedUserIds,
+    completionMentionUserId: completionMentionUserIds[0] ?? null,
   };
 }
 
 export function authorizationConfigErrors(config) {
   const errors = [];
-  if (!isSnowflake(config.authorizedUserId)) {
-    errors.push('authorizedUserId must be a Discord snowflake.');
+  if (!Array.isArray(config.authorizedUserIds) || config.authorizedUserIds.length === 0) {
+    errors.push('authorizedUserIds must contain at least one Discord user id.');
+  } else if (config.authorizedUserIds.some((value) => !isSnowflake(value))) {
+    errors.push('Every authorizedUserIds entry must be a Discord snowflake.');
   }
-  if (!isSnowflake(config.completionMentionUserId)) {
-    errors.push('completionMentionUserId must be a Discord snowflake.');
-  } else if (config.completionMentionUserId !== config.authorizedUserId) {
-    errors.push('completionMentionUserId must match authorizedUserId.');
+  if (!Array.isArray(config.completionMentionUserIds)) {
+    errors.push('completionMentionUserIds must be an array of Discord user ids.');
+  } else if (config.completionMentionUserIds.some((value) => !isSnowflake(value))) {
+    errors.push('Every completionMentionUserIds entry must be a Discord snowflake.');
   }
   return errors;
 }

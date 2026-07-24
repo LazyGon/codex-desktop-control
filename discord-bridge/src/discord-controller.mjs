@@ -129,10 +129,15 @@ export class DiscordController {
     this.codex = codex;
     this.stateStore = stateStore;
     this.config = config;
-    this.authorizedUserId = config.authorizedUserId
-      ?? config.completionMentionUserId
-      ?? config.allowedUserIds?.[0]
-      ?? null;
+    this.authorizedUserIds = [...new Set(
+      config.authorizedUserIds
+      ?? config.allowedUserIds
+      ?? [config.authorizedUserId].filter(Boolean),
+    )];
+    this.completionMentionUserIds = [...new Set(
+      config.completionMentionUserIds
+      ?? [config.completionMentionUserId].filter(Boolean),
+    )];
     this.automationStore = automationStore;
     this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
@@ -330,11 +335,11 @@ export class DiscordController {
           ...(includePinMessages ? [PermissionFlagsBits.PinMessages] : []),
         ],
       },
-      {
-        id: this.authorizedUserId,
+      ...this.authorizedUserIds.map((userId) => ({
+        id: userId,
         type: OverwriteType.Member,
         allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
-      },
+      })),
     ];
   }
 
@@ -521,8 +526,11 @@ export class DiscordController {
         binding.threadId,
         prompt,
         `Discord: ${message.author.tag}`,
-        true,
-        message.id,
+        {
+          executorUserId: message.author.id,
+          alreadyVisible: true,
+          visibleMessageId: message.id,
+        },
       );
       const result = await this.codex.deliver(
         binding.threadId,
@@ -707,7 +715,7 @@ export class DiscordController {
   }
 
   #isAuthorizedUser(userId) {
-    return Boolean(this.authorizedUserId) && userId === this.authorizedUserId;
+    return this.authorizedUserIds.includes(userId);
   }
 
   async #handleAutocomplete(interaction) {
@@ -1675,7 +1683,12 @@ export class DiscordController {
       const prompt = interaction.options.getString('prompt', true);
       const discordAttachment = interaction.options.getAttachment('attachment');
       const attachment = discordAttachment ? await this.#prepareAttachment(discordAttachment) : null;
-      const mirror = this.#reserveUserInput(threadId, prompt, `Discord: ${interaction.user.tag}`);
+      const mirror = this.#reserveUserInput(
+        threadId,
+        prompt,
+        `Discord: ${interaction.user.tag}`,
+        { executorUserId: interaction.user.id },
+      );
       let result;
       try {
         result = await this.codex[subcommand](
@@ -2458,7 +2471,12 @@ export class DiscordController {
       this.pendingActions.delete(parts[2]);
       await interaction.deferReply({ ephemeral: true });
       const prompt = interaction.fields.getTextInputValue('prompt');
-      const mirror = this.#reserveUserInput(action.threadId, prompt, `Discord: ${interaction.user.tag}`);
+      const mirror = this.#reserveUserInput(
+        action.threadId,
+        prompt,
+        `Discord: ${interaction.user.tag}`,
+        { executorUserId: interaction.user.id },
+      );
       let result;
       try {
         result = await this.codex[action.mode](
@@ -4085,9 +4103,14 @@ export class DiscordController {
       this.stateStore.setTurnRecord(threadId, turnId, { completionNoticeMessageId: notice.id });
       return notice;
     }
+    const mentionUserIds = [...new Set([
+      ...this.completionMentionUserIds,
+      ...(record.executorUserIds ?? []),
+      record.executorUserId,
+    ].filter(Boolean))];
     notice = await completions.send({
-      content: completionNoticeContent(this.config.completionMentionUserId, completionMessage.url, finalText),
-      allowedMentions: { parse: [], users: [this.config.completionMentionUserId] },
+      content: completionNoticeContent(mentionUserIds, completionMessage.url, finalText),
+      allowedMentions: { parse: [], users: mentionUserIds },
     });
     this.stateStore.setTurnRecord(threadId, turnId, { completionNoticeMessageId: notice.id });
     return notice;
@@ -4612,12 +4635,17 @@ export class DiscordController {
     if (channel) await channel.send(messageOptions(content));
   }
 
-  #reserveUserInput(threadId, text, source, alreadyVisible = false, visibleMessageId = null) {
+  #reserveUserInput(threadId, text, source, {
+    executorUserId = null,
+    alreadyVisible = false,
+    visibleMessageId = null,
+  } = {}) {
     this.#pruneUserInputReservations();
     const record = {
       threadId,
       text: String(text).trim(),
       source,
+      executorUserId,
       state: 'pending',
       echoSeen: false,
       postPromise: null,
@@ -4656,6 +4684,16 @@ export class DiscordController {
       record.postPromise = this.#waitForReservationTurnId(record)
         .then(async () => {
           if (!record.turnId) throw new Error('Codex did not return a turn ID for the user input.');
+          if (record.executorUserId) {
+            const turnRecord = this.stateStore.turnRecord(record.threadId, record.turnId) ?? {};
+            this.stateStore.setTurnRecord(record.threadId, record.turnId, {
+              executorUserIds: [...new Set([
+                ...(turnRecord.executorUserIds ?? []),
+                turnRecord.executorUserId,
+                record.executorUserId,
+              ].filter(Boolean))],
+            });
+          }
           const itemId = record.userItemId ?? record.clientUserMessageId;
           if (!record.userItemId) {
             this.#log('user-input-provisional-id', {

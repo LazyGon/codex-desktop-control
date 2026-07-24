@@ -98,6 +98,7 @@ test('completed turns replace the pinned task panel below the final card exactly
     }],
   });
   binding.turnMessages['turn-complete'] = {
+    executorUserIds: ['executor-user'],
     assistantEntries: {
       'live-commentary': {
         text: 'Working.',
@@ -136,6 +137,7 @@ test('completed turns replace the pinned task panel below the final card exactly
         id: `completion-${completionMessages.size + 1}`,
         author: { id: 'bot-user', bot: true },
         content: options.content,
+        allowedMentions: options.allowedMentions,
       };
       completionMessages.set(message.id, message);
       return message;
@@ -147,8 +149,8 @@ test('completed turns replace the pinned task panel below the final card exactly
     codex,
     stateStore,
     config: {
-      allowedUserIds: ['user-1'],
-      completionMentionUserId: 'user-1',
+      authorizedUserIds: ['user-1', 'executor-user'],
+      completionMentionUserIds: ['subscriber-user'],
       liveUpdateIntervalMs: 10,
     },
     logDir: directory,
@@ -195,6 +197,15 @@ test('completed turns replace the pinned task panel below the final card exactly
   assert.equal(sent[finalIndex].embeds[0].color, 0x1971c2);
   assert.equal(sent[finalIndex].components[0].components.at(-1).custom_id, 'cx:copy:card');
   assert.equal(binding.turnMessages['turn-complete'].finalText, 'Finished.');
+  const completionNotice = [...completionMessages.values()][0];
+  assert.equal(
+    completionNotice.content,
+    `<@subscriber-user> <@executor-user> タスクが完了しました。\n要約: Finished.\n${sent[finalIndex].url}`,
+  );
+  assert.deepEqual(completionNotice.allowedMentions, {
+    parse: [],
+    users: ['subscriber-user', 'executor-user'],
+  });
   assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
@@ -279,7 +290,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     config: {
       plainMessageInputEnabled: true,
       guildId: 'guild-1',
-      allowedUserIds: ['user-1'],
+      authorizedUserIds: ['user-1'],
       liveUpdateIntervalMs: 100,
     },
     logDir: directory,
@@ -327,6 +338,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     `\`${delivered.clientUserMessageId}\``,
   );
   assert.deepEqual(turnRecords.get('thread-1:turn-1').userMessageIds, [userCard.id]);
+  assert.deepEqual(turnRecords.get('thread-1:turn-1').executorUserIds, ['user-1']);
   assert.deepEqual(
     turnRecords.get('thread-1:turn-1').userEntries[delivered.clientUserMessageId].messageIds,
     [userCard.id],

@@ -113,8 +113,11 @@ export function completionSummary(value, maximum = 280) {
   return truncate(cleaned || '(要約なし)', maximum);
 }
 
-export function completionNoticeContent(userId, messageUrl, finalText) {
-  return `<@${userId}> タスクが完了しました。\n要約: ${completionSummary(finalText)}\n${messageUrl}`;
+export function completionNoticeContent(userIds, messageUrl, finalText) {
+  const mentions = [...new Set(
+    (Array.isArray(userIds) ? userIds : [userIds]).filter(Boolean),
+  )].map((userId) => `<@${userId}>`).join(' ');
+  return `${mentions ? `${mentions} ` : ''}タスクが完了しました。\n要約: ${completionSummary(finalText)}\n${messageUrl}`;
 }
 
 export function normalizeProjectPath(value) {

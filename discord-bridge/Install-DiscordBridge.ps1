@@ -7,13 +7,19 @@ param(
     [string]$GuildId,
 
     [ValidatePattern('^\d{15,22}$')]
+    [string[]]$AuthorizedUserIds,
+
+    # Legacy compatibility.
+    [ValidatePattern('^\d{15,22}$')]
     [string]$AuthorizedUserId,
 
-    # Legacy compatibility. Only the first value is used when
-    # -AuthorizedUserId is omitted.
     [ValidatePattern('^\d{15,22}$')]
     [string[]]$AllowedUserIds,
 
+    [ValidatePattern('^\d{15,22}$')]
+    [string[]]$CompletionMentionUserIds,
+
+    # Legacy compatibility.
     [ValidatePattern('^\d{15,22}$')]
     [string]$CompletionMentionUserId,
 
@@ -84,39 +90,56 @@ try {
     }
     $targetGuild = @($diagnostic.guilds | Where-Object { $_.id -eq $GuildId })[0]
 
-    if (-not $AuthorizedUserId) {
-        if ($CompletionMentionUserId) {
-            $AuthorizedUserId = $CompletionMentionUserId
+    if (-not $AuthorizedUserIds -or $AuthorizedUserIds.Count -eq 0) {
+        if ($AuthorizedUserId) {
+            $AuthorizedUserIds = @($AuthorizedUserId)
         }
         elseif ($AllowedUserIds -and $AllowedUserIds.Count -gt 0) {
-            $AuthorizedUserId = [string]$AllowedUserIds[0]
+            $AuthorizedUserIds = @($AllowedUserIds)
+        }
+        elseif ($CompletionMentionUserId) {
+            $AuthorizedUserIds = @($CompletionMentionUserId)
         }
         else {
-            $AuthorizedUserId = [string]$diagnostic.targetOwnerId
+            $AuthorizedUserIds = @([string]$diagnostic.targetOwnerId)
         }
     }
-    if ($AuthorizedUserId -notmatch '^\d{15,22}$') {
-        throw "Authorized user ID is invalid: $AuthorizedUserId"
+    $AuthorizedUserIds = @($AuthorizedUserIds | Select-Object -Unique)
+    foreach ($userId in $AuthorizedUserIds) {
+        if ($userId -notmatch '^\d{15,22}$') {
+            throw "Authorized user ID is invalid: $userId"
+        }
     }
-    if ($CompletionMentionUserId -and $CompletionMentionUserId -ne $AuthorizedUserId) {
-        throw 'CompletionMentionUserId must match AuthorizedUserId.'
+    if (-not $PSBoundParameters.ContainsKey('CompletionMentionUserIds')) {
+        $CompletionMentionUserIds = if ($CompletionMentionUserId) {
+            @($CompletionMentionUserId)
+        }
+        else {
+            @($AuthorizedUserIds[0])
+        }
     }
-    $CompletionMentionUserId = $AuthorizedUserId
-    $AllowedUserIds = @($AuthorizedUserId)
+    elseif (-not $CompletionMentionUserIds) {
+        $CompletionMentionUserIds = @()
+    }
+    $CompletionMentionUserIds = @($CompletionMentionUserIds | Select-Object -Unique)
+    foreach ($userId in $CompletionMentionUserIds) {
+        if ($userId -notmatch '^\d{15,22}$') {
+            throw "Completion mention user ID is invalid: $userId"
+        }
+    }
 
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $config = [ordered]@{
         applicationId = $ApplicationId
         guildId = $GuildId
-        authorizedUserId = $AuthorizedUserId
-        allowedUserIds = @($AuthorizedUserId)
+        authorizedUserIds = @($AuthorizedUserIds)
         controlCategoryName = 'Codex Control'
         archiveCategoryName = 'Codex Archived'
         projectCategoryPrefix = 'Codex - '
         controlChannelName = 'codex-remote'
         alertsChannelName = 'codex-alerts'
         completionsChannelName = 'codex-completions'
-        completionMentionUserId = $CompletionMentionUserId
+        completionMentionUserIds = @($CompletionMentionUserIds)
         defaultWatchLevel = 'normal'
         taskListLimit = 20
         initialSnapshotMessages = 16
@@ -224,7 +247,8 @@ try {
         Installed = $true
         Bot = $bot.username
         Guild = $targetGuild.name
-        AuthorizedUserId = $AuthorizedUserId
+        AuthorizedUserIds = $AuthorizedUserIds -join ','
+        CompletionMentionUserIds = $CompletionMentionUserIds -join ','
         ScheduledTask = if ($SkipScheduledTask) { 'Skipped' } else { $taskName }
         ConfigPath = $configPath
         TokenProtection = 'Windows DPAPI CurrentUser plus restricted ACL'

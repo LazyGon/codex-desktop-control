@@ -125,6 +125,14 @@ Codex task with that project's working directory, names it from the channel,
 binds the same channel, and delivers the post. It does not create tasks from
 unbound channels in control, archive, or unrelated categories.
 
+Discord access and completion notifications are configured independently in
+`discord-bridge/config/config.json`. Only IDs in `authorizedUserIds` may submit
+prompts, commands, or UI interactions. `completionMentionUserIds` is an
+independent list of fixed notification subscribers and may be empty. For every
+Discord-submitted prompt, the Bridge also records the actual executor on the
+Codex turn. Its completion notice mentions that turn's executor or executors
+plus the fixed subscribers, with duplicates removed.
+
 `codex-remote` and every task channel contain a pinned control panel. Task
 panels provide delivery-mode and watch-level selects plus status refresh,
 pending requests, a task control center, archive/restore, and confirmed

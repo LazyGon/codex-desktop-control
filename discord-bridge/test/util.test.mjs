@@ -74,16 +74,20 @@ test('Discord delivery plans cap long output at five messages with a full attach
 
 test('completion notices lead with completion, then summary, and end with a bare Discord message URL', () => {
   const content = completionNoticeContent(
-    '123456789012345678',
+    ['123456789012345678', '222222222222222222', '123456789012345678'],
     'https://discord.com/channels/guild/channel/message',
     '# Implemented the requested Discord behavior\n\nMore detail.',
   );
   assert.equal(
     content,
-    '<@123456789012345678> タスクが完了しました。\n要約: Implemented the requested Discord behavior\nhttps://discord.com/channels/guild/channel/message',
+    '<@123456789012345678> <@222222222222222222> タスクが完了しました。\n要約: Implemented the requested Discord behavior\nhttps://discord.com/channels/guild/channel/message',
   );
   assert.equal(completionSummary('- First result\nSecond result'), 'First result');
   assert.ok(!content.includes('[メッセージリンク]'));
+  assert.equal(
+    completionNoticeContent([], 'https://discord.test/message', 'Done.'),
+    'タスクが完了しました。\n要約: Done.\nhttps://discord.test/message',
+  );
 });
 
 test('project paths are normalized and include descendant working directories', () => {

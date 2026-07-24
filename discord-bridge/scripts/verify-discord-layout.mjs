@@ -129,23 +129,25 @@ try {
   for (const category of privateCategories) {
     const overwrites = category.permissionOverwrites.cache;
     const everyone = overwrites.get(guild.roles.everyone.id);
-    const authorized = overwrites.get(config.authorizedUserId);
     if (!everyone?.deny.has(PermissionFlagsBits.ViewChannel)) {
       errors.push(`${category.name}: @everyone is not denied ViewChannel.`);
     }
-    for (const permission of [
-      PermissionFlagsBits.ViewChannel,
-      PermissionFlagsBits.SendMessages,
-      PermissionFlagsBits.ReadMessageHistory,
-    ]) {
-      if (!authorized?.allow.has(permission)) {
-        errors.push(`${category.name}: authorizedUserId is missing permission ${permission}.`);
+    for (const userId of config.authorizedUserIds) {
+      const authorized = overwrites.get(userId);
+      for (const permission of [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ]) {
+        if (!authorized?.allow.has(permission)) {
+          errors.push(`${category.name}: authorized user ${userId} is missing permission ${permission}.`);
+        }
       }
     }
     const unexpectedMembers = [...overwrites.values()]
       .filter((overwrite) => overwrite.type === OverwriteType.Member
         && overwrite.id !== client.user.id
-        && overwrite.id !== config.authorizedUserId)
+        && !config.authorizedUserIds.includes(overwrite.id))
       .map((overwrite) => overwrite.id);
     if (unexpectedMembers.length) {
       errors.push(`${category.name}: unexpected member permission overwrites: ${unexpectedMembers.join(', ')}`);
@@ -180,7 +182,11 @@ try {
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
-    access: { authorizedUsers: 1, privateCategories: privateCategories.length },
+    access: {
+      authorizedUsers: config.authorizedUserIds.length,
+      completionSubscribers: config.completionMentionUserIds.length,
+      privateCategories: privateCategories.length,
+    },
     panels: { control: Boolean(state.infrastructure.controlPanelMessageId), tasks: taskPanels },
     commands: [...commandNames.map((name) => `codex ${name}`), ...(filesCommand ? ['codex-files'] : [])],
     errors,
