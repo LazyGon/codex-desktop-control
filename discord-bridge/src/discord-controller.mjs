@@ -40,10 +40,10 @@ import {
   taskPanelPayload,
 } from './discord-panels.mjs';
 import {
+  contentCardComponents,
   fileBrowserPayload,
   formatFileSize,
   linkedFilePickerPayload,
-  linkedFilesComponents,
 } from './discord-file-ui.mjs';
 import {
   extractLocalFileReferences,
@@ -1194,6 +1194,66 @@ export class DiscordController {
     });
   }
 
+  async #copyCardText(interaction) {
+    const startedAt = Date.now();
+    await interaction.deferReply({ ephemeral: true });
+    const message = interaction.message;
+    const binding = this.stateStore.bindingByChannel(interaction.channelId);
+    if (!binding) throw new Error('このメッセージはCodexタスクチャンネルにありません。');
+    if (!message) throw new Error('コピー元のカードを取得できません。');
+
+    const embed = message.embeds?.[0] ?? null;
+    const turnId = this.#embedTurnId(message);
+    const record = turnId
+      ? binding.turnMessages?.[turnId] ?? this.stateStore.turnRecord?.(binding.threadId, turnId) ?? {}
+      : {};
+    const userMessageId = this.#embedUserMessageId(message);
+    const assistantMessageId = this.#embedAssistantMessageId(message);
+    let value = userMessageId ? record.userEntries?.[userMessageId]?.text : null;
+    if (!value && assistantMessageId) value = record.assistantEntries?.[assistantMessageId]?.text;
+    if (!value && embed?.title === 'Codex running' && turnId) {
+      value = this.turnViews.get(`${binding.threadId}:${turnId}`)?.text;
+    }
+    if (!value && /^Codex turn /.test(embed?.title ?? '')) value = record.finalText;
+
+    if (!value) {
+      const fullTextAttachment = [...(message.attachments?.values?.() ?? [])]
+        .find((attachment) => /^codex-turn-.+-(?:user|assistant|final)\.txt$/i.test(attachment.name ?? ''));
+      if (fullTextAttachment) {
+        const prepared = await this.#prepareAttachment(fullTextAttachment).catch(() => null);
+        if (prepared?.kind === 'text') value = prepared.text;
+      }
+    }
+    value = String(value ?? embed?.description ?? message.content ?? '').trim();
+    if (!value) throw new Error('このカードにはコピーできる本文がありません。');
+
+    const escaped = value.replaceAll('```', '``\u200b`');
+    const previewLimit = 1_700;
+    const isLong = escaped.length > previewLimit;
+    const preview = isLong ? `${escaped.slice(0, previewLimit)}\n…` : escaped;
+    const options = messageOptions([
+      isLong ? '**カード本文（プレビュー）**' : '**カード本文**',
+      '```text',
+      preview,
+      '```',
+      ...(isLong ? ['全文は添付の `.txt` に入っています。'] : []),
+    ].join('\n'));
+    if (isLong) {
+      options.files = [this.#textAttachment(value, `codex-card-${message.id}.txt`)];
+    }
+    await interaction.editReply(options);
+    this.#log('card-text-copied', {
+      interactionId: interaction.id ?? null,
+      channelId: interaction.channelId,
+      messageId: message.id,
+      userId: interaction.user.id,
+      title: embed?.title ?? null,
+      textLength: value.length,
+      attached: isLong,
+      elapsedMs: Date.now() - startedAt,
+    });
+  }
+
   #discordMessageUrl(channelId, messageId) {
     return `https://discord.com/channels/${this.config.guildId}/${channelId}/${messageId}`;
   }
@@ -2066,6 +2126,10 @@ export class DiscordController {
   async #handleButton(interaction) {
     const parts = interaction.customId.split(':');
     if (parts[0] !== 'cx') return;
+    if (parts[1] === 'copy' && parts[2] === 'card') {
+      await this.#copyCardText(interaction);
+      return;
+    }
     if (parts[1] === 'files') {
       if (parts[2] === 'linked') {
         await this.#showLinkedFilePicker(interaction);
@@ -2893,7 +2957,7 @@ export class DiscordController {
       projectId: target.project.id,
       subscribe: !archived && (!existingBinding || existingBinding.archived),
     });
-    if (created || existingBinding?.transcriptVersion !== 11) {
+    if (created || (existingBinding?.transcriptVersion ?? 0) < 11) {
       await this.#reconcileThreadTranscript(thread.id, { channel, archived });
     }
     await this.#ensureTaskPanel(thread, channel, archived);
@@ -3086,7 +3150,7 @@ export class DiscordController {
     const options = {
       content: '',
       embeds: [embed],
-      components: linkedFilesComponents(localFiles.length),
+      components: contentCardComponents(localFiles.length),
       attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
       allowedMentions: { parse: [] },
     };
@@ -3215,6 +3279,7 @@ export class DiscordController {
     const options = {
       content: '',
       embeds: [embed],
+      components: contentCardComponents(),
       attachments: [],
       allowedMentions: { parse: [] },
     };
@@ -3381,7 +3446,7 @@ export class DiscordController {
     const options = {
       content: '',
       embeds: [embed],
-      components: linkedFilesComponents(localFiles.length),
+      components: contentCardComponents(localFiles.length),
       attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
       allowedMentions: { parse: [] },
     };
@@ -3420,6 +3485,7 @@ export class DiscordController {
       liveMessageId: null,
       cardMessageId: message.id,
       finalMessageIds: [message.id],
+      finalText: value,
       finalLocalFiles: localFiles,
       status: turn.status,
       finalizedAt: new Date().toISOString(),
@@ -3445,7 +3511,7 @@ export class DiscordController {
         && (!view.currentMessageId || this.#embedAssistantMessageId(candidate) === view.currentMessageId));
     }
     const localFiles = extractLocalFileReferences(view.text);
-    const components = linkedFilesComponents(localFiles.length);
+    const components = contentCardComponents(localFiles.length);
     if (message) {
       await message.edit({ content: '', embeds: [this.#turnEmbed(view)], components, attachments: [], allowedMentions: { parse: [] } });
     } else {
@@ -4041,8 +4107,9 @@ export class DiscordController {
   async #renderTurn(binding, view) {
     const channel = await this.client.channels.fetch(binding.channelId);
     let message = null;
+    const components = contentCardComponents(extractLocalFileReferences(view.text).length);
     if (!view.messageId) {
-      message = await channel.send({ embeds: [this.#turnEmbed(view)], allowedMentions: { parse: [] } });
+      message = await channel.send({ embeds: [this.#turnEmbed(view)], components, allowedMentions: { parse: [] } });
     } else {
       message = await channel.messages.fetch(view.messageId).catch(() => null);
       if (!message) {
@@ -4053,6 +4120,7 @@ export class DiscordController {
       await message.edit({
         content: '',
         embeds: [this.#turnEmbed(view)],
+        components,
         attachments: [],
         allowedMentions: { parse: [] },
       });
@@ -4475,7 +4543,7 @@ export class DiscordController {
     const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
     if (!channel) return;
     const latestBinding = this.stateStore.binding(binding.threadId);
-    const needsHistory = latestBinding?.transcriptVersion !== 11 || missedCompletion?.needsCompletionMessage;
+    const needsHistory = (latestBinding?.transcriptVersion ?? 0) < 11 || missedCompletion?.needsCompletionMessage;
     const hasActiveTurn = (thread.turns ?? []).some((turn) => turn.status === 'inProgress');
     if (needsHistory) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });

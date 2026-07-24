@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  contentCardComponents,
   fileBrowserPayload,
   linkedFilePickerPayload,
   linkedFilesComponents,
@@ -13,6 +14,20 @@ test('assistant cards expose one stable linked-file button only when links exist
   const rows = json(linkedFilesComponents(3));
   assert.equal(rows[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(rows[0].components[0].label, 'Linked files (3)');
+});
+
+test('content cards always expose copy text and keep linked-file access when available', () => {
+  const withoutLinks = json(contentCardComponents());
+  assert.equal(withoutLinks[0].components.length, 1);
+  assert.equal(withoutLinks[0].components[0].custom_id, 'cx:copy:card');
+  assert.equal(withoutLinks[0].components[0].label, '本文をコピー');
+  assert.equal(withoutLinks[0].components[0].emoji.name, '📋');
+
+  const withLinks = json(contentCardComponents(2));
+  assert.deepEqual(withLinks[0].components.map((component) => component.custom_id), [
+    'cx:files:linked',
+    'cx:copy:card',
+  ]);
 });
 
 test('file selectors use native Discord emojis for folders, files, and locked entries', () => {

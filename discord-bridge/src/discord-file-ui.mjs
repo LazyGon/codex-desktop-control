@@ -28,6 +28,26 @@ export function linkedFilesComponents(count) {
   )];
 }
 
+export function contentCardComponents(linkedFileCount = 0) {
+  const row = new ActionRowBuilder();
+  if (linkedFileCount) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId('cx:files:linked')
+        .setLabel(`Linked files (${linkedFileCount})`)
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId('cx:copy:card')
+      .setLabel('本文をコピー')
+      .setEmoji('📋')
+      .setStyle(ButtonStyle.Secondary),
+  );
+  return [row];
+}
+
 function entryEmoji(entry) {
   if (entry.lockedReason) return '🔒';
   return entry.kind === 'directory' ? '🗂️' : '📄';

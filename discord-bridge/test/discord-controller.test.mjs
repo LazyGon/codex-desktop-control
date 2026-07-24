@@ -193,6 +193,8 @@ test('completed turns replace the pinned task panel below the final card exactly
   const panelIndex = sent.findIndex((message) => message.id === panel.id);
   assert.ok(finalIndex >= 0 && panelIndex > finalIndex);
   assert.equal(sent[finalIndex].embeds[0].color, 0x1971c2);
+  assert.equal(sent[finalIndex].components[0].components.at(-1).custom_id, 'cx:copy:card');
+  assert.equal(binding.turnMessages['turn-complete'].finalText, 'Finished.');
   assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
@@ -318,6 +320,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.ok(userCard);
   assert.equal(userCard.embeds[0].color, 0xe67e22);
   assert.equal(userCard.embeds[0].description, 'run the requested task');
+  assert.equal(userCard.components[0].components[0].custom_id, 'cx:copy:card');
   assert.deepEqual(userCard.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);
   assert.equal(
     userCard.embeds[0].fields.find((field) => field.name === 'Message').value,
@@ -417,6 +420,8 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.ok(liveAssistant, diagnostic);
   assert.equal(pastAssistant.embeds[0].description, 'first update [artifact](C:\\work\\artifact.txt)');
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
+  assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');
+  assert.equal(liveAssistant.components[0].components.at(-1).custom_id, 'cx:copy:card');
   assert.deepEqual(pastAssistant.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);
   assert.equal(liveAssistant.embeds[0].fields.find((field) => field.name === 'Message').value, '`assistant-item-2`');
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].messageIds, [pastAssistant.id]);
@@ -1011,6 +1016,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
   const codex = new EventEmitter();
+  const copyText = `Full assistant card text ${'x'.repeat(1_800)}`;
   const binding = {
     threadId: 'thread-files',
     channelId: 'task-channel',
@@ -1019,6 +1025,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
       'turn-1': {
         assistantEntries: {
           'assistant-1': {
+            text: copyText,
             messageIds: ['assistant-card'],
             localFiles: [
               { label: 'cross-project', target: siblingPath },
@@ -1084,7 +1091,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     isButton: () => true,
     isModalSubmit: () => false,
     isRepliable: () => true,
-    deferReply: async function deferReply() { this.deferred = true; },
+    deferReply: async function deferReply(options) { this.deferred = true; this.deferReplyOptions = options; },
     deferUpdate: async function deferUpdate() { this.deferred = true; },
     editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
     reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
@@ -1125,6 +1132,29 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const gitConfirm = gitDownload.lastReply.components[0].toJSON().components[0];
   assert.match(gitConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
   assert.equal(gitConfirm.label, '.gitを作成');
+
+  const copied = interaction('cx:copy:card', {
+    id: 'assistant-card',
+    embeds: [{
+      title: 'Codex message',
+      description: 'Full assistant card text...',
+      fields: [
+        { name: 'Task', value: `\`${binding.threadId}\`` },
+        { name: 'Turn', value: '`turn-1`' },
+        { name: 'Message', value: '`assistant-1`' },
+      ],
+    }],
+    attachments: new Map(),
+  });
+  client.emit('interactionCreate', copied);
+  for (let attempt = 0; attempt < 100 && !copied.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.deepEqual(copied.deferReplyOptions, { ephemeral: true });
+  assert.match(copied.lastReply.content, /Full assistant card text/);
+  assert.match(copied.lastReply.content, /全文は添付/);
+  assert.equal(copied.lastReply.files[0].name, 'codex-card-assistant-card.txt');
+  assert.equal(copied.lastReply.files[0].attachment.toString('utf8'), copyText);
 
   const linked = interaction('cx:files:linked', {
     id: 'assistant-card',
