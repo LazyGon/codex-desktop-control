@@ -332,6 +332,44 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     [userCard.id],
   );
 
+  const unauthorizedReplies = [];
+  const unauthorizedMessage = {
+    ...originalMessage,
+    id: 'message-unauthorized',
+    author: { id: 'user-2', tag: 'other#0002', bot: false },
+    content: 'do not deliver this prompt',
+    reply: async (options) => { unauthorizedReplies.push(options); },
+    delete: async () => { throw new Error('Unauthorized prompt must not be deleted.'); },
+  };
+  channelMessages.set(unauthorizedMessage.id, unauthorizedMessage);
+  client.emit('messageCreate', unauthorizedMessage);
+  for (let attempt = 0; attempt < 50 && unauthorizedReplies.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(delivered.prompt, 'run the requested task');
+  assert.match(unauthorizedReplies[0].content, /拒否しました/);
+  assert.deepEqual(unauthorizedReplies[0].allowedMentions, { parse: [] });
+
+  const unauthorizedCommand = {
+    guildId: 'guild-1',
+    channelId: 'task-channel',
+    user: { id: 'user-2' },
+    commandName: 'codex',
+    isAutocomplete: () => false,
+    isChatInputCommand: () => true,
+    isStringSelectMenu: () => false,
+    isButton: () => false,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    reply: async function reply(options) { this.lastReply = options; },
+  };
+  client.emit('interactionCreate', unauthorizedCommand);
+  for (let attempt = 0; attempt < 50 && !unauthorizedCommand.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(unauthorizedCommand.lastReply.content, /拒否しました/);
+  assert.equal(unauthorizedCommand.lastReply.ephemeral, true);
+
   codex.emit('notification', {
     method: 'item/started',
     params: {

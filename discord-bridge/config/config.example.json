@@ -1,9 +1,7 @@
 {
   "applicationId": "DISCORD_APPLICATION_ID",
   "guildId": "DISCORD_GUILD_ID",
-  "allowedUserIds": [
-    "DISCORD_USER_ID"
-  ],
+  "authorizedUserId": "DISCORD_USER_ID",
   "controlCategoryName": "Codex Control",
   "archiveCategoryName": "Codex Archived",
   "projectCategoryPrefix": "Codex - ",

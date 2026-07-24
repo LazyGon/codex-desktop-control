@@ -188,7 +188,7 @@ explicit opt-in, slash-command operation continues without the privileged
 intent.
 
 The root installer first builds and installs the shared Desktop launcher, then
-validates the token and server, defaults the allowlist to the server owner,
+validates the token and server, defaults the single `authorizedUserId` to the server owner,
 registers guild-scoped commands, installs a current-user Scheduled Task, starts
 Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
@@ -298,9 +298,13 @@ time is deferred before execution.
   not include ordinary working-tree files or nested repositories.
 - Ordinary-message input is accepted only in bound task channels or unbound
   text channels inside a managed project category, from the configured guild
-  and user allowlist. Unbound control, archive, and unrelated channels never
-  create tasks. It requires Discord's privileged Message Content Intent. Bot
-  and webhook messages are ignored.
+  and the single `authorizedUserId` in `config/config.json`. Other users receive
+  a rejection and their content is never sent to Codex. Unbound control,
+  archive, and unrelated channels never create tasks. It requires Discord's
+  privileged Message Content Intent. Bot and webhook messages are ignored.
+- Slash commands, buttons, selects, and modal submissions use the same
+  `authorizedUserId` check. `completionMentionUserId` must match it, otherwise
+  the Bridge fails closed during configuration loading.
 - Mentions are disabled in general bot output. Completion notifications allow
   only the configured `completionMentionUserId`.
 - app-server remains loopback-only and is never tunneled to Discord or a LAN.

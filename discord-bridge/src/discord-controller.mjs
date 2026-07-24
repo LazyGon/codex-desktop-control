@@ -129,6 +129,10 @@ export class DiscordController {
     this.codex = codex;
     this.stateStore = stateStore;
     this.config = config;
+    this.authorizedUserId = config.authorizedUserId
+      ?? config.completionMentionUserId
+      ?? config.allowedUserIds?.[0]
+      ?? null;
     this.automationStore = automationStore;
     this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
@@ -326,11 +330,11 @@ export class DiscordController {
           ...(includePinMessages ? [PermissionFlagsBits.PinMessages] : []),
         ],
       },
-      ...this.config.allowedUserIds.map((userId) => ({
-        id: userId,
+      {
+        id: this.authorizedUserId,
         type: OverwriteType.Member,
         allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
-      })),
+      },
     ];
   }
 
@@ -476,7 +480,7 @@ export class DiscordController {
 
   async #handleDiscordMessage(message) {
     if (!this.config.plainMessageInputEnabled || message.author.bot || message.webhookId) return;
-    if (message.guildId !== this.config.guildId || !this.config.allowedUserIds.includes(message.author.id)) return;
+    if (message.guildId !== this.config.guildId) return;
     let binding = this.stateStore.bindingByChannel(message.channelId);
     let channel = null;
     let project = null;
@@ -484,6 +488,18 @@ export class DiscordController {
       channel = message.channel ?? await this.client.channels.fetch(message.channelId).catch(() => null);
       project = this.#managedProjectForChannel(channel);
       if (!project) return;
+    }
+    if (!this.#isAuthorizedUser(message.author.id)) {
+      this.#log('unauthorized-message', {
+        guildId: message.guildId,
+        channelId: message.channelId,
+        messageId: message.id,
+        userId: message.author.id,
+      });
+      await message.reply(messageOptions(
+        '拒否しました。このBotへのプロンプトとコマンドは、設定済みの1ユーザーだけが実行できます。',
+      )).catch(() => {});
+      return;
     }
 
     const content = message.content.trim();
@@ -673,7 +689,7 @@ export class DiscordController {
 
   #authorized(interaction) {
     const allowed = interaction.guildId === this.config.guildId
-      && this.config.allowedUserIds.includes(interaction.user.id);
+      && this.#isAuthorizedUser(interaction.user.id);
     if (!allowed) {
       this.#log('unauthorized-interaction', {
         guildId: interaction.guildId,
@@ -681,10 +697,17 @@ export class DiscordController {
         command: interaction.commandName,
       });
       if (interaction.isRepliable()) {
-        interaction.reply(messageOptions('このBotの操作権限がありません。', { ephemeral: true })).catch(() => {});
+        interaction.reply(messageOptions(
+          '拒否しました。このBotへのプロンプトとコマンドは、設定済みの1ユーザーだけが実行できます。',
+          { ephemeral: true },
+        )).catch(() => {});
       }
     }
     return allowed;
+  }
+
+  #isAuthorizedUser(userId) {
+    return Boolean(this.authorizedUserId) && userId === this.authorizedUserId;
   }
 
   async #handleAutocomplete(interaction) {
@@ -3316,7 +3339,7 @@ export class DiscordController {
       let message = await this.#resolveChannelMessage(channel, messages, existingIds[0]);
       let sourceMessage = null;
       let migratedEntryId = null;
-      if (message && this.config.allowedUserIds.includes(message.author.id)) {
+      if (message && this.#isAuthorizedUser(message.author.id)) {
         sourceMessage = message;
         message = null;
       }
@@ -3336,7 +3359,7 @@ export class DiscordController {
         if (!candidate || !sameText) continue;
         migratedEntryId = entryId;
         if (candidate.author.id === this.client.user.id) message = candidate;
-        else if (this.config.allowedUserIds.includes(candidate.author.id)) sourceMessage = candidate;
+        else if (this.#isAuthorizedUser(candidate.author.id)) sourceMessage = candidate;
       }
 
       if (!message) {
@@ -3353,7 +3376,7 @@ export class DiscordController {
 
       if (!sourceMessage) {
         sourceMessage = [...messages.values()]
-          .filter((candidate) => this.config.allowedUserIds.includes(candidate.author.id)
+          .filter((candidate) => this.#isAuthorizedUser(candidate.author.id)
             && !claimedIds.has(candidate.id)
             && !globallyClaimedIds.has(candidate.id)
             && !allIds.includes(candidate.id))
@@ -3384,7 +3407,7 @@ export class DiscordController {
       staleIds.delete(message.id);
       for (const staleId of staleIds) {
         const stale = await this.#resolveChannelMessage(channel, messages, staleId);
-        if (stale && (stale.author.id === this.client.user.id || this.config.allowedUserIds.includes(stale.author.id))) {
+        if (stale && (stale.author.id === this.client.user.id || this.#isAuthorizedUser(stale.author.id))) {
           await stale.delete().catch((error) => {
             if (error.code !== 10008) throw error;
           });
@@ -4488,7 +4511,7 @@ export class DiscordController {
 
   #assertPendingRequest(record, userId) {
     if (!record) throw new Error('この要求は回答済み、または接続更新により期限切れです。');
-    if (!this.config.allowedUserIds.includes(userId)) throw new Error('この要求に回答する権限がありません。');
+    if (!this.#isAuthorizedUser(userId)) throw new Error('この要求に回答する権限がありません。');
   }
 
   async #resolvePending(record, note, userId) {

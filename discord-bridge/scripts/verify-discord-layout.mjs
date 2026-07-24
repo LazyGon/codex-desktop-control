@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { ChannelType, Client, GatewayIntentBits } from 'discord.js';
+import {
+  ChannelType,
+  Client,
+  GatewayIntentBits,
+  OverwriteType,
+  PermissionFlagsBits,
+} from 'discord.js';
 import { dataDir, loadConfig } from '../src/config.mjs';
 import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
 
@@ -49,6 +55,11 @@ try {
   const removedCommands = ['autocatchup', 'catchup', 'bind', 'unbind'].filter((name) => commandNames.includes(name));
   const errors = [];
   let taskPanels = 0;
+  const privateCategories = [
+    ...(controlCategory ? [controlCategory] : []),
+    ...archiveCategories.values(),
+    ...projectCategories.values(),
+  ];
 
   const customIds = (message) => message.components
     .flatMap((row) => row.components.map((component) => component.customId).filter(Boolean));
@@ -115,6 +126,31 @@ try {
       ],
     );
   }
+  for (const category of privateCategories) {
+    const overwrites = category.permissionOverwrites.cache;
+    const everyone = overwrites.get(guild.roles.everyone.id);
+    const authorized = overwrites.get(config.authorizedUserId);
+    if (!everyone?.deny.has(PermissionFlagsBits.ViewChannel)) {
+      errors.push(`${category.name}: @everyone is not denied ViewChannel.`);
+    }
+    for (const permission of [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.ReadMessageHistory,
+    ]) {
+      if (!authorized?.allow.has(permission)) {
+        errors.push(`${category.name}: authorizedUserId is missing permission ${permission}.`);
+      }
+    }
+    const unexpectedMembers = [...overwrites.values()]
+      .filter((overwrite) => overwrite.type === OverwriteType.Member
+        && overwrite.id !== client.user.id
+        && overwrite.id !== config.authorizedUserId)
+      .map((overwrite) => overwrite.id);
+    if (unexpectedMembers.length) {
+      errors.push(`${category.name}: unexpected member permission overwrites: ${unexpectedMembers.join(', ')}`);
+    }
+  }
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
     const channel = textChannels.get(binding.channelId);
     if (!channel) continue;
@@ -144,6 +180,7 @@ try {
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
+    access: { authorizedUsers: 1, privateCategories: privateCategories.length },
     panels: { control: Boolean(state.infrastructure.controlPanelMessageId), tasks: taskPanels },
     commands: [...commandNames.map((name) => `codex ${name}`), ...(filesCommand ? ['codex-files'] : [])],
     errors,

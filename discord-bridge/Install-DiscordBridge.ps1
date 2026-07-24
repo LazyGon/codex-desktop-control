@@ -7,6 +7,11 @@ param(
     [string]$GuildId,
 
     [ValidatePattern('^\d{15,22}$')]
+    [string]$AuthorizedUserId,
+
+    # Legacy compatibility. Only the first value is used when
+    # -AuthorizedUserId is omitted.
+    [ValidatePattern('^\d{15,22}$')]
     [string[]]$AllowedUserIds,
 
     [ValidatePattern('^\d{15,22}$')]
@@ -79,19 +84,32 @@ try {
     }
     $targetGuild = @($diagnostic.guilds | Where-Object { $_.id -eq $GuildId })[0]
 
-    if (-not $AllowedUserIds -or $AllowedUserIds.Count -eq 0) {
-        $AllowedUserIds = @([string]$diagnostic.targetOwnerId)
+    if (-not $AuthorizedUserId) {
+        if ($CompletionMentionUserId) {
+            $AuthorizedUserId = $CompletionMentionUserId
+        }
+        elseif ($AllowedUserIds -and $AllowedUserIds.Count -gt 0) {
+            $AuthorizedUserId = [string]$AllowedUserIds[0]
+        }
+        else {
+            $AuthorizedUserId = [string]$diagnostic.targetOwnerId
+        }
     }
-    foreach ($userId in $AllowedUserIds) {
-        if ($userId -notmatch '^\d{15,22}$') { throw "Allowed user ID is invalid: $userId" }
+    if ($AuthorizedUserId -notmatch '^\d{15,22}$') {
+        throw "Authorized user ID is invalid: $AuthorizedUserId"
     }
-    if (-not $CompletionMentionUserId) { $CompletionMentionUserId = [string]$AllowedUserIds[0] }
+    if ($CompletionMentionUserId -and $CompletionMentionUserId -ne $AuthorizedUserId) {
+        throw 'CompletionMentionUserId must match AuthorizedUserId.'
+    }
+    $CompletionMentionUserId = $AuthorizedUserId
+    $AllowedUserIds = @($AuthorizedUserId)
 
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $config = [ordered]@{
         applicationId = $ApplicationId
         guildId = $GuildId
-        allowedUserIds = @($AllowedUserIds | Select-Object -Unique)
+        authorizedUserId = $AuthorizedUserId
+        allowedUserIds = @($AuthorizedUserId)
         controlCategoryName = 'Codex Control'
         archiveCategoryName = 'Codex Archived'
         projectCategoryPrefix = 'Codex - '
@@ -206,7 +224,7 @@ try {
         Installed = $true
         Bot = $bot.username
         Guild = $targetGuild.name
-        AllowedUserIds = ($AllowedUserIds -join ',')
+        AuthorizedUserId = $AuthorizedUserId
         ScheduledTask = if ($SkipScheduledTask) { 'Skipped' } else { $taskName }
         ConfigPath = $configPath
         TokenProtection = 'Windows DPAPI CurrentUser plus restricted ACL'

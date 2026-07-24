@@ -20,6 +20,7 @@ const defaults = {
   controlChannelName: 'codex-remote',
   alertsChannelName: 'codex-alerts',
   completionsChannelName: 'codex-completions',
+  authorizedUserId: null,
   completionMentionUserId: null,
   defaultWatchLevel: 'normal',
   taskListLimit: 20,
@@ -38,29 +39,48 @@ const defaults = {
   appServerUrl: null,
 };
 
+export function resolveAuthorizationConfig(config) {
+  const authorizedUserId = config.authorizedUserId
+    ?? config.completionMentionUserId
+    ?? (Array.isArray(config.allowedUserIds) ? config.allowedUserIds[0] : null)
+    ?? null;
+  const completionMentionUserId = config.completionMentionUserId ?? authorizedUserId;
+  return {
+    ...config,
+    authorizedUserId,
+    completionMentionUserId,
+    // Keep the legacy property for older scripts, but never retain additional
+    // users: Discord control is intentionally single-user.
+    allowedUserIds: authorizedUserId ? [authorizedUserId] : [],
+  };
+}
+
+export function authorizationConfigErrors(config) {
+  const errors = [];
+  if (!isSnowflake(config.authorizedUserId)) {
+    errors.push('authorizedUserId must be a Discord snowflake.');
+  }
+  if (!isSnowflake(config.completionMentionUserId)) {
+    errors.push('completionMentionUserId must be a Discord snowflake.');
+  } else if (config.completionMentionUserId !== config.authorizedUserId) {
+    errors.push('completionMentionUserId must match authorizedUserId.');
+  }
+  return errors;
+}
+
 export function loadConfig() {
   const raw = readJsonIfPresent(configPath);
   if (!raw) throw new Error(`Missing or invalid configuration: ${configPath}`);
-  const config = { ...defaults, ...raw };
+  const config = resolveAuthorizationConfig({ ...defaults, ...raw });
   if (!raw.initialSnapshotMessages && raw.catchupMessages) config.initialSnapshotMessages = raw.catchupMessages;
   if (!raw.taskSyncIntervalMs && raw.autoCatchupIntervalMs) config.taskSyncIntervalMs = raw.autoCatchupIntervalMs;
-  if (!config.completionMentionUserId && Array.isArray(config.allowedUserIds)) {
-    [config.completionMentionUserId] = config.allowedUserIds;
-  }
   if (config.sharedLauncherPath && !path.isAbsolute(config.sharedLauncherPath)) {
     config.sharedLauncherPath = path.resolve(bridgeRoot, config.sharedLauncherPath);
   }
   const errors = [];
   if (!isSnowflake(config.applicationId)) errors.push('applicationId must be a Discord snowflake.');
   if (!isSnowflake(config.guildId)) errors.push('guildId must be a Discord snowflake.');
-  if (!Array.isArray(config.allowedUserIds) || config.allowedUserIds.length === 0) {
-    errors.push('allowedUserIds must contain at least one Discord user id.');
-  } else if (config.allowedUserIds.some((value) => !isSnowflake(value))) {
-    errors.push('Every allowedUserIds entry must be a Discord snowflake.');
-  }
-  if (!isSnowflake(config.completionMentionUserId)) {
-    errors.push('completionMentionUserId must be a Discord snowflake.');
-  }
+  errors.push(...authorizationConfigErrors(config));
   if (!['quiet', 'normal', 'verbose'].includes(config.defaultWatchLevel)) {
     errors.push('defaultWatchLevel must be quiet, normal, or verbose.');
   }

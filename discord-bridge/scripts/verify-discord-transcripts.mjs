@@ -288,7 +288,7 @@ try {
     }
 
     for (const message of messages.values()) {
-      if (config.allowedUserIds.includes(message.author.id)) {
+      if (message.author.id === config.authorizedUserId) {
         errors.push(`${threadId}: raw Discord user message remains at ${message.id}.`);
       }
       if (message.author.id !== client.user.id) continue;

@@ -7,6 +7,11 @@ param(
     [string]$GuildId,
 
     [ValidatePattern('^\d{15,22}$')]
+    [string]$AuthorizedUserId,
+
+    # Legacy compatibility. Only the first value is used when
+    # -AuthorizedUserId is omitted.
+    [ValidatePattern('^\d{15,22}$')]
     [string[]]$AllowedUserIds,
 
     [ValidatePattern('^\d{15,22}$')]
@@ -155,7 +160,7 @@ try {
         SkipScheduledTask = [bool]$SkipScheduledTask
         EnablePlainMessageInput = [bool]$EnablePlainMessageInput
     }
-    foreach ($name in @('ApplicationId', 'GuildId', 'AllowedUserIds', 'CompletionMentionUserId', 'BotToken')) {
+    foreach ($name in @('ApplicationId', 'GuildId', 'AuthorizedUserId', 'AllowedUserIds', 'CompletionMentionUserId', 'BotToken')) {
         if ($PSBoundParameters.ContainsKey($name)) {
             $bridgeParameters[$name] = $PSBoundParameters[$name]
         }
