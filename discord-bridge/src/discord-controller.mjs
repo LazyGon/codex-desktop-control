@@ -1140,12 +1140,19 @@ export class DiscordController {
   }
 
   async #showLinkedFilePicker(interaction) {
+    const startedAt = Date.now();
+    await interaction.deferReply({ ephemeral: true });
+    this.#log('linked-file-picker-requested', {
+      interactionId: interaction.id ?? null,
+      channelId: interaction.channelId,
+      messageId: interaction.message?.id ?? null,
+      userId: interaction.user.id,
+    });
     this.#assertFileSharingEnabled();
     const binding = this.stateStore.bindingByChannel(interaction.channelId);
     if (!binding) throw new Error('このメッセージはCodexタスクチャンネルにありません。');
     const references = this.#linkedReferences(binding, interaction.message);
     if (references.length === 0) throw new Error('このカードに取得可能なローカルファイルリンクはありません。');
-    await interaction.deferReply({ ephemeral: true });
     const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
     const items = await Promise.all(references.map(async (reference) => {
       try {
@@ -1176,6 +1183,15 @@ export class DiscordController {
     };
     this.pendingActions.set(key, session);
     await interaction.editReply(linkedFilePickerPayload(session));
+    this.#log('linked-file-picker-opened', {
+      interactionId: interaction.id ?? null,
+      channelId: interaction.channelId,
+      messageId: interaction.message?.id ?? null,
+      threadId: binding.threadId,
+      references: items.length,
+      downloadable: items.filter((item) => item.file && !item.error).length,
+      elapsedMs: Date.now() - startedAt,
+    });
   }
 
   #discordMessageUrl(channelId, messageId) {

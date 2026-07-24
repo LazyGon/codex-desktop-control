@@ -1029,9 +1029,13 @@ test('task file UI browses project entries and resolves only safe assistant-link
       },
     },
   };
+  let linkedPickerOrder = null;
   const stateStore = {
     binding: (threadId) => threadId === binding.threadId ? structuredClone(binding) : null,
-    bindingByChannel: (channelId) => channelId === binding.channelId ? structuredClone(binding) : null,
+    bindingByChannel: (channelId) => {
+      linkedPickerOrder?.push('binding');
+      return channelId === binding.channelId ? structuredClone(binding) : null;
+    },
     projectCategories: () => [{ path: project }, { path: siblingProject }],
   };
   const controller = new DiscordController({
@@ -1126,10 +1130,17 @@ test('task file UI browses project entries and resolves only safe assistant-link
     id: 'assistant-card',
     embeds: [],
   });
+  linkedPickerOrder = [];
+  linked.deferReply = async function deferReply() {
+    linkedPickerOrder.push('defer');
+    this.deferred = true;
+  };
   client.emit('interactionCreate', linked);
   for (let attempt = 0; attempt < 100 && !linked.lastReply; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+  assert.deepEqual(linkedPickerOrder.slice(0, 2), ['defer', 'binding']);
+  linkedPickerOrder = null;
   const linkedOptions = linked.lastReply.components[0].toJSON().components[0].options;
   assert.equal(linkedOptions[0].label, 'cross-project');
   assert.equal(linkedOptions[0].emoji.name, '📄');
