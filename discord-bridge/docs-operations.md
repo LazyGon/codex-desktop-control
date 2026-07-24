@@ -17,7 +17,8 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    channel. To create a task, create a text channel in that project category
    and send its first ordinary message. The channel name becomes the task name,
    and the category selects the working directory. Archived tasks are under
-   `Codex Archived`.
+   `Codex Archived`. Tasks created in Codex Desktop without selecting a folder
+   are grouped under the single `Codex - No Project` category.
 3. Review orange user cards, final assistant cards, and commentary cards captured
    while the task was live. `🟢` in the channel name means a turn is running;
    `⚫` means stopped. Pinned control panels are purple, while completed result
@@ -117,6 +118,9 @@ escape hatch.
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
 notifications. `/codex sync` forces the same reconciliation immediately.
+The bridge uses Desktop's `thread-project-assignments` and saved local-project
+roots to distinguish selected folders from generated App Server working
+directories. Empty superseded project categories are removed after migration.
 Moving a task channel into `Codex Archived` archives the matching Codex task.
 Moving an archived channel back to its own project category unarchives it.
 Moving it to any unrelated category is rejected and immediately rolled back to

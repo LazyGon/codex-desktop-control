@@ -10,12 +10,17 @@ import {
 } from 'discord.js';
 import { dataDir, loadConfig } from '../src/config.mjs';
 import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
+import {
+  projectDescriptorForThread,
+  readDesktopProjectSnapshot,
+} from '../src/desktop-project-state.mjs';
 
 const config = loadConfig();
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 
 const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
+const desktopProjects = readDesktopProjectSnapshot(config.desktopGlobalStatePath);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const timeout = setTimeout(() => {
   process.stderr.write('Discord layout verification timed out after 60 seconds.\n');
@@ -52,6 +57,16 @@ try {
   const projectCategoryIds = new Set(projectCategories.map((category) => category.id));
   const referencedProjectCategoryIds = new Set(Object.values(state.projectCategories ?? {})
     .flatMap((project) => project.categoryIds ?? []));
+  const activeBindings = Object.entries(state.bindings ?? {})
+    .filter(([, binding]) => !binding.archived);
+  const expectedProjectlessBindings = activeBindings.filter(([threadId, binding]) => (
+    projectDescriptorForThread(
+      { id: threadId, cwd: binding.cwd },
+      desktopProjects,
+      config.projectCategoryPrefix,
+    ).key === '__no_project__'
+  ));
+  const noProjectRecord = state.projectCategories?.__no_project__ ?? null;
   const command = commands.find((candidate) => candidate.name === 'codex');
   const filesCommand = commands.find((candidate) => candidate.name === 'codex-files');
   const commandNames = command?.options.map((option) => option.name) ?? [];
@@ -117,6 +132,26 @@ try {
   if (duplicateProjectNames.length) errors.push(`Duplicate project categories remain: ${duplicateProjectNames.join(', ')}`);
   if (projectCategories.some((category) => !referencedProjectCategoryIds.has(category.id))) {
     errors.push('An unreferenced project category remains in Discord.');
+  }
+  if (!desktopProjects.available) {
+    errors.push(`Codex Desktop project state is unavailable: ${desktopProjects.error}`);
+  } else if (expectedProjectlessBindings.length > 0) {
+    if (!noProjectRecord) {
+      errors.push('The shared projectless category is missing from persisted state.');
+    } else {
+      const noProjectCategoryIds = noProjectRecord.categoryIds ?? [];
+      if (noProjectCategoryIds.length !== 1) {
+        errors.push(`Projectless tasks use ${noProjectCategoryIds.length} categories instead of one.`);
+      }
+      for (const [threadId, binding] of expectedProjectlessBindings) {
+        if (binding.projectKey !== '__no_project__') {
+          errors.push(`Projectless task ${threadId} has project key ${binding.projectKey}.`);
+        }
+        if (!noProjectCategoryIds.includes(binding.categoryId)) {
+          errors.push(`Projectless task ${threadId} is outside the shared category.`);
+        }
+      }
+    }
   }
   if (activeTasks.some((channel) => !projectCategoryIds.has(channel.parentId))) {
     errors.push('At least one active task is outside a project category.');
@@ -206,6 +241,11 @@ try {
       channel: transferTextChannel?.name ?? null,
     },
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
+    projectless: {
+      desktopStateAvailable: desktopProjects.available,
+      tasks: expectedProjectlessBindings.length,
+      categories: noProjectRecord?.categoryIds?.length ?? 0,
+    },
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
     access: {

@@ -52,6 +52,8 @@ test('StateStore persists bindings atomically', () => {
 
     const projectReload = new StateStore(directory, '123456789012345');
     assert.deepEqual(projectReload.projectCategory('c:\\git\\example').categoryIds, ['category-1']);
+    projectReload.removeProjectCategory('c:\\git\\example');
+    assert.equal(projectReload.projectCategory('c:\\git\\example'), null);
 
     projectReload.update((state) => { state.bindings.undefined = { channelId: 'legacy-corruption' }; });
     const migrated = new StateStore(directory, '123456789012345');

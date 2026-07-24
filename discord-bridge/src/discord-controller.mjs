@@ -82,6 +82,10 @@ import {
   ClientToolUnavailableError,
 } from './client-tool-router.mjs';
 import { TextTransferStore } from './text-transfer-store.mjs';
+import {
+  projectDescriptorForThread,
+  readDesktopProjectSnapshot,
+} from './desktop-project-state.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -161,6 +165,7 @@ export class DiscordController {
     this.discordMessageQueues = new Map();
     this.pendingChannelBindings = new Map();
     this.panelSyncPromises = new Map();
+    this.projectCategoryPromises = new Map();
     this.internalChannelMoves = new Map();
     this.internalChannelNames = new Map();
     this.canPinControlPanels = false;
@@ -2748,7 +2753,11 @@ export class DiscordController {
     const archived = archivedThreads.filter((thread) => this.#isSyncableThread(thread));
     const { guild } = await this.infrastructureReady;
     const channels = await guild.channels.fetch();
-    const context = { guild, channels };
+    const context = {
+      guild,
+      channels,
+      desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
+    };
     const result = {
       active: active.length,
       archived: archived.length,
@@ -2792,6 +2801,7 @@ export class DiscordController {
     for (const [threads, isArchived] of [[active, false], [archived, true]]) {
       await syncThreads(threads, isArchived);
     }
+    context.channels = await guild.channels.fetch();
     result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
     await this.#ensureControlPanel();
     this.#log('task-sync', result);
@@ -2974,7 +2984,25 @@ export class DiscordController {
   }
 
   async #projectCategories(thread, context) {
-    const descriptor = projectDescriptor(thread.cwd, this.config.projectCategoryPrefix);
+    const descriptor = projectDescriptorForThread(
+      thread,
+      context.desktopProjects,
+      this.config.projectCategoryPrefix,
+    );
+    const pending = this.projectCategoryPromises.get(descriptor.key);
+    if (pending) return pending;
+    const operation = this.#ensureProjectCategories(descriptor, context);
+    this.projectCategoryPromises.set(descriptor.key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.projectCategoryPromises.get(descriptor.key) === operation) {
+        this.projectCategoryPromises.delete(descriptor.key);
+      }
+    }
+  }
+
+  async #ensureProjectCategories(descriptor, context) {
     const stored = this.stateStore.projectCategory(descriptor.key);
     const categories = [];
     for (const categoryId of stored?.categoryIds ?? []) {
@@ -3050,7 +3078,14 @@ export class DiscordController {
         context,
         async (categoryIds) => this.stateStore.setInfrastructure({ archiveCategoryIds: categoryIds }),
       );
-      return { category, project: projectDescriptor(thread.cwd, this.config.projectCategoryPrefix) };
+      return {
+        category,
+        project: projectDescriptorForThread(
+          thread,
+          context.desktopProjects,
+          this.config.projectCategoryPrefix,
+        ),
+      };
     }
     const { descriptor, categories } = await this.#projectCategories(thread, context);
     const category = await this.#categoryWithCapacity(
@@ -3064,14 +3099,32 @@ export class DiscordController {
   }
 
   async #cleanupEmptyManagedCategories(context) {
-    const state = this.stateStore.snapshot();
+    let state = this.stateStore.snapshot();
+    const activeProjectKeys = new Set(Object.values(state.bindings ?? {})
+      .filter((binding) => !binding.archived && binding.projectKey)
+      .map((binding) => binding.projectKey));
+    let removed = 0;
+    for (const [projectKey, project] of Object.entries(state.projectCategories ?? {})) {
+      if (activeProjectKeys.has(projectKey)) continue;
+      const categories = (project.categoryIds ?? [])
+        .map((categoryId) => context.channels.get(categoryId))
+        .filter((category) => category?.type === ChannelType.GuildCategory);
+      if (categories.some((category) => category.children.cache.size > 0)) continue;
+      for (const category of categories) {
+        await category.delete('Remove unused Codex project category after task synchronization');
+        context.channels.delete(category.id);
+        removed += 1;
+      }
+      this.stateStore.removeProjectCategory(projectKey);
+    }
+
+    state = this.stateStore.snapshot();
     const referencedIds = new Set([
       state.infrastructure.controlCategoryId,
       ...(state.infrastructure.archiveCategoryIds ?? []),
       ...Object.values(state.projectCategories ?? {}).flatMap((project) => project.categoryIds ?? []),
     ].filter(Boolean));
     const projectNames = new Set(Object.values(state.projectCategories ?? {}).map((project) => project.name));
-    let removed = 0;
     for (const category of context.channels.values()) {
       if (category?.type !== ChannelType.GuildCategory || referencedIds.has(category.id)) continue;
       const isDuplicateProject = projectNames.has(category.name);
@@ -3097,10 +3150,11 @@ export class DiscordController {
     }
 
     const target = await this.#targetCategory(thread, archived, channel?.parentId, context);
+    const workspace = projectDescriptor(thread.cwd, this.config.projectCategoryPrefix);
     const desiredName = taskChannelName(thread);
     const turnState = thread.status?.type === 'active' ? 'running' : 'stopped';
     const desiredTopic = truncate(
-      `Codex project: ${target.project.id}\nCodex task: ${thread.id}\nProject: ${thread.cwd ?? '(none)'}\nState: ${archived ? 'archived' : 'active'}\nTurn: ${turnState}`,
+      `Codex project: ${workspace.id}\nCodex task: ${thread.id}\nProject: ${thread.cwd ?? '(none)'}\nState: ${archived ? 'archived' : 'active'}\nTurn: ${turnState}`,
       1024,
       '',
     );
@@ -3140,7 +3194,11 @@ export class DiscordController {
 
   async #openTaskChannel(thread) {
     const { guild } = await this.infrastructureReady;
-    const context = { guild, channels: await guild.channels.fetch() };
+    const context = {
+      guild,
+      channels: await guild.channels.fetch(),
+      desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
+    };
     const archived = Boolean(this.stateStore.binding(thread.id)?.archived);
     const synced = await this.#syncTaskChannel(thread, archived, context);
     return synced.channel;

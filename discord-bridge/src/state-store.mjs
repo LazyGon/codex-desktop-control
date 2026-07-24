@@ -138,6 +138,12 @@ export class StateStore {
     });
   }
 
+  removeProjectCategory(projectKey) {
+    return this.update((state) => {
+      delete state.projectCategories[projectKey];
+    });
+  }
+
   setBinding(threadId, binding) {
     if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
       throw new Error('A valid threadId is required for a Discord binding.');

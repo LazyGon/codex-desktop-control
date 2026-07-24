@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isSnowflake, readJsonIfPresent } from './util.mjs';
@@ -12,6 +13,9 @@ const defaultSharedLauncherPath = path.join(
   'launcher',
   'CodexSharedLauncher.exe',
 );
+const defaultCodexStateRoot = String(process.env.CODEX_HOME ?? '').trim()
+  ? path.resolve(process.env.CODEX_HOME)
+  : path.join(os.homedir(), '.codex');
 
 const defaults = {
   controlCategoryName: 'Codex Control',
@@ -41,6 +45,7 @@ const defaults = {
   fileShareArchiverPath: null,
   autoStartSharedDesktop: true,
   sharedLauncherPath: defaultSharedLauncherPath,
+  desktopGlobalStatePath: path.join(defaultCodexStateRoot, '.codex-global-state.json'),
   appServerUrl: null,
 };
 
@@ -92,6 +97,9 @@ export function loadConfig() {
   if (config.sharedLauncherPath && !path.isAbsolute(config.sharedLauncherPath)) {
     config.sharedLauncherPath = path.resolve(bridgeRoot, config.sharedLauncherPath);
   }
+  if (config.desktopGlobalStatePath && !path.isAbsolute(config.desktopGlobalStatePath)) {
+    config.desktopGlobalStatePath = path.resolve(bridgeRoot, config.desktopGlobalStatePath);
+  }
   const errors = [];
   if (!isSnowflake(config.applicationId)) errors.push('applicationId must be a Discord snowflake.');
   if (!isSnowflake(config.guildId)) errors.push('guildId must be a Discord snowflake.');
@@ -104,6 +112,9 @@ export function loadConfig() {
   }
   if (typeof config.autoStartSharedDesktop !== 'boolean') {
     errors.push('autoStartSharedDesktop must be boolean.');
+  }
+  if (!config.desktopGlobalStatePath || !path.isAbsolute(config.desktopGlobalStatePath)) {
+    errors.push('desktopGlobalStatePath must be an absolute path.');
   }
   if (!Number.isInteger(config.taskSyncIntervalMs) || config.taskSyncIntervalMs < 10_000) {
     errors.push('taskSyncIntervalMs must be an integer of at least 10000.');

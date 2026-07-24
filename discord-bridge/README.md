@@ -9,7 +9,9 @@ outbound connection to Discord.
 - Creates a private `Codex Control` category with `codex-remote`, alert, and
   completion channels.
 - Creates one private category per project and continuously synchronizes every
-  top-level Codex task into its project category.
+  top-level Codex task into its project category. Tasks without a folder selected
+  in Codex Desktop share one private `Codex - No Project` category, even when the
+  App Server assigns them separate generated working directories.
 - Treats the first ordinary message in an unbound text channel inside a managed
   project category as a new task request. It starts the task in that project's
   working directory, derives its title from the channel name, binds the same
@@ -170,6 +172,9 @@ active and archived `thread/list` views. User-owned top-level tasks are synced;
 ephemeral and subagent child tasks remain represented inside their parent task
 instead of becoming separate Discord channels. Discord category overflow is
 sharded automatically when a category reaches 50 channels.
+Folder selection is read from Codex Desktop's `.codex-global-state.json`.
+If that file cannot be read, the bridge fails safe to the App Server `cwd`
+category behavior instead of treating every task as projectless.
 
 ## One-time installation
 
