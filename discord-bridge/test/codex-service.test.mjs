@@ -166,11 +166,32 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     { threadId: 'thread-1', model: 'gpt-test' },
   ]]);
 
-  const sent = await service.send('thread-1', 'start input', null, 'client-start');
+  const sent = await service.send('thread-1', 'start input', [
+    {
+      kind: 'localImage',
+      name: 'screen.png',
+      path: 'C:\\runtime\\screen.png',
+      size: 120,
+      contentType: 'image/png',
+    },
+    {
+      kind: 'file',
+      name: 'report.pdf',
+      path: 'C:\\runtime\\report.pdf',
+      size: 456,
+      contentType: 'application/pdf',
+    },
+  ], 'client-start');
   const steered = await service.steer(
     'thread-1',
     'steer input',
-    null,
+    [{
+      kind: 'file',
+      name: 'source.zip',
+      path: 'C:\\runtime\\source.zip',
+      size: 789,
+      contentType: 'application/zip',
+    }],
     'client-steer',
     { id: 'turn-active' },
   );
@@ -178,13 +199,22 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.equal(steered.turnId, 'turn-active');
   assert.deepEqual(turnStarts, [{
     threadId: 'thread-1',
-    input: [{ type: 'text', text: 'start input' }],
+    input: [
+      {
+        type: 'text',
+        text: 'start input\n\n# Files mentioned by the user:\n- [report.pdf](<C:/runtime/report.pdf>) (application/pdf, 456 bytes)',
+      },
+      { type: 'localImage', path: 'C:\\runtime\\screen.png' },
+    ],
     clientUserMessageId: 'client-start',
   }]);
   assert.deepEqual(turnSteers, [{
     threadId: 'thread-1',
     expectedTurnId: 'turn-active',
-    input: [{ type: 'text', text: 'steer input' }],
+    input: [{
+      type: 'text',
+      text: 'steer input\n\n# Files mentioned by the user:\n- [source.zip](<C:/runtime/source.zip>) (application/zip, 789 bytes)',
+    }],
     clientUserMessageId: 'client-steer',
   }]);
 

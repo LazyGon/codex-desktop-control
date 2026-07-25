@@ -122,9 +122,13 @@ outbound connection to Discord.
   user-card format used for Desktop input. Each input carries a stable client
   message ID, so a delayed app-server `userMessage` item no longer turns an
   accepted instruction into a false send failure; the provisional card is
-  reconciled to the persisted server item ID when it arrives. One image, or one
-  text file up to 200 KB, can be attached to an ordinary message. Slash commands
-  remain available for explicit modes and attachments.
+  reconciled to the persisted server item ID when it arrives. An ordinary
+  message may carry up to ten Discord attachments. Images become app-server
+  `localImage` inputs; PDFs, Office documents, archives, audio, video, source
+  files, and other regular files are stored in the task-scoped runtime inbox
+  and passed to Codex by absolute local file link. The files are never
+  executed by the Bridge. Attachments can also steer an active turn. Slash
+  commands remain available for explicit modes and a single attachment.
 - Starts at Windows logon and can start the formal shared Desktop launcher when
   the app-server is absent.
 
@@ -163,6 +167,14 @@ Slash commands remain supported for explicit task IDs, search, attachments,
 and recovery. Normal phone operation can use project/category navigation,
 ordinary task-channel messages, channel rename/move, and the pinned panels
 without entering a command.
+
+Incoming files are stored under
+`data/incoming-files/<task-id>/<Discord-message-id>/`. They persist so resumed
+tasks can still open paths recorded in their history and are excluded from
+Git. `inputAttachmentMaxCount`, `inputAttachmentMaxBytes`, and
+`inputAttachmentTotalMaxBytes` bound the count, individual size, and total size
+for one Discord input. Defaults are 10 files and 512 MB for both size limits;
+Discord's guild/account upload limit normally applies first.
 
 The state schema is the durable lookup table:
 
@@ -327,6 +339,13 @@ time is deferred before execution.
   archive, and unrelated channels never create tasks. It requires Discord's
   privileged Message Content Intent. Bot and webhook messages are ignored in
   task channels.
+- Incoming attachments are downloaded only from Discord's attachment URL after
+  the guild and user checks pass. The Bridge does not execute them. Files are
+  stored under `data/incoming-files/<task-id>/<Discord-message-id>/`, remain
+  available to resumed task history, and are ignored by Git. Defaults allow at
+  most 10 files and 512 MB per file/message; Discord's own upload limit applies
+  first. Operators may lower these with `inputAttachmentMaxCount`,
+  `inputAttachmentMaxBytes`, and `inputAttachmentTotalMaxBytes`.
 - The sole webhook exception is the configured `Others` / `transfer-text`
   channel. It accepts messages from any Discord webhook or an authorized human,
   ignores other bot messages, and writes only the message body to the fixed

@@ -20,6 +20,13 @@ test('guild command payload contains the full remote operation surface', () => {
   assert.equal(commandPayload[1].default_member_permissions, '8');
   assert.equal(commandPayload[1].options[0].name, 'task');
   assert.equal(commandPayload[1].options[0].autocomplete, true);
+  for (const name of ['deliver', 'send']) {
+    const subcommand = commandPayload[0].options.find((option) => option.name === name);
+    const attachment = subcommand.options.find((option) => option.name === 'attachment');
+    assert.ok(attachment);
+    assert.match(attachment.description, /画像・文書・アーカイブ/);
+    assert.doesNotMatch(attachment.description, /200KB|テキストファイル$/);
+  }
 });
 
 test('required slash command options always precede optional options', () => {

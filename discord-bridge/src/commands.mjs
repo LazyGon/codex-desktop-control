@@ -38,13 +38,13 @@ export const codexCommand = new SlashCommandBuilder()
     .setDescription('稼働中ならsteer、待機中なら新しいターンとして送信します')))
     .addAttachmentOption((option) => option
       .setName('attachment')
-      .setDescription('画像または200KB以下のテキストファイル')))
+      .setDescription('Codexへ渡す画像・文書・アーカイブなどのファイル')))
   .addSubcommand((command) => addTaskOption(addPromptOption(command
     .setName('send')
     .setDescription('待機中タスクに新しいターンを送信します')))
     .addAttachmentOption((option) => option
       .setName('attachment')
-      .setDescription('画像または200KB以下のテキストファイル')))
+      .setDescription('Codexへ渡す画像・文書・アーカイブなどのファイル')))
   .addSubcommand((command) => addTaskOption(addPromptOption(command
     .setName('steer')
     .setDescription('稼働中タスクへ追加指示を送ります'))))

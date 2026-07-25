@@ -134,6 +134,15 @@ Discord-submitted prompt, the Bridge also records the actual executor on the
 Codex turn. Its completion notice mentions that turn's executor or executors
 plus the fixed subscribers, with duplicates removed.
 
+Ordinary task-channel messages may include up to ten Discord attachments.
+Images are sent through app-server as local image inputs. Documents,
+spreadsheets, presentations, PDFs, archives, audio, video, and other regular
+files are saved without execution under the task-scoped
+`discord-bridge/data/incoming-files/` runtime inbox, then supplied to Codex as
+absolute local file links. The default per-message and per-file input limit is
+512 MB, subject to Discord's smaller upload limit. Attachments also work when
+`deliver` steers an already-running turn.
+
 The Bridge also creates a private `Others` category with a `transfer-text`
 channel. A message there from an authorized user or Discord webhook is stored
 verbatim as UTF-8 under `discord-bridge/data/transfer-text/<timestamp>.txt`.

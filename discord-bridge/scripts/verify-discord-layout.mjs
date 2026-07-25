@@ -74,6 +74,9 @@ try {
     'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
     'model', 'reasoning', 'permissions', 'mode', 'memory', 'usage', 'resources', 'goal', 'compact', 'fork', 'review', 'terminals', 'help',
   ];
+  const attachmentCommands = ['deliver', 'send'].map((name) => (
+    command?.options.find((option) => option.name === name)
+  ));
   const removedCommands = ['autocatchup', 'catchup', 'bind', 'unbind'].filter((name) => commandNames.includes(name));
   const errors = [];
   let taskPanels = 0;
@@ -163,6 +166,14 @@ try {
   if (!filesCommand) errors.push('Required command is missing: codex-files');
   const missingCommands = requiredCommands.filter((name) => !commandNames.includes(name));
   if (missingCommands.length) errors.push(`Required commands are missing: ${missingCommands.join(', ')}`);
+  for (const attachmentCommand of attachmentCommands) {
+    const attachmentOption = attachmentCommand?.options?.find((option) => option.name === 'attachment');
+    if (!attachmentOption) {
+      errors.push(`Attachment option is missing from codex ${attachmentCommand?.name ?? '(unknown)'}.`);
+    } else if (/200\s*KB|画像または.*テキスト/i.test(attachmentOption.description ?? '')) {
+      errors.push(`codex ${attachmentCommand.name} still advertises the legacy image/text-only attachment limit.`);
+    }
+  }
   if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
     errors.push(`Task channel count ${taskChannels.size} does not match state bindings ${Object.keys(state.bindings ?? {}).length}.`);
   }

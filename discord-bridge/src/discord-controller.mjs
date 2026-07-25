@@ -90,6 +90,7 @@ import {
   isTaskScopedCodexArtifactRoot,
   readSessionWorkspaceRoots,
 } from './session-workspace-roots.mjs';
+import { IncomingAttachmentStore } from './incoming-attachment-store.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -134,6 +135,7 @@ export class DiscordController {
     automationStore = new AutomationStore(),
     clientToolRouter = null,
     textTransferStore = null,
+    incomingAttachmentStore = null,
   }) {
     this.client = client;
     this.codex = codex;
@@ -152,6 +154,15 @@ export class DiscordController {
     this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.fileTransferTempRoot = path.join(path.dirname(logDir), 'data', 'file-transfers');
+    this.incomingAttachmentStore = incomingAttachmentStore ?? new IncomingAttachmentStore(
+      path.join(path.dirname(logDir), 'data', 'incoming-files'),
+      {
+        maxFileBytes: config.inputAttachmentMaxBytes ?? 512_000_000,
+        maxTotalBytes: config.inputAttachmentTotalMaxBytes ?? 512_000_000,
+        maxCount: config.inputAttachmentMaxCount ?? 10,
+        timeoutMs: config.discordRestTimeoutMs ?? 120_000,
+      },
+    );
     this.textTransferStore = textTransferStore ?? new TextTransferStore(
       path.join(path.dirname(logDir), 'data', 'transfer-text'),
     );
@@ -565,18 +576,18 @@ export class DiscordController {
     const content = message.content.trim();
     const attachments = [...message.attachments.values()];
     if (!content && attachments.length === 0) return;
-    if (attachments.length > 1) {
-      await message.reply(messageOptions('通常投稿で送れる添付は1件です。複数の場合は `/codex deliver` を分けて実行してください。'));
-      return;
-    }
 
     await message.react('⏳').catch(() => {});
     const prompt = content || '添付ファイルを確認してください。';
     let reservation = null;
     try {
-      const attachment = attachments[0] ? await this.#prepareAttachment(attachments[0]) : null;
       if (!binding) binding = await this.#ensureTaskBinding(channel, project);
       if (!binding) throw new Error('Discord channel could not be bound to the new Codex task.');
+      const preparedAttachments = await this.#prepareAttachments(
+        attachments,
+        binding.threadId,
+        message.id,
+      );
       reservation = this.#reserveUserInput(
         binding.threadId,
         prompt,
@@ -590,7 +601,7 @@ export class DiscordController {
       const result = await this.codex.deliver(
         binding.threadId,
         prompt,
-        attachment,
+        preparedAttachments,
         reservation.clientUserMessageId,
       );
       reservation.turnId ??= result.turnId;
@@ -603,7 +614,7 @@ export class DiscordController {
         userId: message.author.id,
         mode: result.mode,
         turnId: result.turnId,
-        attachment: attachment?.kind ?? null,
+        attachments: preparedAttachments.map((attachment) => attachment.kind),
       });
     } catch (error) {
       if (reservation) this.#removeUserInputReservation(reservation);
@@ -1398,8 +1409,7 @@ export class DiscordController {
       const fullTextAttachment = [...(message.attachments?.values?.() ?? [])]
         .find((attachment) => /^codex-turn-.+-(?:user|assistant|final)\.txt$/i.test(attachment.name ?? ''));
       if (fullTextAttachment) {
-        const prepared = await this.#prepareAttachment(fullTextAttachment).catch(() => null);
-        if (prepared?.kind === 'text') value = prepared.text;
+        value = await this.#readInternalTextAttachment(fullTextAttachment).catch(() => null);
       }
     }
     value = String(value ?? embed?.description ?? message.content ?? '').trim();
@@ -1829,7 +1839,9 @@ export class DiscordController {
       const threadId = this.#resolveThreadId(interaction);
       const prompt = interaction.options.getString('prompt', true);
       const discordAttachment = interaction.options.getAttachment('attachment');
-      const attachment = discordAttachment ? await this.#prepareAttachment(discordAttachment) : null;
+      const attachments = discordAttachment
+        ? await this.#prepareAttachments([discordAttachment], threadId, interaction.id)
+        : [];
       const mirror = this.#reserveUserInput(
         threadId,
         prompt,
@@ -1841,7 +1853,7 @@ export class DiscordController {
         result = await this.codex[subcommand](
           threadId,
           prompt,
-          attachment,
+          attachments,
           mirror.clientUserMessageId,
         );
       } catch (error) {
@@ -3989,20 +4001,29 @@ export class DiscordController {
       .setTimestamp();
   }
 
-  async #prepareAttachment(attachment) {
-    if (attachment.contentType?.startsWith('image/')) {
-      return { kind: 'image', name: attachment.name, url: attachment.url };
-    }
-    const textExtension = /\.(txt|md|json|ya?ml|toml|csv|tsv|log|js|mjs|cjs|ts|tsx|jsx|py|rs|go|java|cs|html|css|xml|sql|sh|ps1)$/i;
-    if (!attachment.contentType?.startsWith('text/') && !textExtension.test(attachment.name)) {
-      throw new Error('添付できるのは画像またはテキストファイルです。');
-    }
-    if (attachment.size > 200_000) throw new Error('テキスト添付は200KB以下にしてください。');
+  async #prepareAttachments(attachments, threadId, sourceId) {
+    if (!attachments?.length) return [];
+    const records = await this.incomingAttachmentStore.store({
+      threadId,
+      sourceId,
+      attachments,
+    });
+    const imageExtension = /\.(?:avif|bmp|gif|jpe?g|png|webp)$/i;
+    return records.map((record) => (
+      record.contentType?.startsWith('image/') || imageExtension.test(record.name)
+        ? { ...record, kind: 'localImage' }
+        : { ...record, kind: 'file' }
+    ));
+  }
+
+  async #readInternalTextAttachment(attachment) {
+    const maximumBytes = 5_000_000;
+    if (attachment.size > maximumBytes) throw new Error('カード本文添付が大きすぎます。');
     const response = await fetch(attachment.url, { signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error(`添付ファイルを取得できませんでした: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`カード本文添付を取得できませんでした: HTTP ${response.status}`);
     const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > 200_000) throw new Error('テキスト添付は200KB以下にしてください。');
-    return { kind: 'text', name: attachment.name, text: buffer.toString('utf8') };
+    if (buffer.length > maximumBytes) throw new Error('カード本文添付が大きすぎます。');
+    return buffer.toString('utf8');
   }
 
   #textAttachment(text, filename) {

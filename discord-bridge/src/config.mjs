@@ -38,6 +38,9 @@ const defaults = {
   taskSyncIntervalMs: 30_000,
   discordRestTimeoutMs: 120_000,
   plainMessageInputEnabled: false,
+  inputAttachmentMaxBytes: 512_000_000,
+  inputAttachmentTotalMaxBytes: 512_000_000,
+  inputAttachmentMaxCount: 10,
   fileShareEnabled: true,
   fileShareChunkBytes: 7_500_000,
   fileShareMaxBytes: 512_000_000,
@@ -131,6 +134,21 @@ export function loadConfig() {
   }
   if (typeof config.plainMessageInputEnabled !== 'boolean') {
     errors.push('plainMessageInputEnabled must be boolean.');
+  }
+  if (!Number.isInteger(config.inputAttachmentMaxBytes)
+    || config.inputAttachmentMaxBytes < 1_000_000
+    || config.inputAttachmentMaxBytes > 2_000_000_000) {
+    errors.push('inputAttachmentMaxBytes must be an integer from 1000000 to 2000000000.');
+  }
+  if (!Number.isInteger(config.inputAttachmentTotalMaxBytes)
+    || config.inputAttachmentTotalMaxBytes < config.inputAttachmentMaxBytes
+    || config.inputAttachmentTotalMaxBytes > 2_000_000_000) {
+    errors.push('inputAttachmentTotalMaxBytes must be an integer from inputAttachmentMaxBytes to 2000000000.');
+  }
+  if (!Number.isInteger(config.inputAttachmentMaxCount)
+    || config.inputAttachmentMaxCount < 1
+    || config.inputAttachmentMaxCount > 10) {
+    errors.push('inputAttachmentMaxCount must be an integer from 1 to 10.');
   }
   if (typeof config.textTransferEnabled !== 'boolean') {
     errors.push('textTransferEnabled must be boolean.');

@@ -390,6 +390,19 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     return { mode: 'steer', turnId: 'turn-1' };
   };
   const turnRecords = new Map();
+  let storedAttachments = null;
+  const incomingAttachmentStore = {
+    store: async (request) => {
+      storedAttachments = request;
+      return request.attachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        path: `C:\\runtime\\${attachment.name}`,
+        size: attachment.size,
+        contentType: attachment.contentType,
+      }));
+    },
+  };
   const binding = { threadId: 'thread-1', channelId: 'task-channel', cwd: 'C:\\work', watchLevel: 'normal' };
   const stateStore = {
     binding: (threadId) => (threadId === 'thread-1' ? binding : null),
@@ -446,6 +459,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
       liveUpdateIntervalMs: 100,
     },
     logDir: directory,
+    incomingAttachmentStore,
   });
   controller.attach();
 
@@ -459,7 +473,22 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     webhookId: null,
     author: { id: 'user-1', tag: 'user#0001', bot: false },
     content: 'run the requested task',
-    attachments: new Map(),
+    attachments: new Map([
+      ['attachment-image', {
+        id: 'attachment-image',
+        name: 'screen.png',
+        size: 123,
+        contentType: 'image/png',
+        url: 'https://discord.test/screen.png',
+      }],
+      ['attachment-pdf', {
+        id: 'attachment-pdf',
+        name: 'requirements.pdf',
+        size: 456,
+        contentType: 'application/pdf',
+        url: 'https://discord.test/requirements.pdf',
+      }],
+    ]),
     reactions: { resolve: () => null },
     react: async (reaction) => { reactions.push(reaction); },
     reply: async (options) => { replies.push(options); },
@@ -474,7 +503,30 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   }
   assert.equal(delivered.threadId, 'thread-1');
   assert.equal(delivered.prompt, 'run the requested task');
-  assert.equal(delivered.attachment, null);
+  assert.deepEqual(delivered.attachment, [
+    {
+      id: 'attachment-image',
+      name: 'screen.png',
+      path: 'C:\\runtime\\screen.png',
+      size: 123,
+      contentType: 'image/png',
+      kind: 'localImage',
+    },
+    {
+      id: 'attachment-pdf',
+      name: 'requirements.pdf',
+      path: 'C:\\runtime\\requirements.pdf',
+      size: 456,
+      contentType: 'application/pdf',
+      kind: 'file',
+    },
+  ]);
+  assert.equal(storedAttachments.threadId, 'thread-1');
+  assert.equal(storedAttachments.sourceId, 'message-1');
+  assert.deepEqual(
+    storedAttachments.attachments.map((attachment) => attachment.name),
+    ['screen.png', 'requirements.pdf'],
+  );
   assert.match(delivered.clientUserMessageId, /^discord-[a-f0-9]{12}$/);
   assert.deepEqual(reactions, ['⏳', '✅'], JSON.stringify(replies));
   assert.deepEqual(replies, []);

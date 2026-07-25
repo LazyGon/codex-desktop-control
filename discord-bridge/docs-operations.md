@@ -28,8 +28,12 @@ stop. The bridge prevents duplicate instances with `data\bridge.lock`.
    task IDs, search, and attachments.
    With `plainMessageInputEnabled`, an ordinary message in the task channel is
    equivalent to `deliver`. After app-server accepts it, the original message is
-   replaced with an orange user card; `❌` includes an error reply. One image,
-   or one text file up to 200 KB, can be attached to an ordinary message.
+   replaced with an orange user card; `❌` includes an error reply. Up to ten
+   Discord attachments may be added to one ordinary message. Images are passed
+   as local image inputs. PDFs, Office documents, spreadsheets, presentations,
+   archives, audio, video, source files, and other regular files are stored in
+   the private task-scoped runtime inbox and passed to Codex as local file
+   links. The same path works when `deliver` steers an active turn.
 5. Watch the latest turn card. It shows current commentary, reasoning, and work
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,

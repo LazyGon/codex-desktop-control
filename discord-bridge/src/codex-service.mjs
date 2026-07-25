@@ -11,11 +11,40 @@ import {
   threadStatusLabel,
 } from './util.mjs';
 
-function textInput(text, attachment = null) {
+function attachmentValues(attachments) {
+  if (!attachments) return [];
+  return Array.isArray(attachments) ? attachments : [attachments];
+}
+
+function localFileLink(attachment) {
+  const name = String(attachment.name ?? path.basename(attachment.path))
+    .replaceAll('\\', '\\\\')
+    .replaceAll('[', '\\[')
+    .replaceAll(']', '\\]');
+  const target = String(attachment.path).replaceAll('\\', '/');
+  const details = [
+    attachment.contentType,
+    Number.isSafeInteger(attachment.size) ? `${attachment.size} bytes` : null,
+  ].filter(Boolean).join(', ');
+  return `- [${name}](<${target}>)${details ? ` (${details})` : ''}`;
+}
+
+function textInput(text, attachments = null) {
   const input = [{ type: 'text', text }];
-  if (attachment?.kind === 'image') input.push({ type: 'image', url: attachment.url });
-  if (attachment?.kind === 'text') {
-    input[0].text += `\n\nAttached file: ${attachment.name}\n\n${attachment.text}`;
+  const localFiles = [];
+  for (const attachment of attachmentValues(attachments)) {
+    if (attachment?.kind === 'image') {
+      input.push({ type: 'image', url: attachment.url });
+    } else if (attachment?.kind === 'localImage') {
+      input.push({ type: 'localImage', path: attachment.path });
+    } else if (attachment?.kind === 'text') {
+      input[0].text += `\n\nAttached file: ${attachment.name}\n\n${attachment.text}`;
+    } else if (attachment?.kind === 'file' && attachment.path) {
+      localFiles.push(attachment);
+    }
+  }
+  if (localFiles.length) {
+    input[0].text += `\n\n# Files mentioned by the user:\n${localFiles.map(localFileLink).join('\n')}`;
   }
   return input;
 }
@@ -264,22 +293,22 @@ export class CodexService extends EventEmitter {
     return (result.data ?? []).find((turn) => turn.status === 'inProgress') ?? null;
   }
 
-  async deliver(threadId, prompt, attachment = null, clientUserMessageId = null) {
+  async deliver(threadId, prompt, attachments = null, clientUserMessageId = null) {
     await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
     if (currentTurn) {
-      return this.steer(threadId, prompt, attachment, clientUserMessageId, currentTurn);
+      return this.steer(threadId, prompt, attachments, clientUserMessageId, currentTurn);
     }
-    return this.send(threadId, prompt, attachment, clientUserMessageId);
+    return this.send(threadId, prompt, attachments, clientUserMessageId);
   }
 
-  async send(threadId, prompt, attachment = null, clientUserMessageId = null) {
+  async send(threadId, prompt, attachments = null, clientUserMessageId = null) {
     await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
     if (currentTurn) throw new Error(`Task already has active turn ${currentTurn.id}. Use deliver or steer.`);
     const params = {
       threadId,
-      input: textInput(prompt, attachment),
+      input: textInput(prompt, attachments),
     };
     if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
     const result = await this.client.call('turn/start', params, 60_000);
@@ -289,18 +318,17 @@ export class CodexService extends EventEmitter {
   async steer(
     threadId,
     prompt,
-    attachment = null,
+    attachments = null,
     clientUserMessageId = null,
     knownTurn = null,
   ) {
     await this.resumeThread(threadId);
     const currentTurn = knownTurn ?? await this.activeTurn(threadId);
     if (!currentTurn) throw new Error('Task has no active turn to steer. Use deliver or send.');
-    if (attachment) throw new Error('Attachments cannot be added with steer. Use deliver on an idle task.');
     const params = {
       threadId,
       expectedTurnId: currentTurn.id,
-      input: textInput(prompt),
+      input: textInput(prompt, attachments),
     };
     if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
     const result = await this.client.call('turn/steer', params);
