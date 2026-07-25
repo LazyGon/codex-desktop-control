@@ -87,7 +87,7 @@ import {
   readDesktopProjectSnapshot,
 } from './desktop-project-state.mjs';
 import {
-  isTaskVisualizationRoot,
+  isTaskScopedCodexArtifactRoot,
   readSessionWorkspaceRoots,
 } from './session-workspace-roots.mjs';
 
@@ -1188,12 +1188,20 @@ export class DiscordController {
     const codexHome = this.config.desktopGlobalStatePath
       ? path.win32.dirname(this.config.desktopGlobalStatePath)
       : null;
+    const generatedImageRoot = codexHome && binding?.threadId
+      ? path.win32.join(codexHome, 'generated_images', binding.threadId)
+      : null;
+    const taskArtifactRoots = generatedImageRoot
+      && isTaskScopedCodexArtifactRoot(generatedImageRoot, binding?.threadId, codexHome)
+      ? [generatedImageRoot]
+      : [];
     const workspaceRoots = [
       ...(binding?.runtimeWorkspaceRoots ?? []),
       ...sessionWorkspaceRoots,
+      ...taskArtifactRoots,
     ].map((rootPath) => ({
       path: rootPath,
-      allowProtectedAncestors: isTaskVisualizationRoot(
+      allowProtectedAncestors: isTaskScopedCodexArtifactRoot(
         rootPath,
         binding?.threadId,
         codexHome,

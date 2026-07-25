@@ -1350,6 +1350,9 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const runtimeRoot = path.join(codexHome, 'visualizations', '2026', '07', '25', threadId);
   fs.mkdirSync(runtimeRoot, { recursive: true });
   const runtimePath = path.join(runtimeRoot, 'runtime-artifact.zip');
+  const generatedImageRoot = path.join(codexHome, 'generated_images', threadId);
+  fs.mkdirSync(generatedImageRoot, { recursive: true });
+  const generatedImagePath = path.join(generatedImageRoot, 'generated-image.png');
   const sessionPath = path.join(directory, 'rollout.jsonl');
   fs.writeFileSync(safePath, 'artifact', 'utf8');
   fs.writeFileSync(secretPath, 'TOKEN=secret', 'utf8');
@@ -1358,6 +1361,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
   fs.writeFileSync(path.join(project, '.git', 'objects', 'payload.bin'), randomBytes(30_000));
   fs.writeFileSync(siblingPath, 'cross-project', 'utf8');
   fs.writeFileSync(runtimePath, 'runtime-artifact', 'utf8');
+  fs.writeFileSync(generatedImagePath, 'generated-image', 'utf8');
   fs.writeFileSync(sessionPath, [
     JSON.stringify({ type: 'session_meta', payload: { id: threadId } }),
     JSON.stringify({ type: 'turn_context', payload: { workspace_roots: [project, runtimeRoot] } }),
@@ -1382,6 +1386,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
               { label: 'cross-project', target: siblingPath },
               { label: 'environment', target: secretPath },
               { label: 'runtime artifact', target: runtimePath },
+              { label: 'generated image', target: generatedImagePath },
             ],
           },
         },
@@ -1532,6 +1537,8 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.match(linkedOptions[1].description, /取得不可/);
   assert.equal(linkedOptions[2].label, 'runtime artifact');
   assert.equal(linkedOptions[2].emoji.name, '📄');
+  assert.equal(linkedOptions[3].label, 'generated image');
+  assert.equal(linkedOptions[3].emoji.name, '📄');
 
   const pickerId = linked.lastReply.components[0].toJSON().components[0].custom_id;
   const download = {
@@ -1555,7 +1562,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     const zipButton = linked.lastReply.components[1].toJSON().components[0];
     assert.equal(zipButton.custom_id.startsWith('cx:files:linkednav:'), true);
     assert.equal(zipButton.custom_id.endsWith(':download'), true);
-    assert.equal(zipButton.label, 'Download all as ZIP (2)');
+    assert.equal(zipButton.label, 'Download all as ZIP (3)');
     const zipDownload = interaction(zipButton.custom_id);
     client.emit('interactionCreate', zipDownload);
     for (let attempt = 0; attempt < 200 && !zipDownload.lastFollowUp; attempt += 1) {

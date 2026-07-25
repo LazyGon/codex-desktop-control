@@ -71,6 +71,10 @@ outbound connection to Discord.
   task-scoped file boundaries. This permits linked artifacts in that task's
   generated `.codex/visualizations` directory without allowing another task's
   runtime directory or protected files inside the authorized root.
+- Treats `.codex/generated_images/<task-id>` as another task-scoped boundary,
+  including for tasks without a selected project. Only the matching task's
+  generated image directory is eligible; sibling tasks and protected children
+  remain unavailable.
 - Downloads the complete task working directory from the task panel's
   `📦 Download project` button. After an explicit secret-exposure confirmation,
   the Bridge includes `.git` and protected regular files, skips filesystem
@@ -299,7 +303,8 @@ time is deferred before execution.
 - File browsing is read-only and rooted at the selected task's working
   directory. Assistant-card downloads accept only paths that Codex actually
   linked and that resolve inside a managed project tree, a parent shared by
-  managed sibling projects, or a runtime workspace root;
+  managed sibling projects, a runtime workspace root, or that same task's
+  generated-image directory;
   arbitrary path input, UNC paths, traversal, alternate data streams, and
   symbolic links/junctions are rejected.
 - Protected directories and likely secret files remain visible in the file

@@ -50,10 +50,25 @@ export async function readSessionWorkspaceRoots(sessionPath, threadId) {
   return sessionId === threadId ? latestRoots : [];
 }
 
-export function isTaskVisualizationRoot(rootPath, threadId, codexHomePath) {
+function isSafeThreadPathSegment(threadId) {
+  return typeof threadId === 'string'
+    && /^[0-9A-Za-z][0-9A-Za-z_-]{0,127}$/.test(threadId);
+}
+
+export function isTaskScopedCodexArtifactRoot(rootPath, threadId, codexHomePath) {
   const root = normalizeLocalTarget(rootPath);
   const codexHome = normalizeLocalTarget(codexHomePath);
-  if (!root || !threadId || !codexHome) return false;
+  if (!root || !isSafeThreadPathSegment(threadId) || !codexHome) return false;
+  const normalizedThreadId = threadId.toLocaleLowerCase('en-US');
+  const generatedImages = path.win32.join(codexHome, 'generated_images');
+  const generatedRelative = path.win32.relative(generatedImages, root);
+  if (generatedRelative
+    && !generatedRelative.startsWith('..')
+    && !path.win32.isAbsolute(generatedRelative)
+    && !generatedRelative.includes('\\')
+    && generatedRelative.toLocaleLowerCase('en-US') === normalizedThreadId) {
+    return true;
+  }
   const visualizations = path.win32.join(codexHome, 'visualizations');
   const relative = path.win32.relative(visualizations, root);
   if (!relative || relative.startsWith('..') || path.win32.isAbsolute(relative)) return false;
@@ -62,5 +77,5 @@ export function isTaskVisualizationRoot(rootPath, threadId, codexHomePath) {
     && /^\d{4}$/.test(segments[0])
     && /^(?:0[1-9]|1[0-2])$/.test(segments[1])
     && /^(?:0[1-9]|[12]\d|3[01])$/.test(segments[2])
-    && segments[3].toLocaleLowerCase('en-US') === String(threadId).toLocaleLowerCase('en-US');
+    && segments[3].toLocaleLowerCase('en-US') === normalizedThreadId;
 }

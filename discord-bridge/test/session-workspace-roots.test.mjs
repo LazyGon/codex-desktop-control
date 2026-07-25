@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  isTaskVisualizationRoot,
+  isTaskScopedCodexArtifactRoot,
   readSessionWorkspaceRoots,
 } from '../src/session-workspace-roots.mjs';
 
@@ -29,13 +29,22 @@ test('reads only the latest workspace roots from the matching Codex session', as
   assert.deepEqual(await readSessionWorkspaceRoots(sessionPath, 'different-thread'), []);
 });
 
-test('recognizes only the exact task-scoped Codex visualization root', () => {
+test('recognizes only exact task-scoped Codex artifact roots', () => {
   const codexHome = 'C:\\Users\\example\\.codex';
   const threadId = '019f-example';
-  const root = `${codexHome}\\visualizations\\2026\\07\\25\\${threadId}`;
+  const visualizationRoot = `${codexHome}\\visualizations\\2026\\07\\25\\${threadId}`;
+  const generatedImageRoot = `${codexHome}\\generated_images\\${threadId}`;
 
-  assert.equal(isTaskVisualizationRoot(root, threadId, codexHome), true);
-  assert.equal(isTaskVisualizationRoot(`${root}\\nested`, threadId, codexHome), false);
-  assert.equal(isTaskVisualizationRoot(root, 'different-thread', codexHome), false);
-  assert.equal(isTaskVisualizationRoot(`${codexHome}\\sessions\\${threadId}`, threadId, codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(visualizationRoot, threadId, codexHome), true);
+  assert.equal(isTaskScopedCodexArtifactRoot(generatedImageRoot, threadId, codexHome), true);
+  assert.equal(isTaskScopedCodexArtifactRoot(`${visualizationRoot}\\nested`, threadId, codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(`${generatedImageRoot}\\nested`, threadId, codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(visualizationRoot, 'different-thread', codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(generatedImageRoot, 'different-thread', codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(`${codexHome}\\generated_images`, threadId, codexHome), false);
+  assert.equal(isTaskScopedCodexArtifactRoot(`${codexHome}\\sessions\\${threadId}`, threadId, codexHome), false);
+  assert.equal(
+    isTaskScopedCodexArtifactRoot(`${codexHome}\\generated_images\\outside`, '..\\outside', codexHome),
+    false,
+  );
 });
