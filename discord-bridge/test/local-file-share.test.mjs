@@ -74,3 +74,24 @@ test('private-key content is blocked even with an ordinary filename', async (con
   fs.writeFileSync(filePath, '-----BEGIN OPENSSH PRIVATE KEY-----\nsecret', 'utf8');
   await assert.rejects(resolveShareFile(filePath, [root]), /秘密鍵本文/);
 });
+
+test('task-scoped runtime roots may cross a protected ancestor without exposing protected children', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-runtime-root-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const root = path.join(directory, '.codex', 'visualizations', '2026', '07', '25', 'thread-1');
+  fs.mkdirSync(root, { recursive: true });
+  const artifact = path.join(root, 'artifact.zip');
+  const secret = path.join(root, '.env');
+  fs.writeFileSync(artifact, 'artifact', 'utf8');
+  fs.writeFileSync(secret, 'TOKEN=secret', 'utf8');
+
+  await assert.rejects(resolveShareFile(artifact, [root]), /秘密・保護対象/);
+  assert.equal(
+    (await resolveShareFile(artifact, [{ path: root, allowProtectedAncestors: true }])).path,
+    fs.realpathSync(artifact),
+  );
+  await assert.rejects(
+    resolveShareFile(secret, [{ path: root, allowProtectedAncestors: true }]),
+    /秘密・保護対象/,
+  );
+});

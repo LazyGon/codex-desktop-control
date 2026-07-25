@@ -86,6 +86,10 @@ import {
   projectDescriptorForThread,
   readDesktopProjectSnapshot,
 } from './desktop-project-state.mjs';
+import {
+  isTaskVisualizationRoot,
+  readSessionWorkspaceRoots,
+} from './session-workspace-roots.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -980,7 +984,7 @@ export class DiscordController {
     const workspaceRoots = runtime.workspaceRoots
       ?? runtime.workspace_roots
       ?? runtime.workspace?.roots
-      ?? [];
+      ?? null;
     const runtimeWorkspaceRoots = Array.isArray(workspaceRoots)
       ? workspaceRoots.map((value) => typeof value === 'string' ? value : value?.path).filter(Boolean)
       : binding.runtimeWorkspaceRoots ?? [];
@@ -1173,15 +1177,33 @@ export class DiscordController {
     if (this.config.fileShareEnabled === false) throw new Error('ローカルファイル共有は設定で無効です。');
   }
 
-  #allowedFileRoots(binding, { includeSiblingProjects = false } = {}) {
+  async #allowedFileRoots(binding, { includeSiblingProjects = false } = {}) {
     const projectRoots = typeof this.stateStore.projectCategories === 'function'
       ? this.stateStore.projectCategories().map((project) => project.path)
       : [];
+    const sessionWorkspaceRoots = await readSessionWorkspaceRoots(
+      binding?.sessionPath,
+      binding?.threadId,
+    );
+    const codexHome = this.config.desktopGlobalStatePath
+      ? path.win32.dirname(this.config.desktopGlobalStatePath)
+      : null;
+    const workspaceRoots = [
+      ...(binding?.runtimeWorkspaceRoots ?? []),
+      ...sessionWorkspaceRoots,
+    ].map((rootPath) => ({
+      path: rootPath,
+      allowProtectedAncestors: isTaskVisualizationRoot(
+        rootPath,
+        binding?.threadId,
+        codexHome,
+      ),
+    }));
     const roots = [
       binding?.cwd,
-      ...(binding?.runtimeWorkspaceRoots ?? []),
+      ...workspaceRoots,
       ...projectRoots,
-    ].filter((value) => value && value !== '(no project)');
+    ].filter((value) => value && value !== '(no project)' && value.path !== '(no project)');
     if (includeSiblingProjects) {
       const distinctProjects = [...new Map([binding?.cwd, ...projectRoots]
         .filter(Boolean)
@@ -1200,7 +1222,7 @@ export class DiscordController {
         }
       }
     }
-    return [...new Set(roots)];
+    return roots;
   }
 
   #fileSession(key, userId, type = null) {
@@ -1301,7 +1323,7 @@ export class DiscordController {
     if (!binding) throw new Error('このメッセージはCodexタスクチャンネルにありません。');
     const references = this.#linkedReferences(binding, interaction.message);
     if (references.length === 0) throw new Error('このカードに取得可能なローカルファイルリンクはありません。');
-    const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+    const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
     const items = await Promise.all(references.map(async (reference) => {
       try {
         const file = await resolveShareFile(reference.target, roots);
@@ -1729,7 +1751,7 @@ export class DiscordController {
     }
     const eligible = session.items.filter((item) => item.file && !item.error);
     if (eligible.length === 0) throw new Error('There are no downloadable linked files.');
-    const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+    const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
     const files = [];
     for (const item of eligible) {
       files.push(await resolveShareFile(item.reference.target, roots));
@@ -2089,7 +2111,7 @@ export class DiscordController {
         await interaction.deferUpdate();
         try {
           const binding = this.stateStore.binding(session.threadId);
-          const roots = this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+          const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
           const file = await resolveShareFile(item.reference.target, roots);
           await this.#downloadFile(interaction, file, session.threadId);
         } catch (error) {

@@ -1345,21 +1345,33 @@ test('task file UI browses project entries and resolves only safe assistant-link
   const siblingProject = path.join(directory, 'sibling-project');
   fs.mkdirSync(siblingProject);
   const siblingPath = path.join(siblingProject, 'cross-project.txt');
+  const threadId = 'thread-files';
+  const codexHome = path.join(directory, '.codex');
+  const runtimeRoot = path.join(codexHome, 'visualizations', '2026', '07', '25', threadId);
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const runtimePath = path.join(runtimeRoot, 'runtime-artifact.zip');
+  const sessionPath = path.join(directory, 'rollout.jsonl');
   fs.writeFileSync(safePath, 'artifact', 'utf8');
   fs.writeFileSync(secretPath, 'TOKEN=secret', 'utf8');
   fs.writeFileSync(path.join(project, 'archive-payload.bin'), randomBytes(30_000));
   fs.writeFileSync(path.join(project, '.git', 'config'), '[core]\nrepositoryformatversion = 0\n', 'utf8');
   fs.writeFileSync(path.join(project, '.git', 'objects', 'payload.bin'), randomBytes(30_000));
   fs.writeFileSync(siblingPath, 'cross-project', 'utf8');
+  fs.writeFileSync(runtimePath, 'runtime-artifact', 'utf8');
+  fs.writeFileSync(sessionPath, [
+    JSON.stringify({ type: 'session_meta', payload: { id: threadId } }),
+    JSON.stringify({ type: 'turn_context', payload: { workspace_roots: [project, runtimeRoot] } }),
+  ].join('\n'));
 
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
   const codex = new EventEmitter();
   const copyText = `Full assistant card text ${'x'.repeat(1_800)}`;
   const binding = {
-    threadId: 'thread-files',
+    threadId,
     channelId: 'task-channel',
     cwd: project,
+    sessionPath,
     turnMessages: {
       'turn-1': {
         assistantEntries: {
@@ -1369,6 +1381,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
             localFiles: [
               { label: 'cross-project', target: siblingPath },
               { label: 'environment', target: secretPath },
+              { label: 'runtime artifact', target: runtimePath },
             ],
           },
         },
@@ -1393,6 +1406,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
       fileShareChunkBytes: 10_000,
       fileShareMaxBytes: 100_000,
       fileShareAttachmentsPerMessage: 2,
+      desktopGlobalStatePath: path.join(codexHome, '.codex-global-state.json'),
       guildId: 'guild-1',
       allowedUserIds: ['user-1'],
     },
@@ -1516,6 +1530,8 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.equal(linkedOptions[1].label, 'environment');
   assert.equal(linkedOptions[1].emoji.name, '🔒');
   assert.match(linkedOptions[1].description, /取得不可/);
+  assert.equal(linkedOptions[2].label, 'runtime artifact');
+  assert.equal(linkedOptions[2].emoji.name, '📄');
 
   const pickerId = linked.lastReply.components[0].toJSON().components[0].custom_id;
   const download = {
@@ -1539,7 +1555,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     const zipButton = linked.lastReply.components[1].toJSON().components[0];
     assert.equal(zipButton.custom_id.startsWith('cx:files:linkednav:'), true);
     assert.equal(zipButton.custom_id.endsWith(':download'), true);
-    assert.equal(zipButton.label, 'Download all as ZIP (1)');
+    assert.equal(zipButton.label, 'Download all as ZIP (2)');
     const zipDownload = interaction(zipButton.custom_id);
     client.emit('interactionCreate', zipDownload);
     for (let attempt = 0; attempt < 200 && !zipDownload.lastFollowUp; attempt += 1) {

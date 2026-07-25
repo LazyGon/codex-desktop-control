@@ -73,7 +73,10 @@ be present.
 The project browser itself never leaves the task working directory. A file
 explicitly linked by Codex may also resolve in a sibling repository under a
 parent shared by managed projects, which covers cross-repository work without
-opening arbitrary-path input.
+opening arbitrary-path input. Linked artifacts may also resolve inside the
+latest workspace roots recorded by that exact task's Codex session. A
+`.codex\visualizations` root is accepted only when its dated directory ends in
+the same task ID; protected descendants and filesystem links remain blocked.
 
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending

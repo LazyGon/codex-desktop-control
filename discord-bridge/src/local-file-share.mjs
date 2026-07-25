@@ -213,22 +213,27 @@ async function existingTarget(target) {
 }
 
 async function allowedRootRecords(roots) {
-  const records = [];
-  const seen = new Set();
+  const records = new Map();
   for (const value of roots ?? []) {
-    const normalized = normalizeLocalTarget(value);
+    const rootPath = typeof value === 'string' ? value : value?.path;
+    const allowProtectedAncestors = typeof value === 'object'
+      && value?.allowProtectedAncestors === true;
+    const normalized = normalizeLocalTarget(rootPath);
     if (!normalized) continue;
     try {
       const real = await fs.promises.realpath(normalized);
       const stat = await fs.promises.stat(real);
       if (!stat.isDirectory()) continue;
       const key = normalizeCase(real);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      records.push({ normalized, real });
+      const existing = records.get(key);
+      if (existing) {
+        existing.allowProtectedAncestors ||= allowProtectedAncestors;
+        continue;
+      }
+      records.set(key, { normalized, real, allowProtectedAncestors });
     } catch {}
   }
-  return records;
+  return [...records.values()];
 }
 
 async function containsPathLink(root, candidate) {
@@ -270,7 +275,7 @@ export async function resolveShareFile(targetValue, roots) {
     throw new Error('パスにシンボリックリンクまたはjunctionが含まれるためダウンロードできません。');
   }
   const relativePath = path.win32.relative(root.real, realCandidate) || path.win32.basename(realCandidate);
-  const secretReason = blockedPathReason(realCandidate)
+  const secretReason = (root.allowProtectedAncestors ? null : blockedPathReason(realCandidate))
     ?? blockedPathReason(relativePath)
     ?? await contentSecretReason(realCandidate);
   if (secretReason) throw new Error(`秘密・保護対象のためダウンロードできません: ${secretReason}`);

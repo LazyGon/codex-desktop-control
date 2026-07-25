@@ -67,6 +67,10 @@ outbound connection to Discord.
 - Browses one directory level at a time from a task's project root through the
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
+- Treats the latest `workspace_roots` in the matching Codex session as
+  task-scoped file boundaries. This permits linked artifacts in that task's
+  generated `.codex/visualizations` directory without allowing another task's
+  runtime directory or protected files inside the authorized root.
 - Downloads the complete task working directory from the task panel's
   `📦 Download project` button. After an explicit secret-exposure confirmation,
   the Bridge includes `.git` and protected regular files, skips filesystem
