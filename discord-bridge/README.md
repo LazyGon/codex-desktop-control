@@ -251,11 +251,13 @@ connection does not force one request to carry several attachments. Discord
 REST requests use the configurable `discordRestTimeoutMs` timeout, which
 defaults to 120 seconds.
 
-Whole-project downloads use the same configured transfer maximum for both the
-source tree and produced archive. Save every posted volume in one directory
-and open `.project.7z.001`; a single-volume transfer is opened as
+Whole-project and `.git` downloads do not have an aggregate source or archive
+limit. They are split into volumes no larger than `fileShareChunkBytes` and
+posted one volume per Discord message. Save every posted volume in one
+directory and open `.project.7z.001`; a single-volume transfer is opened as
 `.project.7z`. The archive preserves the outer project folder so extraction
-does not scatter its contents into the destination.
+does not scatter its contents into the destination. `fileShareMaxBytes` still
+limits individual-file and linked-file ZIP downloads.
 
 ## Operations
 

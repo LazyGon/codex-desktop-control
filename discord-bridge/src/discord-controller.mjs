@@ -114,6 +114,11 @@ function taskTitleFromChannelName(channelName) {
   return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
 }
 
+function projectArchiveVolumeText(config) {
+  const volume = formatFileSize(config.fileShareChunkBytes ?? 7_500_000);
+  return `source/archiveの総量上限は設けず、${volume}以下のvolumeへ分割して1件ずつ送信します。容量に応じて作成・送信に時間がかかります。`;
+}
+
 function userInputField(id, label, { required = true, secret = false, value = null } = {}) {
   const field = new TextInputBuilder()
     .setCustomId(id)
@@ -1600,7 +1605,6 @@ export class DiscordController {
     });
     const archive = await createSplit7zProjectArchive(binding.cwd, {
       volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
-      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
       tempRoot: this.fileTransferTempRoot,
       archiverPath: this.config.fileShareArchiverPath,
     });
@@ -1677,7 +1681,6 @@ export class DiscordController {
     });
     const archive = await createSplit7zGitArchive(binding.cwd, {
       volumeBytes: this.config.fileShareChunkBytes ?? 7_500_000,
-      maxBytes: this.config.fileShareMaxBytes ?? 512_000_000,
       tempRoot: this.fileTransferTempRoot,
       archiverPath: this.config.fileShareArchiverPath,
     });
@@ -2456,14 +2459,14 @@ export class DiscordController {
         }
         if (action === 'project') {
           this.#assertFileSharingEnabled();
-          const maximum = formatFileSize(this.config.fileShareMaxBytes ?? 512_000_000);
           await this.#showConfirmation(
             interaction,
             { type: 'projectArchive', threadId },
             [
               `プロジェクト全体 \`${truncate(binding.cwd, 1200)}\` をタスクチャンネルへ投稿しますか？`,
               '`.git`、`.env`、鍵・資格情報など、通常のファイルブラウザでは保護される通常ファイルも含まれます。',
-              `転送上限は ${maximum} です。symlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。`,
+              projectArchiveVolumeText(this.config),
+              'symlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
             ].join('\n'),
             'Archiveを作成',
           );
@@ -2472,14 +2475,14 @@ export class DiscordController {
         if (action === 'git') {
           this.#assertFileSharingEnabled();
           if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
-          const maximum = formatFileSize(this.config.fileShareMaxBytes ?? 512_000_000);
           await this.#showConfirmation(
             interaction,
             { type: 'gitArchive', threadId },
             [
               `プロジェクト直下の \`${truncate(path.join(binding.cwd, '.git'), 1200)}\` だけをタスクチャンネルへ投稿しますか？`,
               'Git履歴、remote URL、設定、hooks、資格情報を含む可能性があります。作業ツリーの通常ファイルは含めません。',
-              `転送上限は ${maximum} です。.git内のsymlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。`,
+              projectArchiveVolumeText(this.config),
+              '.git内のsymlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
             ].join('\n'),
             '.gitを作成',
           );

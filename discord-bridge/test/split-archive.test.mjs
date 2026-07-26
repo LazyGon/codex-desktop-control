@@ -173,7 +173,6 @@ test('project archive includes .git and protected files under the outer project 
 
   const archive = await createSplit7zProjectArchive(project, {
     volumeBytes: 10_000,
-    maxBytes: 100_000,
     tempRoot: path.relative(process.cwd(), tempRoot),
     archiverPath: executable,
   });
@@ -241,7 +240,6 @@ test('.git archive excludes the working tree and preserves the outer project dir
 
   const archive = await createSplit7zGitArchive(project, {
     volumeBytes: 10_000,
-    maxBytes: 100_000,
     tempRoot,
     archiverPath: executable,
   });
@@ -293,20 +291,22 @@ test('.git scanner supports a worktree gitfile and rejects a missing root .git',
   fs.writeFileSync(path.join(project, '.git'), 'gitdir: C:/repo/.git/worktrees/worktree\n', 'utf8');
   fs.writeFileSync(path.join(project, 'working.txt'), 'not included', 'utf8');
 
-  const snapshot = await scanGitTree(project, 10_000);
+  const snapshot = await scanGitTree(project);
   assert.equal(snapshot.gitEntryType, 'file');
   assert.deepEqual(snapshot.files.map((file) => file.relativePath), ['.git']);
 
   const missing = path.join(root, 'missing');
   fs.mkdirSync(missing);
-  await assert.rejects(scanGitTree(missing, 10_000), /直下に \.git がありません/);
+  await assert.rejects(scanGitTree(missing), /直下に \.git がありません/);
 });
 
-test('project scan enforces the transfer ceiling before archiving', async (context) => {
+test('project scan records source size without an aggregate transfer ceiling', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-project-limit-'));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(path.join(root, 'large.bin'), Buffer.alloc(20));
-  await assert.rejects(scanProjectTree(root, 10), /転送上限/);
+  const snapshot = await scanProjectTree(root);
+  assert.equal(snapshot.sourceBytes, 20);
+  assert.deepEqual(snapshot.files.map((file) => file.relativePath), ['large.bin']);
 });
 
 test('stale transfer cleanup only removes managed old transfer directories', async (context) => {

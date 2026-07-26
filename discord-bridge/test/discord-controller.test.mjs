@@ -1525,6 +1525,9 @@ test('task file UI browses project entries and resolves only safe assistant-link
   }
   assert.match(projectDownload.lastReply.content, /\.git/);
   assert.match(projectDownload.lastReply.content, /鍵・資格情報/);
+  assert.match(projectDownload.lastReply.content, /総量上限は設けず/);
+  assert.match(projectDownload.lastReply.content, /以下のvolumeへ分割/);
+  assert.doesNotMatch(projectDownload.lastReply.content, /512 MB/);
   assert.match(projectDownload.lastReply.content, /symlink・junction/);
   const projectConfirm = projectDownload.lastReply.components[0].toJSON().components[0];
   assert.match(projectConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
@@ -1538,6 +1541,9 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.match(gitDownload.lastReply.content, /\.git.*だけ/);
   assert.match(gitDownload.lastReply.content, /Git履歴/);
   assert.match(gitDownload.lastReply.content, /通常ファイルは含めません/);
+  assert.match(gitDownload.lastReply.content, /総量上限は設けず/);
+  assert.match(gitDownload.lastReply.content, /以下のvolumeへ分割/);
+  assert.doesNotMatch(gitDownload.lastReply.content, /512 MB/);
   assert.match(gitDownload.lastReply.content, /symlink・junction/);
   const gitConfirm = gitDownload.lastReply.components[0].toJSON().components[0];
   assert.match(gitConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);

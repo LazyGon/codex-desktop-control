@@ -65,8 +65,10 @@ The whole-project archive is an explicit exception: it includes `.git`,
 symlinks, junctions, and special filesystem entries. Download every
 `.project.7z.*` volume into one folder and open `.project.7z.001`. A
 single-volume transfer is opened as `.project.7z`. Extraction creates the outer
-project directory. Both source and archive must fit under the configured
-transfer maximum.
+project directory. The source and produced archive have no aggregate transfer
+limit; the Bridge splits the archive into `fileShareChunkBytes` volumes and
+posts one volume per Discord message. `fileShareMaxBytes` continues to limit
+individual-file and linked-file ZIP downloads.
 The `.git`-only archive uses `.git.7z.*` volumes and a
 `.git.7z-manifest.json`. Extraction creates `<project>/.git` while excluding
 the rest of the working tree and nested repositories. A normal `.git`

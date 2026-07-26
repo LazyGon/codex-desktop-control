@@ -315,7 +315,7 @@ export async function createSplitZipArchive(files, {
   }
 }
 
-export async function scanProjectTree(projectRoot, maxBytes) {
+export async function scanProjectTree(projectRoot) {
   const root = path.resolve(projectRoot);
   const rootStat = await fs.promises.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -351,9 +351,6 @@ export async function scanProjectTree(projectRoot, maxBytes) {
         continue;
       }
       sourceBytes += stat.size;
-      if (sourceBytes > maxBytes) {
-        throw new Error(`プロジェクトが転送上限を超えています (${sourceBytes} > ${maxBytes} bytes)。`);
-      }
       files.push({
         relativePath,
         size: stat.size,
@@ -366,7 +363,7 @@ export async function scanProjectTree(projectRoot, maxBytes) {
   return { root, projectName, files, sourceBytes, skippedLinks, skippedSpecial };
 }
 
-export async function scanGitTree(projectRoot, maxBytes) {
+export async function scanGitTree(projectRoot) {
   const root = path.resolve(projectRoot);
   const rootStat = await fs.promises.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -389,9 +386,6 @@ export async function scanGitTree(projectRoot, maxBytes) {
     throw new Error('.git は通常のディレクトリまたはファイルである必要があります。');
   }
   if (gitStat.isFile()) {
-    if (gitStat.size > maxBytes) {
-      throw new Error(`.git が転送上限を超えています (${gitStat.size} > ${maxBytes} bytes)。`);
-    }
     return {
       root,
       projectName,
@@ -435,9 +429,6 @@ export async function scanGitTree(projectRoot, maxBytes) {
         continue;
       }
       sourceBytes += stat.size;
-      if (sourceBytes > maxBytes) {
-        throw new Error(`.git が転送上限を超えています (${sourceBytes} > ${maxBytes} bytes)。`);
-      }
       files.push({
         relativePath,
         size: stat.size,
@@ -470,7 +461,6 @@ async function verifyProjectSnapshot(snapshot) {
 
 export async function createSplit7zProjectArchive(projectRoot, {
   volumeBytes,
-  maxBytes,
   tempRoot,
   archiverPath = null,
 }) {
@@ -480,7 +470,7 @@ export async function createSplit7zProjectArchive(projectRoot, {
   if (!executable) {
     throw new Error('プロジェクト転送には7-Zipが必要です。7z.exeをインストールするかfileShareArchiverPathを設定してください。');
   }
-  const snapshot = await scanProjectTree(projectRoot, maxBytes);
+  const snapshot = await scanProjectTree(projectRoot);
   await fs.promises.mkdir(resolvedTempRoot, { recursive: true });
   const directory = await fs.promises.mkdtemp(path.join(resolvedTempRoot, TRANSFER_DIRECTORY_PREFIX));
   assertManagedTransferDirectory(resolvedTempRoot, directory);
@@ -511,7 +501,6 @@ export async function createSplit7zProjectArchive(projectRoot, {
       archiveName,
       archivePath,
       volumeBytes,
-      maxBytes,
     );
     return {
       tempRoot: resolvedTempRoot,
@@ -532,7 +521,6 @@ export async function createSplit7zProjectArchive(projectRoot, {
 
 export async function createSplit7zGitArchive(projectRoot, {
   volumeBytes,
-  maxBytes,
   tempRoot,
   archiverPath = null,
 }) {
@@ -542,7 +530,7 @@ export async function createSplit7zGitArchive(projectRoot, {
   if (!executable) {
     throw new Error('.git転送には7-Zipが必要です。7z.exeをインストールするかfileShareArchiverPathを設定してください。');
   }
-  const snapshot = await scanGitTree(projectRoot, maxBytes);
+  const snapshot = await scanGitTree(projectRoot);
   await fs.promises.mkdir(resolvedTempRoot, { recursive: true });
   const directory = await fs.promises.mkdtemp(path.join(resolvedTempRoot, TRANSFER_DIRECTORY_PREFIX));
   assertManagedTransferDirectory(resolvedTempRoot, directory);
@@ -573,7 +561,6 @@ export async function createSplit7zGitArchive(projectRoot, {
       archiveName,
       archivePath,
       volumeBytes,
-      maxBytes,
     );
     return {
       tempRoot: resolvedTempRoot,

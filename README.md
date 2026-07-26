@@ -169,7 +169,9 @@ boundary checks used for individual downloads.
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
 The task panel's `📦 Download project` action creates a confirmed full working
 directory archive, including `.git` and protected regular files, as split 7z
-volumes with a manifest. Filesystem links and special entries are excluded.
+volumes with a manifest. Project and `.git` archives have no aggregate transfer
+limit; each volume stays within the configured Discord attachment size and is
+posted separately. Filesystem links and special entries are excluded.
 The task control center exposes model, reasoning effort,
 permission profile, Plan/Default mode, Fast/service tier, personality, memory,
 goal, compact, fork, review, and app-server background-terminal controls. The
