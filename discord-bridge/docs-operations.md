@@ -14,6 +14,13 @@ launcher remains the owner of the Desktop/app-server lifecycle.
 Use the Start menu folder **Codex Remote** for manual start, status, or graceful
 stop. The bridge prevents duplicate instances with `data\bridge.lock`.
 
+Discord can delay repeated channel-name changes. The Bridge coalesces those
+updates per task without blocking its 30-second global reconciliation loop.
+Use the fixed task panel's `Status` field as the immediate source when a channel
+name's `🟢`/`⚫` prefix has not yet cleared Discord's rename limit. New-task
+transcript backfill is serialized in the background and no longer blocks task
+discovery or status reconciliation for other channels.
+
 ## Phone workflow
 
 1. Run `/codex status` in `codex-remote`.

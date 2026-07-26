@@ -258,6 +258,14 @@ connection does not force one request to carry several attachments. Discord
 REST requests use the configurable `discordRestTimeoutMs` timeout, which
 defaults to 120 seconds.
 
+Task status reconciliation does not wait for Discord's comparatively slow
+channel-name rate-limit bucket. Channel name/topic updates are coalesced per
+channel in the background, while task panels, bindings, and every other task
+continue synchronizing. The task panel is therefore the authoritative immediate
+status display if an `🟢`/`⚫` channel-name prefix is temporarily delayed by
+Discord. Initial transcript backfill also runs behind task discovery, so one
+long history cannot hold the global task list stale.
+
 Whole-project and `.git` downloads do not have an aggregate source or archive
 limit. They are split into volumes no larger than `fileShareChunkBytes` and
 posted one volume per Discord message. Save every posted volume in one

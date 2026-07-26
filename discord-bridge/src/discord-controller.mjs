@@ -66,6 +66,7 @@ import {
   readHashedFile,
   splitArchiveManifest,
 } from './split-archive.mjs';
+import { LatestUpdateQueue } from './latest-update-queue.mjs';
 import {
   accountUsageEmbed,
   goalPayload,
@@ -188,6 +189,17 @@ export class DiscordController {
     this.projectCategoryPromises = new Map();
     this.internalChannelMoves = new Map();
     this.internalChannelNames = new Map();
+    this.taskChannelMetadataUpdates = new LatestUpdateQueue({
+      equals: (left, right) => left.name === right.name && left.topic === right.topic,
+      apply: (update) => this.#applyTaskChannelMetadata(update),
+      onError: (error, update) => {
+        this.#log('task-channel-metadata-update-error', {
+          channelId: update.channel.id,
+          name: update.name,
+          error: error.stack ?? error.message,
+        });
+      },
+    });
     this.canPinControlPanels = false;
     this.lastConnectionState = null;
     this.infrastructureReady = null;
@@ -812,6 +824,40 @@ export class DiscordController {
       if (this.internalChannelNames.get(channel.id) === name) this.internalChannelNames.delete(channel.id);
     }, 10_000);
     cleanupTimer.unref?.();
+  }
+
+  async #applyTaskChannelMetadata({ channel, name, topic, reason }) {
+    const nameChanged = channel.name !== name;
+    if (nameChanged) this.internalChannelNames.set(channel.id, name);
+    try {
+      if (typeof channel.edit === 'function') {
+        await channel.edit({ name, topic }, reason);
+      } else {
+        if (nameChanged) await channel.setName(name, reason);
+        if (channel.topic !== topic) await channel.setTopic(topic, reason);
+      }
+      this.#log('task-channel-metadata-updated', { channelId: channel.id, name });
+    } catch (error) {
+      if (nameChanged && this.internalChannelNames.get(channel.id) === name) {
+        this.internalChannelNames.delete(channel.id);
+      }
+      throw error;
+    }
+    if (nameChanged) {
+      const cleanupTimer = setTimeout(() => {
+        if (this.internalChannelNames.get(channel.id) === name) this.internalChannelNames.delete(channel.id);
+      }, 10_000);
+      cleanupTimer.unref?.();
+    }
+  }
+
+  #scheduleTaskChannelMetadata(channel, name, topic, reason) {
+    this.taskChannelMetadataUpdates.schedule(channel.id, {
+      channel,
+      name,
+      topic,
+      reason,
+    });
   }
 
   async #moveTaskChannel(channel, parentId, reason) {
@@ -2958,6 +3004,58 @@ export class DiscordController {
     });
   }
 
+  async #repostTaskPanelAfterTranscript(thread, channel, archived = false) {
+    const key = `task:${thread.id}`;
+    const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      const binding = this.stateStore.binding(thread.id);
+      if (!binding) return null;
+      const marker = taskPanelMarker(thread.id);
+      let oldPanel = binding.controlPanelMessageId
+        ? await channel.messages.fetch(binding.controlPanelMessageId).catch(() => null)
+        : null;
+      if (oldPanel && this.#panelMarker(oldPanel) !== marker) oldPanel = null;
+
+      const newPanel = await channel.send(taskPanelPayload({
+        thread,
+        binding: { ...binding, archived },
+      }));
+      if (this.canPinControlPanels && typeof newPanel.pin === 'function') {
+        try {
+          await newPanel.pin('Place Codex task controls below synchronized history');
+        } catch (error) {
+          await newPanel.delete().catch(() => {});
+          this.#log('control-panel-pin-failed', {
+            channelId: channel.id,
+            messageId: newPanel.id,
+            error: error.message,
+          });
+          throw error;
+        }
+      }
+      this.stateStore.setBinding(thread.id, { controlPanelMessageId: newPanel.id });
+      if (oldPanel && oldPanel.id !== newPanel.id && oldPanel.author.id === this.client.user.id) {
+        await oldPanel.delete().catch(async (error) => {
+          if (error.code === 10008) return;
+          await oldPanel.edit({ components: [] }).catch(() => {});
+          if (oldPanel.pinned && typeof oldPanel.unpin === 'function') await oldPanel.unpin().catch(() => {});
+          this.#log('superseded-task-panel-delete-failed', {
+            channelId: channel.id,
+            messageId: oldPanel.id,
+            error: error.message,
+          });
+        });
+      }
+      return newPanel;
+    });
+    this.panelSyncPromises.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.panelSyncPromises.get(key) === operation) this.panelSyncPromises.delete(key);
+    }
+  }
+
   async #repostTaskPanelAfterCompletion(threadId, turnId, channel) {
     const key = `task:${threadId}`;
     const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
@@ -3218,8 +3316,14 @@ export class DiscordController {
         await this.#moveTaskChannel(channel, target.category.id, 'Reconcile Codex task category');
         moved = true;
       }
-      if (channel.name !== desiredName) await this.#setTaskChannelName(channel, desiredName, 'Refresh Codex task name');
-      if (channel.topic !== desiredTopic) await channel.setTopic(desiredTopic, 'Refresh Codex task metadata');
+      if (channel.name !== desiredName || channel.topic !== desiredTopic) {
+        this.#scheduleTaskChannelMetadata(
+          channel,
+          desiredName,
+          desiredTopic,
+          'Refresh Codex task metadata',
+        );
+      }
     }
     if (!channel.permissionsLocked) await channel.lockPermissions();
 
@@ -3230,10 +3334,19 @@ export class DiscordController {
       projectId: target.project.id,
       subscribe: !archived && (!existingBinding || existingBinding.archived),
     });
-    if (created || (existingBinding?.transcriptVersion ?? 0) < 11) {
-      await this.#reconcileThreadTranscript(thread.id, { channel, archived });
-    }
     await this.#ensureTaskPanel(thread, channel, archived);
+    if (created || (existingBinding?.transcriptVersion ?? 0) < 11) {
+      if (!this.transcriptSyncPromises.has(thread.id)) {
+        this.#log('task-transcript-sync-scheduled', {
+          threadId: thread.id,
+          channelId: channel.id,
+          created,
+        });
+        this.#reconcileThreadTranscript(thread.id, { channel, archived })
+          .then(() => this.#repostTaskPanelAfterTranscript(thread, channel, archived))
+          .catch(() => {});
+      }
+    }
     return { channel, created, moved };
   }
 
