@@ -40,12 +40,34 @@ $tokenPath = Join-Path $configDir 'token.dpapi'
 $startScript = Join-Path $root 'Start-DiscordBridge.ps1'
 $statusScript = Join-Path $root 'Get-DiscordBridgeStatus.ps1'
 $stopScript = Join-Path $root 'Stop-DiscordBridge.ps1'
+$hostSource = Join-Path $root 'CodexDiscordRemoteHost.cs'
+$hostExecutable = Join-Path $root 'CodexDiscordRemoteHost.exe'
 $sharedLauncherPath = Join-Path (Split-Path -Parent $root) 'launcher\CodexSharedLauncher.exe'
+$sharedLauncherIcon = Join-Path (Split-Path -Parent $root) 'launcher\CodexSharedLauncher.ico'
 $taskName = 'Codex Discord Remote'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 if (-not (Test-Path -LiteralPath $sharedLauncherPath -PathType Leaf)) {
     throw "Shared Desktop launcher is missing: $sharedLauncherPath. Run the repository root Install.ps1."
+}
+if (-not (Test-Path -LiteralPath $sharedLauncherIcon -PathType Leaf)) {
+    throw "Shared Desktop launcher icon is missing: $sharedLauncherIcon. Run the repository root Install.ps1."
+}
+if (-not (Test-Path -LiteralPath $hostSource -PathType Leaf)) {
+    throw "Discord Remote host source is missing: $hostSource"
+}
+
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+}
+if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+    throw 'The .NET Framework C# compiler was not found.'
+}
+
+$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$sharedLauncherIcon" "/out:$hostExecutable" /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $hostSource 2>&1
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
+    throw "Discord Remote host compilation failed: $($compilerOutput -join [Environment]::NewLine)"
 }
 
 if (-not $ApplicationId) { $ApplicationId = Read-Host 'Discord Application ID' }
@@ -186,6 +208,19 @@ try {
         Pop-Location
     }
 
+    if (-not $NoStart) {
+        $lockPath = Join-Path $root 'data\bridge.lock'
+        $runningPid = 0
+        if (Test-Path -LiteralPath $lockPath) {
+            [void][int]::TryParse(
+                (Get-Content -Raw -LiteralPath $lockPath).Trim(),
+                [ref]$runningPid)
+        }
+        if ($runningPid -gt 0 -and (Get-Process -Id $runningPid -ErrorAction SilentlyContinue)) {
+            & $stopScript -TimeoutSeconds 30
+        }
+    }
+
     if ($SkipScheduledTask) {
         $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if ($existingTask) {
@@ -193,7 +228,7 @@ try {
         }
     }
     else {
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$startScript`"" -WorkingDirectory $root
+        $action = New-ScheduledTaskAction -Execute $hostExecutable -WorkingDirectory $root
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
         $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -MultipleInstances IgnoreNew
@@ -204,15 +239,23 @@ try {
     New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
     $shell = New-Object -ComObject WScript.Shell
     $shortcuts = @(
-        @{ Name = 'Start Codex Discord Remote.lnk'; Script = $startScript; Hidden = $true },
-        @{ Name = 'Codex Discord Remote Status.lnk'; Script = $statusScript; Hidden = $false },
-        @{ Name = 'Stop Codex Discord Remote.lnk'; Script = $stopScript; Hidden = $false }
+        @{ Name = 'Start Codex Discord Remote.lnk'; Executable = $hostExecutable; Script = $null; Hidden = $true },
+        @{ Name = 'Codex Discord Remote Status.lnk'; Executable = $null; Script = $statusScript; Hidden = $false },
+        @{ Name = 'Stop Codex Discord Remote.lnk'; Executable = $null; Script = $stopScript; Hidden = $false }
     )
     foreach ($item in $shortcuts) {
         $shortcut = $shell.CreateShortcut((Join-Path $startMenuDir $item.Name))
-        $shortcut.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-        $windowArgument = if ($item.Hidden) { '-WindowStyle Hidden ' } else { '-NoExit ' }
-        $shortcut.Arguments = "-NoLogo -NoProfile $windowArgument-ExecutionPolicy Bypass -File `"$($item.Script)`""
+        if ($item.Executable) {
+            $shortcut.TargetPath = $item.Executable
+            $shortcut.Arguments = ''
+            $shortcut.IconLocation = "$hostExecutable,0"
+        }
+        else {
+            $shortcut.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $windowArgument = if ($item.Hidden) { '-WindowStyle Hidden ' } else { '-NoExit ' }
+            $shortcut.Arguments = "-NoLogo -NoProfile $windowArgument-ExecutionPolicy Bypass -File `"$($item.Script)`""
+            $shortcut.IconLocation = "$hostExecutable,0"
+        }
         $shortcut.WorkingDirectory = $root
         $shortcut.Save()
     }
@@ -222,7 +265,7 @@ try {
             Start-ScheduledTask -TaskName $taskName
         }
         else {
-            Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $startScript)
+            Start-Process -FilePath $hostExecutable -WorkingDirectory $root
         }
         $deadline = [DateTimeOffset]::Now.AddSeconds(45)
         $runtimePath = Join-Path $root 'data\runtime.json'

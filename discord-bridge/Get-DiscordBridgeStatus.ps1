@@ -25,6 +25,20 @@ if (Test-Path -LiteralPath $lockPath) {
 }
 
 $task = Get-ScheduledTask -TaskName 'Codex Discord Remote' -ErrorAction SilentlyContinue
+$hostExecutable = [IO.Path]::GetFullPath((Join-Path $root 'CodexDiscordRemoteHost.exe'))
+$hostProcess = @(Get-Process -Name 'CodexDiscordRemoteHost' -ErrorAction SilentlyContinue |
+    Where-Object {
+        try {
+            [string]::Equals(
+                [IO.Path]::GetFullPath($_.Path),
+                $hostExecutable,
+                [StringComparison]::OrdinalIgnoreCase)
+        }
+        catch {
+            $false
+        }
+    } |
+    Select-Object -First 1)
 $ready = $false
 $readyStatus = $null
 $endpoint = if ($runtime -and $runtime.codex.endpoint) { [string]$runtime.codex.endpoint } else { 'ws://127.0.0.1:8798' }
@@ -42,6 +56,9 @@ catch {
 $status = [ordered]@{
     ProcessAlive = $processAlive
     Pid = $pidValue
+    HostProcessAlive = $hostProcess.Count -eq 1
+    HostPid = if ($hostProcess.Count -eq 1) { $hostProcess[0].Id } else { $null }
+    HostProcessName = if ($hostProcess.Count -eq 1) { $hostProcess[0].ProcessName } else { $null }
     Phase = if ($runtime) { $runtime.phase } else { 'not-started' }
     DiscordReady = if ($runtime) { $runtime.discordReady } else { $false }
     DiscordUser = if ($runtime) { $runtime.discordUser } else { $null }

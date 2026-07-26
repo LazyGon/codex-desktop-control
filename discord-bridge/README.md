@@ -220,12 +220,19 @@ Developer Portal. The `Others` / `transfer-text` inbox requires it. Installing
 with `-EnablePlainMessageInput` additionally permits ordinary task-channel
 messages to become Codex instructions.
 
-The root installer first builds and installs the shared Desktop launcher, then
+The root installer first builds and installs the shared Desktop launcher and
+the dedicated `CodexDiscordRemoteHost.exe`, then
 validates the token and server, defaults `authorizedUserIds` to the server owner,
 registers guild-scoped commands, installs a current-user Scheduled Task, starts
 Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
 after the shared launcher has already been installed.
+
+The host appears as **Codex Discord Remote** in the notification area and as
+`CodexDiscordRemoteHost.exe` in Task Manager, instead of leaving the Bridge
+identified only by generic PowerShell and Node processes. Its notification-area
+menu exposes status and a confirmed graceful stop; stopping it does not stop
+Codex Desktop or the shared app-server.
 
 Bots installed before pinned panels were added need one OAuth
 re-authorization using the URL printed by the installer. Discord grants
@@ -263,10 +270,13 @@ limits individual-file and linked-file ZIP downloads.
 
 ```powershell
 .\Get-DiscordBridgeStatus.ps1
-.\Start-DiscordBridge.ps1
+.\CodexDiscordRemoteHost.exe
 .\Stop-DiscordBridge.ps1
 ```
 
+Use the dedicated host or the **Codex Remote** Start menu shortcut for normal
+manual startup. `Start-DiscordBridge.ps1` is the host's internal child-process
+entry point and is retained for diagnostics.
 `Stop-DiscordBridge.ps1` writes a stop request and waits for a clean shutdown.
 It deliberately does not use `Stop-Process`.
 

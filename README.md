@@ -65,7 +65,8 @@ the current user. The installer:
    shortcuts;
 2. installs Discord dependencies, validates the bot and server, and registers
    commands;
-3. creates the `Codex Discord Remote` current-user Scheduled Task;
+3. builds the identifiable `CodexDiscordRemoteHost.exe` notification-area host
+   and creates the `Codex Discord Remote` current-user Scheduled Task;
 4. starts Desktop through the shared launcher and verifies its WebSocket
    connection; and
 5. starts the Bridge and verifies Discord plus app-server connectivity.

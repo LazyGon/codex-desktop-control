@@ -12,6 +12,7 @@ discord-bridge/logs/*
 # Generated shared-launcher artifacts
 launcher/CodexSharedLauncher.exe
 launcher/CodexSharedLauncher.ico
+discord-bridge/CodexDiscordRemoteHost.exe
 launcher/cache/
 launcher/logs/
 launcher/state/

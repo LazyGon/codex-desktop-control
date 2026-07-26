@@ -2,7 +2,11 @@
 
 ## Normal startup
 
-The `Codex Discord Remote` Scheduled Task starts at user logon. If the shared
+The `Codex Discord Remote` Scheduled Task starts the dedicated
+`CodexDiscordRemoteHost.exe` at user logon. The host remains visible in the
+notification area as **Codex Discord Remote**, and Task Manager identifies the
+host by its dedicated executable name. Its tray menu provides `Show status` and
+a confirmation-protected `Stop safely...` action. If the shared
 app-server is absent, the bridge starts
 `launcher\CodexSharedLauncher.exe` and retries with exponential backoff. The
 launcher remains the owner of the Desktop/app-server lifecycle.
