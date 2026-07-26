@@ -204,7 +204,7 @@ try {
         if (!identity || identity.task !== threadId || identity.turn !== turnId || identity.item !== itemId) {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card identity is invalid.`);
         }
-        const expectedTitle = 'Codex message';
+        const expectedTitle = item.phase === 'reasoning' ? 'Codex reasoning summary' : 'Codex message';
         if (card.embeds[0]?.title !== expectedTitle) {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card title is not ${expectedTitle}.`);
         }
@@ -326,8 +326,9 @@ try {
       const identity = embedIdentity(message);
       if (!identity) continue;
       if (identity.task !== threadId) errors.push(`${threadId}: card ${message.id} names task ${identity.task}.`);
-      if (identity.embed.title === 'Codex message') {
+      if (['Codex message', 'Codex reasoning summary'].includes(identity.embed.title)) {
         stats.assistantCards += 1;
+        if (identity.embed.title === 'Codex reasoning summary') stats.reasoningCards += 1;
         const key = `${identity.turn}:${identity.item}`;
         if (!identity.item) errors.push(`${threadId}: assistant card ${message.id} has no Message identity.`);
         if (assistantIdentities.has(key)) {
@@ -341,8 +342,9 @@ try {
         if (JSON.stringify(fieldNames) !== JSON.stringify(['Task', 'Turn', 'Message'])) {
           errors.push(`${threadId}/${key}: assistant card has extra fields: ${fieldNames.join(', ')}.`);
         }
-        if (identity.embed.color !== 0x5865f2) {
-          errors.push(`${threadId}/${key}: assistant card color is ${identity.embed.color}; expected 0x5865f2.`);
+        const expectedColor = identity.embed.title === 'Codex reasoning summary' ? 0xf0b232 : 0x5865f2;
+        if (identity.embed.color !== expectedColor) {
+          errors.push(`${threadId}/${key}: assistant card color is ${identity.embed.color}; expected 0x${expectedColor.toString(16)}.`);
         }
         if (identity.embed.timestamp || identity.embed.footer || identity.embed.author) {
           errors.push(`${threadId}/${key}: assistant card has extra timestamp/footer/author metadata.`);

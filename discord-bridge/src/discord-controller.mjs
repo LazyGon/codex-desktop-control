@@ -36,9 +36,16 @@ import { commandPayload } from './commands.mjs';
 import {
   CONTROL_PANEL_MARKER,
   controlPanelPayload,
+  recentHistoryPayload,
   taskPanelMarker,
   taskPanelPayload,
 } from './discord-panels.mjs';
+import {
+  completedTurnsSince,
+  historicalAssistantItems,
+  RECENT_HISTORY_DAY_OPTIONS,
+  recentHistoryCutoffMs,
+} from './recent-history.mjs';
 import {
   contentCardComponents,
   fileBrowserPayload,
@@ -182,6 +189,8 @@ export class DiscordController {
     this.taskSyncDebounceTimer = null;
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
+    this.recentHistoryRestoreJob = null;
+    this.recentHistoryRestorePromise = null;
     this.notificationQueues = new Map();
     this.discordMessageQueues = new Map();
     this.pendingChannelBindings = new Map();
@@ -2316,6 +2325,29 @@ export class DiscordController {
         await interaction.editReply({ embeds: [await this.#resourceResponse(interaction.values[0])] });
         return;
       }
+      if (uiParts[2] === 'control' && uiParts[3] === 'recent-history-days') {
+        this.#assertControlPanelInteraction(interaction);
+        const days = Number.parseInt(interaction.values[0], 10);
+        if (!RECENT_HISTORY_DAY_OPTIONS.includes(days)) {
+          throw new Error('履歴復元の日数が不正です。1日、3日、7日から選択してください。');
+        }
+        await interaction.deferUpdate();
+        const cutoff = new Date(recentHistoryCutoffMs(days)).toLocaleString('ja-JP', {
+          timeZone: 'Asia/Tokyo',
+        });
+        await this.#showConfirmation(
+          interaction,
+          { type: 'recentHistoryRestore', days },
+          [
+            `Discord管理対象の全ての非アーカイブタスクについて、過去 **${days}日** の履歴を復元しますか？`,
+            `対象期間: ${cutoff}（日本時間）以降`,
+            'ユーザー発言、commentary、最終回答、取得可能な推論要約をカードとして復元します。',
+            '処理はバックグラウンドで進み、完了結果をCodex Remoteへ投稿します。',
+          ].join('\n'),
+          '履歴を復元',
+        );
+        return;
+      }
       if (uiParts[2] === 'task') {
         const action = uiParts[3];
         const threadId = uiParts[4];
@@ -2470,6 +2502,10 @@ export class DiscordController {
         }
         if (action === 'pending') {
           await interaction.reply(messageOptions(this.#pendingContent(), { ephemeral: true }));
+          return;
+        }
+        if (action === 'recent-history') {
+          await interaction.reply({ ...recentHistoryPayload(), ephemeral: true });
           return;
         }
         return;
@@ -2640,6 +2676,24 @@ export class DiscordController {
         const url = await this.#sendGitArchive(channel, binding, interaction.user.id);
         await interaction.editReply({
           content: `.git archiveを投稿しました: ${url}`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+      if (action.type === 'recentHistoryRestore') {
+        if (this.recentHistoryRestorePromise) {
+          const running = this.recentHistoryRestoreJob;
+          await interaction.editReply({
+            content: `履歴復元は既に実行中です（過去${running?.days ?? '?'}日 / ${running?.processed ?? 0}/${running?.total ?? '?'}タスク）。`,
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+        const job = this.#startRecentHistoryRestore(action.days, interaction.user.id);
+        await interaction.editReply({
+          content: `過去${job.days}日分の履歴復元を開始しました。Discord管理対象の全ての非アーカイブタスクを処理し、完了結果をCodex Remoteへ投稿します。`,
           embeds: [],
           components: [],
         });
@@ -2907,6 +2961,102 @@ export class DiscordController {
     await channel.send(messageOptions(
       `全タスク同期を更新しました。新規 ${result.created} / 移動 ${result.moved} / 失敗 ${result.failed}${links ? `\n${links}` : ''}`,
     ));
+  }
+
+  #startRecentHistoryRestore(days, requestedBy) {
+    if (this.recentHistoryRestorePromise) throw new Error('履歴復元は既に実行中です。');
+    const job = {
+      days,
+      requestedBy,
+      cutoffMs: recentHistoryCutoffMs(days),
+      startedAt: Date.now(),
+      total: 0,
+      processed: 0,
+      failed: 0,
+    };
+    this.recentHistoryRestoreJob = job;
+    const promise = this.#performRecentHistoryRestore(job);
+    this.recentHistoryRestorePromise = promise;
+    promise.catch((error) => {
+      this.#log('recent-history-restore-failed', {
+        days,
+        requestedBy,
+        error: error.stack ?? error.message,
+      });
+      this.#postAlert(`最近の履歴復元に失敗しました。\n${error.message}`, 'error').catch(() => {});
+    }).finally(() => {
+      if (this.recentHistoryRestorePromise === promise) {
+        this.recentHistoryRestorePromise = null;
+        this.recentHistoryRestoreJob = null;
+      }
+    });
+    return job;
+  }
+
+  async #performRecentHistoryRestore(job) {
+    const activeThreads = (await this.codex.listAllThreads({ archived: false }))
+      .filter((thread) => this.#isSyncableThread(thread))
+      .filter((thread) => {
+        const binding = this.stateStore.binding(thread.id);
+        return binding && !binding.archived;
+      });
+    job.total = activeThreads.length;
+    const result = {
+      days: job.days,
+      cutoffMs: job.cutoffMs,
+      total: activeThreads.length,
+      processed: 0,
+      failed: 0,
+      skipped: 0,
+      turns: 0,
+      commentary: 0,
+      reasoning: 0,
+    };
+
+    for (const thread of activeThreads) {
+      const binding = this.stateStore.binding(thread.id);
+      try {
+        const channel = await this.client.channels.fetch(binding.channelId);
+        const restored = await this.#reconcileThreadTranscript(thread.id, {
+          channel,
+          recentSinceMs: job.cutoffMs,
+          includeHistoricalDetails: true,
+        });
+        if ((restored.restoredTurns ?? 0) > 0) {
+          await this.#repostTaskPanelAfterTranscript(restored.thread, channel, false);
+        }
+        result.processed += 1;
+        result.turns += restored.restoredTurns ?? 0;
+        result.commentary += restored.restoredCommentary ?? 0;
+        result.reasoning += restored.restoredReasoning ?? 0;
+      } catch (error) {
+        result.failed += 1;
+        this.#log('recent-history-restore-thread-failed', {
+          threadId: thread.id,
+          days: job.days,
+          error: error.stack ?? error.message,
+        });
+      } finally {
+        job.processed += 1;
+        job.failed = result.failed;
+      }
+    }
+
+    const channelId = this.stateStore.snapshot().infrastructure.controlChannelId;
+    const control = channelId ? await this.client.channels.fetch(channelId).catch(() => null) : null;
+    if (control) {
+      await control.send(messageOptions([
+        `最近の履歴復元が完了しました（過去${job.days}日）。`,
+        `非アーカイブ ${result.total} / 完了 ${result.processed} / スキップ ${result.skipped} / 失敗 ${result.failed}`,
+        `対象ターン ${result.turns} / commentary ${result.commentary} / 推論要約 ${result.reasoning}`,
+      ].join('\n')));
+    }
+    this.#log('recent-history-restore-completed', {
+      ...result,
+      requestedBy: job.requestedBy,
+      elapsedMs: Date.now() - job.startedAt,
+    });
+    return result;
   }
 
   #panelMarker(message) {
@@ -3507,7 +3657,7 @@ export class DiscordController {
 
   #embedAssistantMessageId(message) {
     for (const embed of message.embeds) {
-      if (!['Codex message', 'Codex running'].includes(embed.title)) continue;
+      if (!['Codex message', 'Codex reasoning summary', 'Codex running'].includes(embed.title)) continue;
       const field = embed.fields?.find((candidate) => candidate.name === 'Message');
       const match = field?.value?.match(/`([^`]+)`/);
       if (match) return match[1];
@@ -3525,8 +3675,8 @@ export class DiscordController {
     const value = String(item.text ?? '').trim() || '(empty)';
     const localFiles = extractLocalFileReferences(value);
     const embed = new EmbedBuilder()
-      .setTitle('Codex message')
-      .setColor(COLORS.neutral)
+      .setTitle(item.phase === 'reasoning' ? 'Codex reasoning summary' : 'Codex message')
+      .setColor(item.phase === 'reasoning' ? COLORS.warning : COLORS.neutral)
       .setDescription(truncate(value, 3900))
       .addFields(
         { name: 'Task', value: `\`${binding.threadId}\`` },
@@ -3959,12 +4109,27 @@ export class DiscordController {
   }
 
   async #reconcileThreadTranscript(threadId, options = {}) {
-    if (this.transcriptSyncPromises.has(threadId)) return this.transcriptSyncPromises.get(threadId);
+    if (this.transcriptSyncPromises.has(threadId)) {
+      const existing = this.transcriptSyncPromises.get(threadId);
+      if (options.recentSinceMs === null || options.recentSinceMs === undefined) return existing;
+      // A bounded user-requested restore must not be absorbed by a reconnect
+      // or live active-only reconciliation that happens to be in flight.
+      await existing.catch(() => {});
+      return this.#reconcileThreadTranscript(threadId, options);
+    }
     const run = async () => {
-      this.#log('transcript-sync-start', { threadId, activeOnly: Boolean(options.activeOnly) });
+      this.#log('transcript-sync-start', {
+        threadId,
+        activeOnly: Boolean(options.activeOnly),
+        boundedHistory: Number.isFinite(options.recentSinceMs),
+      });
       try {
         const result = await this.#performTranscriptReconciliation(threadId, options);
-        this.#log('transcript-sync-completed', { threadId, activeOnly: Boolean(options.activeOnly) });
+        this.#log('transcript-sync-completed', {
+          threadId,
+          activeOnly: Boolean(options.activeOnly),
+          boundedHistory: Number.isFinite(options.recentSinceMs),
+        });
         return result;
       } catch (error) {
         this.#log('transcript-sync-failed', { threadId, error: error.stack ?? error.message });
@@ -3984,6 +4149,8 @@ export class DiscordController {
   async #performTranscriptReconciliation(threadId, {
     channel: knownChannel = null,
     activeOnly = false,
+    recentSinceMs = null,
+    includeHistoricalDetails = false,
   } = {}) {
     const binding = this.stateStore.binding(threadId);
     if (!binding) throw new Error(`Task is not bound: ${threadId}`);
@@ -3992,8 +4159,13 @@ export class DiscordController {
     // must only prune Discord messages against a fully hydrated transcript.
     const thread = (await this.codex.readThread(threadId)).thread;
     const messages = await this.#fetchChannelHistory(channel);
-    const completedTurns = (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress');
-    const activeTurn = [...(thread.turns ?? [])].reverse().find((turn) => turn.status === 'inProgress') ?? null;
+    const completedTurns = recentSinceMs === null
+      ? (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress')
+      : completedTurnsSince(thread.turns, recentSinceMs);
+    const rawActiveTurn = [...(thread.turns ?? [])].reverse().find((turn) => turn.status === 'inProgress') ?? null;
+    // The current active turn remains represented by its single live card.
+    // A bounded historical restore only adds completed-turn cards.
+    const activeTurn = recentSinceMs === null ? rawActiveTurn : null;
     const turnsById = new Map((thread.turns ?? []).map((turn) => [turn.id, turn]));
     const commentaryByKey = new Map();
     for (const turn of thread.turns ?? []) {
@@ -4041,7 +4213,10 @@ export class DiscordController {
     if (!activeOnly) {
       for (const turn of completedTurns) {
         await this.#ensureTurnUserMessages(binding, turn, channel, messages);
-        for (const item of requiredByTurn.get(turn.id) ?? []) {
+        const detailItems = includeHistoricalDetails
+          ? historicalAssistantItems(turn)
+          : requiredByTurn.get(turn.id) ?? [];
+        for (const item of detailItems) {
           await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
         }
         const finalText = finalTextFromTurn(
@@ -4060,7 +4235,10 @@ export class DiscordController {
 
     if (activeTurn) {
       await this.#ensureTurnUserMessages(binding, activeTurn, channel, messages);
-      for (const item of requiredByTurn.get(activeTurn.id) ?? []) {
+      const activeDetailItems = includeHistoricalDetails
+        ? historicalAssistantItems(activeTurn)
+        : requiredByTurn.get(activeTurn.id) ?? [];
+      for (const item of activeDetailItems) {
         if (`${activeTurn.id}:${item.id}` === activeMessageKey) continue;
         await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
       }
@@ -4087,8 +4265,21 @@ export class DiscordController {
       if (record?.cardMessageId) protectedIds.add(record.cardMessageId);
       if (record?.liveMessageId) protectedIds.add(record.liveMessageId);
     }
-    await this.#cleanupLegacyTranscriptMessages(channel, messages, protectedIds);
+    if (recentSinceMs === null) {
+      await this.#cleanupLegacyTranscriptMessages(channel, messages, protectedIds);
+    }
     if (activeOnly) return { thread, latestCompleted: completedTurns.at(-1) };
+    if (recentSinceMs !== null) {
+      const detailItems = [...completedTurns, ...(activeTurn ? [activeTurn] : [])]
+        .flatMap((turn) => historicalAssistantItems(turn));
+      return {
+        thread,
+        latestCompleted,
+        restoredTurns: completedTurns.length + (activeTurn ? 1 : 0),
+        restoredCommentary: detailItems.filter((item) => item.phase === 'commentary').length,
+        restoredReasoning: detailItems.filter((item) => item.phase === 'reasoning').length,
+      };
+    }
     const latestUsers = latestCompleted ? this.#userMessagesFromThread({ turns: [latestCompleted] }) : [];
     this.stateStore.setBinding(threadId, {
       transcriptVersion: 11,

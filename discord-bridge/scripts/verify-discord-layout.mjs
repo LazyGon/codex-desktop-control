@@ -187,6 +187,7 @@ try {
         'cx:ui:control:usage',
         'cx:ui:control:sync',
         'cx:ui:control:pending',
+        'cx:ui:control:recent-history',
         'cx:ui:control:resources',
         ...(Object.keys(state.bindings ?? {}).length ? ['cx:ui:control:open'] : []),
       ],

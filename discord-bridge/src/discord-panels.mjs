@@ -11,6 +11,10 @@ import {
   threadStatusLabel,
   truncate,
 } from './util.mjs';
+import {
+  MAX_RECENT_HISTORY_DAYS,
+  RECENT_HISTORY_DAY_OPTIONS,
+} from './recent-history.mjs';
 
 export const CONTROL_PANEL_MARKER = 'Codex Remote UI / control-panel';
 export const taskPanelMarker = (threadId) => `Codex Remote UI / task-panel / ${threadId}`;
@@ -36,6 +40,7 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
     new ButtonBuilder().setCustomId('cx:ui:control:usage').setLabel('Usage').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('cx:ui:control:sync').setLabel('Sync').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('cx:ui:control:pending').setLabel('Pending').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('cx:ui:control:recent-history').setLabel('履歴復元').setStyle(ButtonStyle.Secondary),
   )];
   components.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -65,6 +70,31 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
     ));
   }
   return { embeds: [embed], components, allowedMentions: { parse: [] } };
+}
+
+export function recentHistoryPayload() {
+  const embed = new EmbedBuilder()
+    .setTitle('最近の履歴を復元')
+    .setColor(CONTROL_PANEL_COLOR)
+    .setDescription([
+      'Discord管理対象の全ての非アーカイブタスクについて、選択期間内の履歴カードを復元します。',
+      'ユーザー発言、commentary、最終回答に加え、App Serverが保持する推論要約を復元します。',
+      'アーカイブ済みタスクと、期間より前の履歴は変更しません。',
+    ].join('\n'));
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('cx:ui:control:recent-history-days')
+    .setPlaceholder(`復元する期間を選択（最大${MAX_RECENT_HISTORY_DAYS}日）`)
+    .addOptions(RECENT_HISTORY_DAY_OPTIONS.map((days) => (
+      new StringSelectMenuOptionBuilder()
+        .setLabel(`過去${days}日`)
+        .setDescription(`直近${days * 24}時間の履歴を復元`)
+        .setValue(String(days))
+    )));
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(select)],
+    allowedMentions: { parse: [] },
+  };
 }
 
 export function taskPanelPayload({ thread, binding }) {

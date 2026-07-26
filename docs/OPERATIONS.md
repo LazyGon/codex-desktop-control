@@ -124,8 +124,14 @@ is created. Unbound channels in the control, archive, or unrelated categories
 are ignored rather than becoming tasks.
 
 Use the pinned panel in `codex-remote` for connection status, account usage,
-read-only Codex resource inventory, full sync, pending requests, and task
-navigation. Every task channel has its own pinned panel for delivery mode,
+read-only Codex resource inventory, full sync, pending requests, task
+navigation, and bounded recent-history recovery. Select `履歴復元`, choose 1,
+3, or 7 days, and confirm to restore completed-turn user messages, commentary,
+final answers, and available App Server reasoning summaries for every
+Discord-managed non-archived task. This is an explicit exception to normal
+history reconciliation; it never includes archived tasks, data older than
+seven days, raw private reasoning content, or the current live turn. Every task
+channel has its own pinned panel for delivery mode,
 watch level, detailed status, pending requests, the task control center,
 archive/restore, and confirmed interrupt. The control center uses app-server
 catalogs for model, reasoning, permissions, and Plan/Default mode. Its More

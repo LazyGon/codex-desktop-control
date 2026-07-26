@@ -97,7 +97,13 @@ the same task ID; protected descendants and filesystem links remain blocked.
 
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
-requests, and task navigation. Each pinned task panel provides delivery mode,
+requests, task navigation, and a `履歴復元` button. For exceptional catch-up,
+select 1, 3, or 7 days and confirm. The Bridge processes every Discord-managed
+non-archived task in the background and restores completed-turn user messages,
+commentary, final answers, and App Server reasoning summaries. The current
+live turn stays on its single live card. Archived tasks, turns older than the
+selected rolling window, and raw private reasoning content are never included.
+Completion counts are posted back to `codex-remote`. Each pinned task panel provides delivery mode,
 watch level, a per-task completion-report selector, detailed status, task-scoped
 pending requests, a task control center, archive/restore, and confirmed
 interrupt. The control center uses
@@ -189,6 +195,9 @@ app-server reconnects, every non-archived task is resumed on the same server and
 from persisted history. Historical reconciliation backfills user cards and final
 assistant cards only. Commentary is captured while the turn is actively subscribed;
 already-persisted commentary cards are preserved by task, turn, and item identity.
+The confirmed `履歴復元` control is the only bounded exception: it can backfill
+commentary and available reasoning summaries for completed turns from the last
+1, 3, or 7 days across non-archived managed tasks.
 A completed turn not matching the binding's last known turn ID is posted as a
 missed completion before normal streaming resumes, unless completion reporting
 was OFF for that task. Suppressed turns are marked handled and are not posted

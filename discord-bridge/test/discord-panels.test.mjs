@@ -4,6 +4,7 @@ import {
   CONTROL_PANEL_COLOR,
   CONTROL_PANEL_MARKER,
   controlPanelPayload,
+  recentHistoryPayload,
   taskPanelMarker,
   taskPanelPayload,
 } from '../src/discord-panels.mjs';
@@ -15,7 +16,7 @@ function json(payload) {
   };
 }
 
-test('control panel exposes status, usage, resources, sync, pending, and task navigation UI', () => {
+test('control panel exposes status, usage, resources, sync, recent history, pending, and task navigation UI', () => {
   const payload = json(controlPanelPayload({
     connected: true,
     pendingCount: 2,
@@ -32,6 +33,7 @@ test('control panel exposes status, usage, resources, sync, pending, and task na
     'cx:ui:control:usage',
     'cx:ui:control:sync',
     'cx:ui:control:pending',
+    'cx:ui:control:recent-history',
   ]);
   assert.equal(payload.components[1].components[0].custom_id, 'cx:ui:control:resources');
   assert.deepEqual(payload.components[1].components[0].options.map((option) => option.value), [
@@ -42,6 +44,15 @@ test('control panel exposes status, usage, resources, sync, pending, and task na
     'thread-active',
     'thread-archived',
   ]);
+});
+
+test('recent history UI offers only one, three, and seven day restore windows', () => {
+  const payload = json(recentHistoryPayload());
+  assert.equal(payload.embeds[0].title, '最近の履歴を復元');
+  assert.match(payload.embeds[0].description, /非アーカイブ/);
+  assert.match(payload.embeds[0].description, /推論要約/);
+  assert.equal(payload.components[0].components[0].custom_id, 'cx:ui:control:recent-history-days');
+  assert.deepEqual(payload.components[0].components[0].options.map((option) => option.value), ['1', '3', '7']);
 });
 
 test('task panel exposes delivery, watch, and completion selects plus safe file actions', () => {

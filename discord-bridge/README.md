@@ -29,6 +29,11 @@ outbound connection to Discord.
   center, archive/restore, and confirmed interrupt, plus a paged project-file
   browser. Control panels use a dedicated purple embed color; completed result
   cards remain blue.
+- Offers a confirmed `履歴復元` exception from the global panel. The user
+  selects 1, 3, or 7 days; the Bridge then restores completed-turn user,
+  commentary, final-answer, and available reasoning-summary cards for every
+  Discord-managed non-archived task. Raw private reasoning content, archived
+  tasks, older turns, and the current live turn are excluded.
 - Reposts and pins the task control panel immediately below each terminal turn
   card. The previous bot-owned task panel is removed only after the replacement
   ID is persisted, so mobile users always find controls at the latest position.
@@ -54,6 +59,7 @@ outbound connection to Discord.
   freezes each previous commentary message as an immutable card when the next
   message starts. Historical and reconnect reconciliation does not backfill
   commentary cards; it synchronizes user messages and final answers only.
+  `履歴復元` is the bounded, confirmation-protected exception described above.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
   only on the latest card. A past commentary card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.

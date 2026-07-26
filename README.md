@@ -178,7 +178,11 @@ permission profile, Plan/Default mode, Fast/service tier, personality, memory,
 goal, compact, fork, review, and app-server background-terminal controls. The
 global panel provides bridge status, account usage, read-only MCP/Skills/
 Plugins/Hooks/experimental-feature inventory, full synchronization, pending
-requests, and task navigation. Renaming
+requests, task navigation, and a confirmed `履歴復元` action. That action is an
+explicit exception to normal historical reconciliation: choose 1, 3, or 7
+days to restore completed-turn user messages, commentary, final answers, and
+App Server reasoning summaries across every Discord-managed non-archived task.
+Raw private reasoning content is never posted. Renaming
 a task channel renames the Codex task; the Bridge then restores the channel's
 running/stopped status prefix.
 

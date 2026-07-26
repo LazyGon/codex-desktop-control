@@ -10,6 +10,61 @@ import { DiscordController } from '../src/discord-controller.mjs';
 import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
 
+test('control panel recent history button opens a maximum seven-day selector and confirms the chosen window', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-recent-history-ui-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const stateStore = {
+    snapshot: () => ({ infrastructure: { controlChannelId: 'control-channel' } }),
+  };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1', authorizedUserIds: ['user-1'] },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const interaction = (customId, select = false, values = []) => ({
+    guildId: 'guild-1',
+    channelId: 'control-channel',
+    user: { id: 'user-1' },
+    customId,
+    values,
+    deferred: false,
+    replied: false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => select,
+    isButton: () => !select,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+    reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+  });
+  const emit = async (value) => {
+    client.emit('interactionCreate', value);
+    for (let attempt = 0; attempt < 100 && !value.lastReply; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(value.lastReply);
+    return value.lastReply;
+  };
+
+  const opened = await emit(interaction('cx:ui:control:recent-history'));
+  const selector = opened.components[0].toJSON().components[0];
+  assert.deepEqual(selector.options.map((option) => option.value), ['1', '3', '7']);
+
+  const confirmation = await emit(interaction('cx:ui:control:recent-history-days', true, ['7']));
+  assert.match(confirmation.content, /過去 \*\*7日\*\*/);
+  assert.match(confirmation.content, /推論要約/);
+  assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
+});
+
 test('completed turns replace the pinned task panel below the final card exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
