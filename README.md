@@ -163,10 +163,11 @@ latest channel position.
 Pinned control panels use a dedicated purple embed color, while completed
 Codex result cards remain blue, so the two surfaces are visually distinct.
 They also provide a project-file browser, while assistant
-cards expose safe local file links for download to the private task channel.
-The linked-file picker can download every permitted link as one ZIP (or
-numbered ZIP volumes), while preserving the same secret, link, and project
-boundary checks used for individual downloads.
+cards expose explicitly linked local files for download to the private task
+channel. Linked regular files may be outside managed projects, including under
+`.codex`, and secret-like names are not blocked. Windows-protected system
+directories and filesystem links remain unavailable. The linked-file picker
+can download every eligible link as one ZIP (or numbered ZIP volumes).
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
 The task panel's `📦 Download project` action creates a confirmed full working
 directory archive, including `.git` and protected regular files, as split 7z

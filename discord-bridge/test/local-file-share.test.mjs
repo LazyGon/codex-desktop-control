@@ -29,7 +29,7 @@ test('local Markdown links accept Windows file targets and reject remote or rela
   ]);
 });
 
-test('project browser lists immediate entries and locks secret paths without hiding them', async (context) => {
+test('project browser allows ordinary development folders and secret-named files', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-file-browser-'));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'src'));
@@ -39,14 +39,12 @@ test('project browser lists immediate entries and locks secret paths without hid
 
   const listing = await listProjectDirectory(root);
   assert.deepEqual(listing.entries.map((entry) => entry.name), ['.git', 'src', '.env', 'README.md']);
-  assert.equal(listing.entries.find((entry) => entry.name === '.git').navigable, false);
-  assert.match(listing.entries.find((entry) => entry.name === '.git').lockedReason, /Git/);
-  assert.equal(listing.entries.find((entry) => entry.name === '.env').downloadable, false);
-  assert.match(listing.entries.find((entry) => entry.name === '.env').lockedReason, /secret/);
+  assert.equal(listing.entries.find((entry) => entry.name === '.git').navigable, true);
+  assert.equal(listing.entries.find((entry) => entry.name === '.env').downloadable, true);
   assert.equal(listing.entries.find((entry) => entry.name === 'README.md').downloadable, true);
 });
 
-test('file resolution enforces project roots, strips line locations, and blocks secrets', async (context) => {
+test('file resolution allows files outside project roots and secret-named files', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-file-root-'));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-file-outside-'));
   context.after(() => {
@@ -62,20 +60,24 @@ test('file resolution enforces project roots, strips line locations, and blocks 
   const resolved = await resolveShareFile(`${safePath}:42:3`, [root]);
   assert.equal(resolved.path, fs.realpathSync(safePath));
   assert.equal(resolved.relativePath, 'result.txt');
-  await assert.rejects(resolveShareFile(path.join(root, 'token.dpapi'), [root]), /秘密・保護対象/);
-  await assert.rejects(resolveShareFile(outsidePath, [root]), /プロジェクトの外/);
-  assert.match(blockedPathReason(path.join('.codex', 'auth.json')), /Codex/);
+  assert.equal(
+    (await resolveShareFile(path.join(root, 'token.dpapi'), [root])).path,
+    fs.realpathSync(path.join(root, 'token.dpapi')),
+  );
+  assert.equal((await resolveShareFile(outsidePath, [root])).path, fs.realpathSync(outsidePath));
+  assert.equal(blockedPathReason(path.join('.codex', 'auth.json')), null);
+  assert.match(blockedPathReason('C:\\Windows\\System32\\config\\SAM'), /Windows/);
 });
 
-test('private-key content is blocked even with an ordinary filename', async (context) => {
+test('private-key content is allowed outside Windows protected folders', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-file-content-'));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const filePath = path.join(root, 'notes.txt');
   fs.writeFileSync(filePath, '-----BEGIN OPENSSH PRIVATE KEY-----\nsecret', 'utf8');
-  await assert.rejects(resolveShareFile(filePath, [root]), /秘密鍵本文/);
+  assert.equal((await resolveShareFile(filePath, [root])).path, fs.realpathSync(filePath));
 });
 
-test('task-scoped runtime roots may cross a protected ancestor without exposing protected children', async (context) => {
+test('task-scoped runtime roots and their protected-named children are downloadable', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-runtime-root-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const root = path.join(directory, '.codex', 'visualizations', '2026', '07', '25', 'thread-1');
@@ -85,13 +87,9 @@ test('task-scoped runtime roots may cross a protected ancestor without exposing 
   fs.writeFileSync(artifact, 'artifact', 'utf8');
   fs.writeFileSync(secret, 'TOKEN=secret', 'utf8');
 
-  await assert.rejects(resolveShareFile(artifact, [root]), /秘密・保護対象/);
   assert.equal(
-    (await resolveShareFile(artifact, [{ path: root, allowProtectedAncestors: true }])).path,
+    (await resolveShareFile(artifact, [root])).path,
     fs.realpathSync(artifact),
   );
-  await assert.rejects(
-    resolveShareFile(secret, [{ path: root, allowProtectedAncestors: true }]),
-    /秘密・保護対象/,
-  );
+  assert.equal((await resolveShareFile(secret, [root])).path, fs.realpathSync(secret));
 });

@@ -64,23 +64,17 @@ outbound connection to Discord.
   only on the latest card. A past commentary card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
 - Adds a `Linked files` button to assistant cards that contain Markdown links
-  to absolute local Windows files. The resulting dropdown resolves only files
-  inside managed Codex project trees (including explicitly linked sibling
-  repositories under a parent shared by managed projects) and posts the
-  selected file to its private task channel. The same picker offers
-  `Download all as ZIP`, which packages every permitted link while excluding
-  locked or unsafe entries.
+  to absolute local Windows files. A linked regular file may be anywhere on the
+  local machine except a Windows-protected system directory, and the selected
+  file is posted to its private task channel. The same picker offers
+  `Download all as ZIP`, which packages every downloadable link.
 - Browses one directory level at a time from a task's project root through the
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
-- Treats the latest `workspace_roots` in the matching Codex session as
-  task-scoped file boundaries. This permits linked artifacts in that task's
-  generated `.codex/visualizations` directory without allowing another task's
-  runtime directory or protected files inside the authorized root.
-- Treats `.codex/generated_images/<task-id>` as another task-scoped boundary,
-  including for tasks without a selected project. Only the matching task's
-  generated image directory is eligible; sibling tasks and protected children
-  remain unavailable.
+- Allows explicitly linked artifacts under `.codex/visualizations`,
+  `.codex/generated_images`, other task runtime directories, sibling projects,
+  and arbitrary local development directories. The Bridge does not expose an
+  arbitrary-path input UI.
 - Downloads the complete task working directory from the task panel's
   `📦 Download project` button. After an explicit secret-exposure confirmation,
   the Bridge includes `.git` and protected regular files, skips filesystem
@@ -344,21 +338,16 @@ time is deferred before execution.
   deprecated rollback are not exposed through Discord. The fixed
   `data/transfer-text` latest-message inbox is the bounded write exception.
 - File browsing is read-only and rooted at the selected task's working
-  directory. Assistant-card downloads accept only paths that Codex actually
-  linked and that resolve inside a managed project tree, a parent shared by
-  managed sibling projects, a runtime workspace root, or that same task's
-  generated-image directory;
-  arbitrary path input, UNC paths, traversal, alternate data streams, and
-  symbolic links/junctions are rejected.
-- Protected directories and likely secret files remain visible in the file
-  index as unavailable entries. `.git`, `.codex`, credential stores,
-  `.env` variants, DPAPI tokens, private-key extensions, and files containing a
-  private-key header cannot be downloaded.
-- `📦 Download project` is the deliberate exception to those per-file
-  restrictions: after an explicit warning and confirmation, it includes every
-  regular file under the task working directory, including `.git` and likely
-  secrets. It still excludes symbolic links, junctions, and special filesystem
-  entries, and verifies source size and modification time after archiving.
+  directory. Assistant-card downloads accept any absolute local regular-file
+  path that Codex actually linked, including `.git`, `.codex`, credential
+  stores, `.env`, DPAPI tokens, private-key files, and files outside managed
+  projects. Windows-protected system directories, arbitrary path input, UNC
+  paths, alternate data streams, symbolic links/junctions, and special
+  filesystem entries remain unavailable.
+- `📦 Download project` requires an explicit warning and confirmation before
+  archiving every regular file under the task working directory. It excludes
+  symbolic links, junctions, and special filesystem entries, and verifies
+  source size and modification time after archiving.
 - `🗃️ Download .git` is the narrower deliberate exception. It includes only
   the root `.git` directory or worktree gitfile after warning that Git history,
   remote URLs, hooks, configuration, and credentials may be exposed. It does

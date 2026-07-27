@@ -1590,7 +1590,7 @@ test('moving a task channel to an unrelated category rolls it back without chang
   assert.equal(binding.categoryId, 'project-category');
 });
 
-test('task file UI browses project entries and resolves only safe assistant-linked files', async (context) => {
+test('task file UI browses project entries and resolves assistant-linked files outside project roots', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-files-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const project = path.join(directory, 'project');
@@ -1720,7 +1720,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.equal(browser.lastReply.embeds[0].toJSON().title, 'Project files');
   const browserOptions = browser.lastReply.components[0].toJSON().components[0].options;
   assert.ok(browserOptions.some((option) => option.label.includes('artifact.txt')));
-  assert.match(browserOptions.find((option) => option.label.includes('.env')).description, /取得不可/);
+  assert.match(browserOptions.find((option) => option.label.includes('.env')).description, /ダウンロード/);
 
   const projectDownload = interaction(`cx:ui:task:project:${binding.threadId}`);
   client.emit('interactionCreate', projectDownload);
@@ -1795,8 +1795,8 @@ test('task file UI browses project entries and resolves only safe assistant-link
   assert.equal(linkedOptions[0].label, 'cross-project');
   assert.equal(linkedOptions[0].emoji.name, '📄');
   assert.equal(linkedOptions[1].label, 'environment');
-  assert.equal(linkedOptions[1].emoji.name, '🔒');
-  assert.match(linkedOptions[1].description, /取得不可/);
+  assert.equal(linkedOptions[1].emoji.name, '📄');
+  assert.equal(linkedOptions[1].description, '.env');
   assert.equal(linkedOptions[2].label, 'runtime artifact');
   assert.equal(linkedOptions[2].emoji.name, '📄');
   assert.equal(linkedOptions[3].label, 'generated image');
@@ -1824,7 +1824,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     const zipButton = linked.lastReply.components[1].toJSON().components[0];
     assert.equal(zipButton.custom_id.startsWith('cx:files:linkednav:'), true);
     assert.equal(zipButton.custom_id.endsWith(':download'), true);
-    assert.equal(zipButton.label, 'Download all as ZIP (3)');
+    assert.equal(zipButton.label, 'Download all as ZIP (4)');
     const zipDownload = interaction(zipButton.custom_id);
     client.emit('interactionCreate', zipDownload);
     for (let attempt = 0; attempt < 200 && !zipDownload.lastFollowUp; attempt += 1) {
@@ -1832,7 +1832,7 @@ test('task file UI browses project entries and resolves only safe assistant-link
     }
     assert.match(zipDownload.lastFollowUp.content, /https:\/\/discord\.test\//);
     assert.match(filePosts[zipStart].content, /Codex linked files ZIP/);
-    assert.match(filePosts[zipStart].content, /Skipped unavailable links: 1/);
+    assert.doesNotMatch(filePosts[zipStart].content, /Skipped unavailable links/);
     const zipAttachments = filePosts.slice(zipStart).flatMap((post) => post.files ?? []);
     assert.ok(zipAttachments.some((file) => file.name === 'linked-files.zip'));
     assert.ok(zipAttachments.some((file) => file.name === 'linked-files.zip-manifest.json'));

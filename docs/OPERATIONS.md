@@ -141,9 +141,11 @@ Codex task. The next sync normalizes the channel name and restores its status
 emoji prefix.
 
 Assistant-card `Linked files` pickers provide individual downloads and a
-`Download all as ZIP` action. The ZIP contains only links that pass the normal
-project-boundary, secret-file, and filesystem-link checks. Unavailable entries
-remain excluded and visible as locked items.
+`Download all as ZIP` action. Explicitly linked regular files may be anywhere
+outside Windows-protected system directories, including `.codex`, `.git`,
+`.env`, credential files, and paths outside managed projects. Filesystem links,
+special entries, and unreadable files remain excluded and visible as locked
+items.
 
 Permission changes, compact, fork, goal removal, and background-terminal
 termination require an explicit confirmation. Terminal termination is limited

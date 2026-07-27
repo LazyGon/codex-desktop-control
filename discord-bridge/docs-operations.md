@@ -60,9 +60,8 @@ discovery or status reconciliation for other channels.
    `🗃️ Download .git` and confirm `.gitを作成`.
 
 The `Linked files` picker also provides `Download all as ZIP`. It archives all
-currently permitted links, preserves each project-relative path, skips entries
-shown as locked, and posts a SHA-256 manifest with the ZIP or numbered ZIP
-volumes.
+downloadable links, preserves a project-relative path when one is available,
+and posts a SHA-256 manifest with the ZIP or numbered ZIP volumes.
 
 Files that fit in one attachment are posted directly. Larger files are posted
 as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
@@ -70,10 +69,11 @@ volume into the same folder and open the `.7z.001` file with a 7z-compatible
 phone or desktop app. The manifest records the original-file and per-volume
 SHA-256 hashes.
 Entries marked `🔒` remain indexed but cannot be downloaded because they are
-secret/protected, outside the project boundary, or a filesystem link.
-The whole-project archive is an explicit exception: it includes `.git`,
-`.env`, keys, credentials, and other protected regular files. It skips
-symlinks, junctions, and special filesystem entries. Download every
+inside a Windows-protected system directory, a filesystem link, a special
+entry, or unreadable. `.git`, `.codex`, `.env`, keys, credentials, and files
+outside a managed project are downloadable when Codex explicitly linked them.
+The whole-project archive includes those regular files and skips symlinks,
+junctions, and special filesystem entries. Download every
 `.project.7z.*` volume into one folder and open `.project.7z.001`. A
 single-volume transfer is opened as `.project.7z`. Extraction creates the outer
 project directory. The source and produced archive have no aggregate transfer
@@ -88,12 +88,11 @@ filesystem links and special entries are never followed. The confirmation
 warns that Git history, remote URLs, hooks, configuration, and credentials can
 be present.
 The project browser itself never leaves the task working directory. A file
-explicitly linked by Codex may also resolve in a sibling repository under a
-parent shared by managed projects, which covers cross-repository work without
-opening arbitrary-path input. Linked artifacts may also resolve inside the
-latest workspace roots recorded by that exact task's Codex session. A
-`.codex\visualizations` root is accepted only when its dated directory ends in
-the same task ID; protected descendants and filesystem links remain blocked.
+explicitly linked by Codex may resolve anywhere on the local machine outside
+Windows-protected system directories. This includes sibling repositories,
+`.codex\visualizations`, `.codex\generated_images`, `.env`, credentials, and
+other task runtime directories. Filesystem links and special entries remain
+blocked, and there is no arbitrary-path input UI.
 
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending

@@ -1,41 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const BLOCKED_DIRECTORY_NAMES = new Map([
-  ['.git', 'Git内部ディレクトリ'],
-  ['.ssh', 'SSH秘密情報ディレクトリ'],
-  ['.gnupg', 'GPG秘密情報ディレクトリ'],
-  ['.aws', 'AWS認証情報ディレクトリ'],
-  ['.azure', 'Azure認証情報ディレクトリ'],
-  ['.kube', 'Kubernetes認証情報ディレクトリ'],
-  ['.codex', 'Codexローカル認証・状態ディレクトリ'],
-  ['.config', 'ユーザー設定・認証情報ディレクトリ'],
-  ['node_modules', '依存関係ディレクトリ'],
-]);
-
-const BLOCKED_FILE_NAMES = new Map([
-  ['token.dpapi', '暗号化されたBot token'],
-  ['auth.json', '認証情報ファイル'],
-  ['credentials.json', '認証情報ファイル'],
-  ['client_secret.json', 'OAuth client secret'],
-  ['cookies.sqlite', 'ブラウザcookieデータ'],
-  ['.npmrc', 'package registry認証情報を含む可能性があるファイル'],
-  ['.pypirc', 'package registry認証情報を含む可能性があるファイル'],
-  ['.netrc', 'ネットワーク認証情報ファイル'],
-]);
-
-const BLOCKED_EXTENSIONS = new Map([
-  ['.pem', '秘密鍵・証明書ファイル'],
-  ['.key', '秘密鍵ファイル'],
-  ['.pfx', '秘密鍵を含む証明書ファイル'],
-  ['.p12', '秘密鍵を含む証明書ファイル'],
-  ['.kdbx', 'パスワードデータベース'],
-  ['.jks', 'Java key store'],
-]);
-
-const SAFE_ENV_TEMPLATES = new Set(['.env.example', '.env.sample', '.env.template']);
-const PRIVATE_KEY_PATTERN = /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/;
-
 function normalizeCase(value) {
   return path.win32.normalize(value).toLocaleLowerCase('en-US');
 }
@@ -112,21 +77,20 @@ export function extractLocalFileReferences(markdown) {
 }
 
 export function blockedPathReason(filePath) {
-  const normalized = path.win32.normalize(String(filePath ?? ''));
-  const segments = normalized.split(/[\\/]+/).filter(Boolean);
-  for (const segment of segments.slice(0, -1)) {
-    const reason = BLOCKED_DIRECTORY_NAMES.get(segment.toLocaleLowerCase('en-US'));
-    if (reason) return reason;
+  const normalized = normalizeLocalTarget(filePath);
+  if (!normalized) return null;
+  const systemRoot = normalizeLocalTarget(process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows');
+  const systemDrive = path.win32.parse(systemRoot ?? normalized).root;
+  const protectedRoots = [
+    systemRoot,
+    path.win32.join(systemDrive, 'System Volume Information'),
+    path.win32.join(systemDrive, '$Recycle.Bin'),
+    path.win32.join(systemDrive, 'Recovery'),
+    path.win32.join(systemDrive, 'Program Files', 'WindowsApps'),
+  ].filter(Boolean);
+  if (protectedRoots.some((root) => isWithin(normalized, root))) {
+    return 'Windows保護領域';
   }
-  const name = segments.at(-1)?.toLocaleLowerCase('en-US') ?? '';
-  const directoryReason = BLOCKED_DIRECTORY_NAMES.get(name);
-  if (directoryReason) return directoryReason;
-  const fileReason = BLOCKED_FILE_NAMES.get(name);
-  if (fileReason) return fileReason;
-  if (name.startsWith('.env') && !SAFE_ENV_TEMPLATES.has(name)) return '環境変数・secretファイル';
-  const extensionReason = BLOCKED_EXTENSIONS.get(path.win32.extname(name));
-  if (extensionReason) return extensionReason;
-  if (/^(?:id_(?:rsa|dsa|ecdsa|ed25519)|.*private[-_.]?key)(?:\..*)?$/i.test(name)) return '秘密鍵ファイル';
   return null;
 }
 
@@ -164,7 +128,7 @@ export async function listProjectDirectory(rootPath, relativeDirectory = '') {
     const relativePath = path.win32.join(relative, entry.name);
     let kind = entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other';
     let size = null;
-    let lockedReason = blockedPathReason(relativePath);
+    let lockedReason = blockedPathReason(absolutePath);
     try {
       const entryStat = await fs.promises.lstat(absolutePath);
       if (entryStat.isSymbolicLink()) {
@@ -216,8 +180,6 @@ async function allowedRootRecords(roots) {
   const records = new Map();
   for (const value of roots ?? []) {
     const rootPath = typeof value === 'string' ? value : value?.path;
-    const allowProtectedAncestors = typeof value === 'object'
-      && value?.allowProtectedAncestors === true;
     const normalized = normalizeLocalTarget(rootPath);
     if (!normalized) continue;
     try {
@@ -225,12 +187,7 @@ async function allowedRootRecords(roots) {
       const stat = await fs.promises.stat(real);
       if (!stat.isDirectory()) continue;
       const key = normalizeCase(real);
-      const existing = records.get(key);
-      if (existing) {
-        existing.allowProtectedAncestors ||= allowProtectedAncestors;
-        continue;
-      }
-      records.set(key, { normalized, real, allowProtectedAncestors });
+      if (!records.has(key)) records.set(key, { normalized, real });
     } catch {}
   }
   return [...records.values()];
@@ -248,18 +205,6 @@ async function containsPathLink(root, candidate) {
   return false;
 }
 
-async function contentSecretReason(filePath) {
-  const handle = await fs.promises.open(filePath, 'r');
-  try {
-    const buffer = Buffer.alloc(64 * 1024);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (PRIVATE_KEY_PATTERN.test(buffer.subarray(0, bytesRead).toString('utf8'))) return '秘密鍵本文を含むファイル';
-    return null;
-  } finally {
-    await handle.close();
-  }
-}
-
 export async function resolveShareFile(targetValue, roots) {
   const normalized = normalizeLocalTarget(targetValue);
   if (!normalized) throw new Error('ローカルWindows絶対パスではありません。');
@@ -268,21 +213,24 @@ export async function resolveShareFile(targetValue, roots) {
   if (originalStat.isSymbolicLink()) throw new Error('シンボリックリンクまたはjunctionはダウンロードできません。');
   if (!originalStat.isFile()) throw new Error('ディレクトリは直接ダウンロードできません。Project filesから内容を選択してください。');
   const realCandidate = await fs.promises.realpath(candidate);
+  const protectedReason = blockedPathReason(realCandidate);
+  if (protectedReason) {
+    throw new Error(`Windows保護領域のためダウンロードできません: ${protectedReason}`);
+  }
   const rootRecords = await allowedRootRecords(roots);
   const root = rootRecords.find((record) => isWithin(realCandidate, record.real));
-  if (!root) throw new Error('許可されたCodexプロジェクトの外にあるためダウンロードできません。');
-  if (await containsPathLink(root.normalized, candidate)) {
+  const traversalRoot = path.win32.parse(candidate).root;
+  if (await containsPathLink(traversalRoot, candidate)) {
     throw new Error('パスにシンボリックリンクまたはjunctionが含まれるためダウンロードできません。');
   }
-  const relativePath = path.win32.relative(root.real, realCandidate) || path.win32.basename(realCandidate);
-  const secretReason = (root.allowProtectedAncestors ? null : blockedPathReason(realCandidate))
-    ?? blockedPathReason(relativePath)
-    ?? await contentSecretReason(realCandidate);
-  if (secretReason) throw new Error(`秘密・保護対象のためダウンロードできません: ${secretReason}`);
+  const resolvedRoot = root?.real ?? path.win32.dirname(realCandidate);
+  const relativePath = root
+    ? path.win32.relative(root.real, realCandidate) || path.win32.basename(realCandidate)
+    : path.win32.basename(realCandidate);
   const stat = await fs.promises.stat(realCandidate);
   return {
     path: realCandidate,
-    root: root.real,
+    root: resolvedRoot,
     relativePath,
     name: path.win32.basename(realCandidate),
     size: stat.size,
