@@ -40,4 +40,3 @@ test('does not hide authentication, certificate, configuration, or programming e
     assert.equal(isTransientCommunicationError(error), false, error.message);
   }
 });
-

@@ -66,4 +66,3 @@ export function isTransientCommunicationError(error) {
     return TRANSIENT_MESSAGES.some((pattern) => pattern.test(message));
   });
 }
-
