@@ -232,6 +232,7 @@ export class DiscordController {
     this.recentHistoryRestoreJob = null;
     this.recentHistoryRestorePromise = null;
     this.notificationQueues = new Map();
+    this.subscriptionSyncPromises = new Map();
     this.discordMessageQueues = new Map();
     this.pendingChannelBindings = new Map();
     this.panelSyncPromises = new Map();
@@ -273,14 +274,14 @@ export class DiscordController {
     this.codex.on('notification', (message) => this.#queueCodexNotification(message));
     this.codex.on('serverRequest', (request) => this.#handleServerRequest(request));
     this.codex.on('connectionState', (status) => this.#handleConnectionState(status));
-    this.codex.on('subscriptionRestored', (event) => this.#handleSubscriptionRestored(event).catch((error) => {
-      this.#log('subscription-sync-error', { threadId: event.binding.threadId, error: error.stack ?? error.message });
-      this.#postAlert(`購読復元後の同期に失敗しました: ${event.binding.threadId}\n${error.message}`, 'error');
-    }));
-    this.codex.on('subscriptionError', (event) => this.#postAlert(
-      `購読復元失敗: ${event.binding.threadId}\n${event.error.message}`,
-      'error',
-    ));
+    this.codex.on('subscriptionRestored', (event) => this.#queueSubscriptionRestored(event));
+    this.codex.on('subscriptionError', (event) => {
+      if (this.stopping) return;
+      this.#postAlert(
+        `購読復元失敗: ${event.binding.threadId}\n${event.error.message}`,
+        'error',
+      ).catch(() => {});
+    });
   }
 
   stop() {
@@ -306,6 +307,7 @@ export class DiscordController {
       ['transcript-tail', this.transcriptSyncTail],
       ['recent-history', this.recentHistoryRestorePromise],
       ...[...this.notificationQueues].map(([key, promise]) => [`notification:${key}`, promise]),
+      ...[...this.subscriptionSyncPromises].map(([key, promise]) => [`subscription:${key}`, promise]),
       ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
@@ -4611,6 +4613,35 @@ export class DiscordController {
     this.notificationQueues.set(threadId, queued);
     queued.finally(() => {
       if (this.notificationQueues.get(threadId) === queued) this.notificationQueues.delete(threadId);
+    });
+  }
+
+  #queueSubscriptionRestored(event) {
+    if (this.stopping) return;
+    const threadId = event.binding.threadId;
+    const previous = this.subscriptionSyncPromises.get(threadId) ?? Promise.resolve();
+    const queued = previous.catch(() => {}).then(async () => {
+      if (this.stopping) return;
+      try {
+        await this.#handleSubscriptionRestored(event);
+      } catch (error) {
+        this.#log('subscription-sync-error', {
+          threadId,
+          error: error.stack ?? error.message,
+        });
+        if (!this.stopping) {
+          await this.#postAlert(
+            `購読復元後の同期に失敗しました: ${threadId}\n${error.message}`,
+            'error',
+          ).catch(() => {});
+        }
+      }
+    });
+    this.subscriptionSyncPromises.set(threadId, queued);
+    queued.finally(() => {
+      if (this.subscriptionSyncPromises.get(threadId) === queued) {
+        this.subscriptionSyncPromises.delete(threadId);
+      }
     });
   }
 

@@ -109,6 +109,42 @@ test('controller shutdown waits up to five minutes in production and reports a s
   assert.deepEqual(result.pending, ['task-sync']);
 });
 
+test('controller shutdown waits for subscription restore work and ignores restores after stopping', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-subscription-stop-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const codex = new EventEmitter();
+  const controller = new DiscordController({
+    client: new EventEmitter(),
+    codex,
+    stateStore: { snapshot: () => ({ infrastructure: {} }) },
+    config: {},
+    logDir: directory,
+  });
+  controller.attach();
+  let release;
+  const subscriptionWork = new Promise((resolve) => {
+    release = resolve;
+  });
+  controller.subscriptionSyncPromises.set('thread-1', subscriptionWork);
+
+  let stopped = false;
+  const stopping = controller.stop().then(() => {
+    stopped = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+
+  release();
+  await stopping;
+  controller.subscriptionSyncPromises.delete('thread-1');
+  codex.emit('subscriptionRestored', {
+    binding: { threadId: 'thread-after-stop' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(controller.subscriptionSyncPromises.size, 0);
+});
+
 test('control panel recent history button opens a maximum seven-day selector and confirms the chosen window', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-recent-history-ui-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
