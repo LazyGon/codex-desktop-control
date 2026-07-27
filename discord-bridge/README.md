@@ -261,8 +261,13 @@ manifest records every source file and ZIP volume.
 
 Project archive volumes are posted one per Discord message so a slow outbound
 connection does not force one request to carry several attachments. Discord
-REST requests use the configurable `discordRestTimeoutMs` timeout, which
-defaults to 120 seconds.
+Discord TCP/TLS connection establishment uses `discordConnectTimeoutMs`, and
+REST responses use `discordRestTimeoutMs`. Both default to 300 seconds and are
+clamped to a minimum of 300 seconds. A failed `turn/completed` delivery is
+re-read from the app-server and retried idempotently, while periodic task sync
+also repairs stopped tasks whose Discord turn record is still `inProgress`.
+Codex app-server WebSocket establishment and operation requests also wait up to
+300 seconds before timing out.
 
 Task status reconciliation does not wait for Discord's comparatively slow
 channel-name rate-limit bucket. Channel name/topic updates are coalesced per

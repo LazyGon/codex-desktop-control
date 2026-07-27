@@ -36,7 +36,7 @@ export class IncomingAttachmentStore {
     maxFileBytes = 512_000_000,
     maxTotalBytes = 512_000_000,
     maxCount = 10,
-    timeoutMs = 120_000,
+    timeoutMs = 300_000,
     fetchImpl = fetch,
   } = {}) {
     this.rootPath = path.resolve(rootPath);

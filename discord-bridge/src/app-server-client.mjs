@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 
+export const APP_SERVER_OPERATION_TIMEOUT_MS = 300_000;
+
 export class AppServerClient extends EventEmitter {
-  constructor(url, { requestTimeoutMs = 30_000 } = {}) {
+  constructor(url, { requestTimeoutMs = APP_SERVER_OPERATION_TIMEOUT_MS } = {}) {
     super();
     this.url = url;
     this.requestTimeoutMs = requestTimeoutMs;
@@ -22,7 +24,10 @@ export class AppServerClient extends EventEmitter {
     this.socket.addEventListener('close', (event) => this.#handleClose(event));
     this.socket.addEventListener('error', (event) => this.emit('socketError', event));
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`WebSocket open timed out: ${this.url}`)), 10_000);
+      const timeout = setTimeout(
+        () => reject(new Error(`WebSocket open timed out: ${this.url}`)),
+        this.requestTimeoutMs,
+      );
       this.socket.addEventListener('open', () => {
         clearTimeout(timeout);
         resolve();

@@ -2,7 +2,10 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { AppServerClient } from './app-server-client.mjs';
+import {
+  APP_SERVER_OPERATION_TIMEOUT_MS,
+  AppServerClient,
+} from './app-server-client.mjs';
 import {
   appendJsonLine,
   completionTextFromSession,
@@ -63,6 +66,9 @@ export class CodexService extends EventEmitter {
     this.connectionAttempt = 0;
     this.connectedAt = null;
     this.lastLauncherStartAt = 0;
+    this.stopPromise = new Promise((resolve) => {
+      this.resolveStop = resolve;
+    });
   }
 
   get connected() {
@@ -90,20 +96,28 @@ export class CodexService extends EventEmitter {
 
   async stop() {
     this.stopping = true;
+    this.resolveStop();
     this.client?.close();
     if (!this.connectLoopPromise) return;
+    let timeout;
     const completed = await Promise.race([
       this.connectLoopPromise.then(() => true).catch(() => true),
-      sleep(3_000).then(() => false),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(false), APP_SERVER_OPERATION_TIMEOUT_MS);
+        timeout.unref?.();
+      }),
     ]);
-    if (!completed) this.#log('connect-loop-close-timeout', { timeoutMs: 3_000 });
+    if (timeout) clearTimeout(timeout);
+    if (!completed) {
+      this.#log('connect-loop-close-timeout', { timeoutMs: APP_SERVER_OPERATION_TIMEOUT_MS });
+    }
   }
 
   async listThreads({ limit = this.config.taskListLimit, search = null, archived = false } = {}) {
     this.#requireClient();
     const params = { limit, archived, sortKey: 'recency_at', sortDirection: 'desc' };
     if (search) params.searchTerm = search;
-    return this.client.call('thread/list', params, 60_000);
+    return this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listAllThreads({ archived = false } = {}) {
@@ -114,7 +128,7 @@ export class CodexService extends EventEmitter {
     do {
       const params = { limit: 100, archived, sortKey: 'recency_at', sortDirection: 'desc' };
       if (cursor) params.cursor = cursor;
-      const result = await this.client.call('thread/list', params, 60_000);
+      const result = await this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
       threads.push(...(result.data ?? []));
       cursor = result.nextCursor ?? null;
       if (cursor && seenCursors.has(cursor)) throw new Error(`thread/list repeated cursor: ${cursor}`);
@@ -125,22 +139,22 @@ export class CodexService extends EventEmitter {
 
   async readThread(threadId) {
     this.#requireClient();
-    return this.client.call('thread/read', { threadId, includeTurns: true }, 60_000);
+    return this.client.call('thread/read', { threadId, includeTurns: true }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async threadMetadata(threadId) {
     this.#requireClient();
-    return this.client.call('thread/read', { threadId, includeTurns: false }, 30_000);
+    return this.client.call('thread/read', { threadId, includeTurns: false }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async resumeThread(threadId) {
     this.#requireClient();
-    return this.client.call('thread/resume', { threadId, excludeTurns: true }, 60_000);
+    return this.client.call('thread/resume', { threadId, excludeTurns: true }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async updateThreadSettings(threadId, patch) {
     this.#requireClient();
-    await this.client.call('thread/settings/update', { threadId, ...patch }, 60_000);
+    await this.client.call('thread/settings/update', { threadId, ...patch }, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { threadId, patch };
   }
 
@@ -156,13 +170,13 @@ export class CodexService extends EventEmitter {
 
   async listCollaborationModes() {
     this.#requireClient();
-    const result = await this.client.call('collaborationMode/list', {}, 30_000);
+    const result = await this.client.call('collaborationMode/list', {}, APP_SERVER_OPERATION_TIMEOUT_MS);
     return result.data ?? [];
   }
 
   async compactThread(threadId) {
     this.#requireClient();
-    await this.client.call('thread/compact/start', { threadId }, 60_000);
+    await this.client.call('thread/compact/start', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { threadId };
   }
 
@@ -170,29 +184,29 @@ export class CodexService extends EventEmitter {
     this.#requireClient();
     const params = { threadId, excludeTurns: true };
     if (lastTurnId) params.lastTurnId = lastTurnId;
-    return this.client.call('thread/fork', params, 60_000);
+    return this.client.call('thread/fork', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async getGoal(threadId) {
     this.#requireClient();
-    return this.client.call('thread/goal/get', { threadId }, 30_000);
+    return this.client.call('thread/goal/get', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async setGoal(threadId, objective, tokenBudget = null) {
     this.#requireClient();
     const params = { threadId, objective };
     if (tokenBudget !== null) params.tokenBudget = tokenBudget;
-    return this.client.call('thread/goal/set', params, 30_000);
+    return this.client.call('thread/goal/set', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async clearGoal(threadId) {
     this.#requireClient();
-    return this.client.call('thread/goal/clear', { threadId }, 30_000);
+    return this.client.call('thread/goal/clear', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async startReview(threadId, target, delivery = 'inline') {
     this.#requireClient();
-    return this.client.call('review/start', { threadId, target, delivery }, 60_000);
+    return this.client.call('review/start', { threadId, target, delivery }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listBackgroundTerminals(threadId) {
@@ -202,24 +216,28 @@ export class CodexService extends EventEmitter {
 
   async terminateBackgroundTerminal(threadId, processId) {
     this.#requireClient();
-    return this.client.call('thread/backgroundTerminals/terminate', { threadId, processId }, 30_000);
+    return this.client.call(
+      'thread/backgroundTerminals/terminate',
+      { threadId, processId },
+      APP_SERVER_OPERATION_TIMEOUT_MS,
+    );
   }
 
   async setMemoryMode(threadId, mode) {
     this.#requireClient();
     if (!['enabled', 'disabled'].includes(mode)) throw new Error(`Unknown memory mode: ${mode}`);
-    await this.client.call('thread/memoryMode/set', { threadId, mode }, 30_000);
+    await this.client.call('thread/memoryMode/set', { threadId, mode }, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { threadId, mode };
   }
 
   async accountRateLimits() {
     this.#requireClient();
-    return this.client.call('account/rateLimits/read', undefined, 30_000);
+    return this.client.call('account/rateLimits/read', undefined, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async accountUsage() {
     this.#requireClient();
-    return this.client.call('account/usage/read', undefined, 30_000);
+    return this.client.call('account/usage/read', undefined, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listMcpServers(threadId = null) {
@@ -232,17 +250,17 @@ export class CodexService extends EventEmitter {
 
   async listSkills(cwds = []) {
     this.#requireClient();
-    return this.client.call('skills/list', cwds.length ? { cwds } : {}, 60_000);
+    return this.client.call('skills/list', cwds.length ? { cwds } : {}, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listHooks(cwds = []) {
     this.#requireClient();
-    return this.client.call('hooks/list', cwds.length ? { cwds } : {}, 60_000);
+    return this.client.call('hooks/list', cwds.length ? { cwds } : {}, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listPlugins(cwds = []) {
     this.#requireClient();
-    return this.client.call('plugin/list', cwds.length ? { cwds } : {}, 60_000);
+    return this.client.call('plugin/list', cwds.length ? { cwds } : {}, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async listExperimentalFeatures(threadId = null) {
@@ -253,14 +271,14 @@ export class CodexService extends EventEmitter {
   async startThread(cwd = null) {
     this.#requireClient();
     const params = cwd ? { cwd } : {};
-    const result = await this.client.call('thread/start', params, 60_000);
+    const result = await this.client.call('thread/start', params, APP_SERVER_OPERATION_TIMEOUT_MS);
     if (!result.thread?.id) throw new Error('thread/start did not return a task ID.');
     return result;
   }
 
   async setThreadName(threadId, name) {
     this.#requireClient();
-    return this.client.call('thread/name/set', { threadId, name }, 30_000);
+    return this.client.call('thread/name/set', { threadId, name }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async unsubscribeThread(threadId) {
@@ -273,13 +291,13 @@ export class CodexService extends EventEmitter {
 
   async archiveThread(threadId) {
     this.#requireClient();
-    await this.client.call('thread/archive', { threadId }, 60_000);
+    await this.client.call('thread/archive', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { threadId };
   }
 
   async unarchiveThread(threadId) {
     this.#requireClient();
-    return this.client.call('thread/unarchive', { threadId }, 60_000);
+    return this.client.call('thread/unarchive', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async activeTurn(threadId) {
@@ -311,7 +329,7 @@ export class CodexService extends EventEmitter {
       input: textInput(prompt, attachments),
     };
     if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
-    const result = await this.client.call('turn/start', params, 60_000);
+    const result = await this.client.call('turn/start', params, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { mode: 'send', turnId: result.turn?.id ?? null, result };
   }
 
@@ -379,7 +397,7 @@ export class CodexService extends EventEmitter {
     do {
       const params = { ...initialParams, limit };
       if (cursor) params.cursor = cursor;
-      const result = await this.client.call(method, params, 60_000);
+      const result = await this.client.call(method, params, APP_SERVER_OPERATION_TIMEOUT_MS);
       data.push(...(result.data ?? []));
       cursor = result.nextCursor ?? null;
       if (cursor && seenCursors.has(cursor)) throw new Error(`${method} repeated cursor: ${cursor}`);
@@ -412,13 +430,17 @@ export class CodexService extends EventEmitter {
       client.once('disconnected', disconnectedResolve);
 
       try {
-        await client.connect();
+        const connected = await Promise.race([
+          client.connect().then(() => true),
+          this.stopPromise.then(() => false),
+        ]);
+        if (!connected) break;
         this.connectionAttempt = 0;
         this.connectedAt = new Date().toISOString();
         this.emit('connectionState', { state: 'connected', ...this.status(), source: endpoint.source });
         this.#log('connected', { endpoint: endpoint.url });
         await this.#restoreSubscriptions();
-        await disconnected;
+        await Promise.race([disconnected, this.stopPromise]);
       } catch (error) {
         this.#log('connect-failed', { endpoint: endpoint.url, error: error.message });
         this.emit('connectionState', { state: 'disconnected', ...this.status(), error: error.message });
@@ -432,7 +454,7 @@ export class CodexService extends EventEmitter {
       if (this.stopping) break;
       const delay = Math.min(30_000, 1_000 * (2 ** Math.min(this.connectionAttempt, 5)));
       this.emit('connectionState', { state: 'waiting', delayMs: delay, ...this.status() });
-      await sleep(delay);
+      await Promise.race([sleep(delay), this.stopPromise]);
     }
   }
 

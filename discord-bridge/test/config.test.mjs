@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizationConfigErrors, resolveAuthorizationConfig } from '../src/config.mjs';
+import {
+  authorizationConfigErrors,
+  MIN_DISCORD_NETWORK_TIMEOUT_MS,
+  resolveAuthorizationConfig,
+  resolveDiscordTimeoutConfig,
+} from '../src/config.mjs';
 
 test('legacy authorization and completion mention settings remain independent', () => {
   const config = resolveAuthorizationConfig({
@@ -38,4 +43,21 @@ test('authorization validation requires authorized users but permits no fixed su
     'authorizedUserIds must contain at least one Discord user id.',
     'Every completionMentionUserIds entry must be a Discord snowflake.',
   ]);
+});
+
+test('Discord connection and REST response timeouts are never shorter than five minutes', () => {
+  assert.deepEqual(resolveDiscordTimeoutConfig({
+    discordRestTimeoutMs: 30_000,
+    discordConnectTimeoutMs: 10_000,
+  }), {
+    discordRestTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
+    discordConnectTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
+  });
+  assert.deepEqual(resolveDiscordTimeoutConfig({
+    discordRestTimeoutMs: 600_000,
+    discordConnectTimeoutMs: 450_000,
+  }), {
+    discordRestTimeoutMs: 600_000,
+    discordConnectTimeoutMs: 450_000,
+  });
 });

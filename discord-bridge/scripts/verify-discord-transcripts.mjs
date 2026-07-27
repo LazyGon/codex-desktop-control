@@ -4,6 +4,7 @@ import process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { AppServerClient } from '../src/app-server-client.mjs';
 import { dataDir, loadConfig } from '../src/config.mjs';
+import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
 import { extractLocalFileReferences } from '../src/local-file-share.mjs';
 import {
   completionTextFromSession,
@@ -19,7 +20,11 @@ if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 
 const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
 const runtime = JSON.parse(fs.readFileSync(path.join(dataDir, 'runtime.json'), 'utf8'));
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const discordRestAgent = createDiscordRestAgent(config);
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  rest: discordRestOptions(config, discordRestAgent),
+});
 const codex = new AppServerClient(runtime.codex?.endpoint);
 const errors = [];
 const stats = {
@@ -74,10 +79,10 @@ async function fetchHistory(channel) {
 }
 
 const timeout = setTimeout(() => {
-  process.stderr.write('Discord transcript verification timed out after 120 seconds.\n');
+  process.stderr.write('Discord transcript verification timed out after 300 seconds.\n');
   client.destroy();
   process.exitCode = 1;
-}, 120_000);
+}, 300_000);
 
 try {
   await client.login(token);
@@ -409,4 +414,5 @@ try {
   clearTimeout(timeout);
   codex.close();
   client.destroy();
+  await discordRestAgent.close();
 }

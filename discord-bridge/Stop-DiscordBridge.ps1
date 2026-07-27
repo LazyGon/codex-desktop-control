@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 15
+    [int]$TimeoutSeconds = 300
 )
 
 Set-StrictMode -Version Latest

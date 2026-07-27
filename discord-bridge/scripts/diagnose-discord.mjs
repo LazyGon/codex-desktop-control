@@ -1,17 +1,24 @@
 import process from 'node:process';
 import { Client, GatewayIntentBits, PermissionFlagsBits } from 'discord.js';
+import { loadConfig } from '../src/config.mjs';
+import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
 
 const targetGuildId = process.argv[2];
 const targetChannelId = process.argv[3];
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const config = loadConfig();
+const discordRestAgent = createDiscordRestAgent(config);
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  rest: discordRestOptions(config, discordRestAgent),
+});
 const timeout = setTimeout(() => {
-  process.stderr.write('Discord Gateway readiness timed out after 30 seconds.\n');
+  process.stderr.write('Discord Gateway readiness timed out after 300 seconds.\n');
   client.destroy();
   process.exitCode = 1;
-}, 30_000);
+}, 300_000);
 
 try {
   await client.login(token);
@@ -78,4 +85,5 @@ try {
 } finally {
   clearTimeout(timeout);
   client.destroy();
+  await discordRestAgent.close();
 }

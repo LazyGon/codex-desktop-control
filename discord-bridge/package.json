@@ -16,7 +16,8 @@
     "verify:transcripts": "node scripts/verify-discord-transcripts.mjs"
   },
   "dependencies": {
-    "discord.js": "14.27.0"
+    "discord.js": "14.27.0",
+    "undici": "6.27.0"
   },
   "devDependencies": {
     "ws": "8.21.1"

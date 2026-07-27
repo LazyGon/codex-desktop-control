@@ -170,6 +170,8 @@ try {
         initialSnapshotMessages = 16
         liveUpdateIntervalMs = 2500
         taskSyncIntervalMs = 30000
+        discordRestTimeoutMs = 300000
+        discordConnectTimeoutMs = 300000
         plainMessageInputEnabled = [bool]$EnablePlainMessageInput
         autoStartSharedDesktop = $true
         sharedLauncherPath = [IO.Path]::GetFullPath($sharedLauncherPath)
@@ -217,7 +219,7 @@ try {
                 [ref]$runningPid)
         }
         if ($runningPid -gt 0 -and (Get-Process -Id $runningPid -ErrorAction SilentlyContinue)) {
-            & $stopScript -TimeoutSeconds 30
+            & $stopScript -TimeoutSeconds 300
         }
     }
 

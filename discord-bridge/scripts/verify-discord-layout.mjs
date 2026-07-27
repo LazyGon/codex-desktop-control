@@ -9,6 +9,7 @@ import {
   PermissionFlagsBits,
 } from 'discord.js';
 import { dataDir, loadConfig } from '../src/config.mjs';
+import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
 import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
 import {
   projectDescriptorForThread,
@@ -21,12 +22,16 @@ if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 
 const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
 const desktopProjects = readDesktopProjectSnapshot(config.desktopGlobalStatePath);
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const discordRestAgent = createDiscordRestAgent(config);
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  rest: discordRestOptions(config, discordRestAgent),
+});
 const timeout = setTimeout(() => {
-  process.stderr.write('Discord layout verification timed out after 60 seconds.\n');
+  process.stderr.write('Discord layout verification timed out after 300 seconds.\n');
   client.destroy();
   process.exitCode = 1;
-}, 60_000);
+}, 300_000);
 
 try {
   await client.login(token);
@@ -273,4 +278,5 @@ try {
 } finally {
   clearTimeout(timeout);
   client.destroy();
+  await discordRestAgent.close();
 }

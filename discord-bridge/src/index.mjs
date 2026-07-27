@@ -13,6 +13,7 @@ import {
 } from './config.mjs';
 import { CodexService } from './codex-service.mjs';
 import { DiscordController } from './discord-controller.mjs';
+import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
 import { StateStore } from './state-store.mjs';
 import { appendJsonLine, atomicWriteJson, nowIso } from './util.mjs';
 
@@ -58,11 +59,12 @@ if (config.plainMessageInputEnabled || config.textTransferEnabled) {
   gatewayIntents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
 }
 
+const discordRestAgent = createDiscordRestAgent(config);
 const client = new Client({
   intents: gatewayIntents,
   partials: [Partials.Channel, Partials.Message],
   allowedMentions: { parse: [] },
-  rest: { timeout: config.discordRestTimeoutMs },
+  rest: discordRestOptions(config, discordRestAgent),
 });
 const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
 const controller = new DiscordController({ client, codex, stateStore, config, logDir });
@@ -94,8 +96,19 @@ async function shutdown(reason, exitCode = 0) {
   writeRuntime('stopping', { reason });
   clearInterval(runtimeTimer);
   clearInterval(stopTimer);
+  const controllerStop = controller.stop();
   await codex.stop().catch((error) => appendJsonLine(processLog, 'codex-stop-error', { error: error.message }));
+  await controllerStop.catch((error) => appendJsonLine(
+    processLog,
+    'controller-stop-error',
+    { error: error.message },
+  ));
   client.destroy();
+  await discordRestAgent.close().catch((error) => appendJsonLine(
+    processLog,
+    'discord-agent-close-error',
+    { error: error.message },
+  ));
   try { fs.unlinkSync(lockPath); } catch {}
   try { fs.unlinkSync(stopRequestPath); } catch {}
   writeRuntime('stopped', { reason, stoppedAt: nowIso() });

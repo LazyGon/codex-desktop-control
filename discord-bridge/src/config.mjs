@@ -17,6 +17,8 @@ const defaultCodexStateRoot = String(process.env.CODEX_HOME ?? '').trim()
   ? path.resolve(process.env.CODEX_HOME)
   : path.join(os.homedir(), '.codex');
 
+export const MIN_DISCORD_NETWORK_TIMEOUT_MS = 300_000;
+
 const defaults = {
   controlCategoryName: 'Codex Control',
   archiveCategoryName: 'Codex Archived',
@@ -36,7 +38,8 @@ const defaults = {
   initialSnapshotMessages: 16,
   liveUpdateIntervalMs: 2500,
   taskSyncIntervalMs: 30_000,
-  discordRestTimeoutMs: 120_000,
+  discordRestTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
+  discordConnectTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
   plainMessageInputEnabled: false,
   inputAttachmentMaxBytes: 512_000_000,
   inputAttachmentTotalMaxBytes: 512_000_000,
@@ -51,6 +54,19 @@ const defaults = {
   desktopGlobalStatePath: path.join(defaultCodexStateRoot, '.codex-global-state.json'),
   appServerUrl: null,
 };
+
+export function resolveDiscordTimeoutConfig(config) {
+  const atLeastMinimum = (value) => {
+    if (value == null) return MIN_DISCORD_NETWORK_TIMEOUT_MS;
+    if (!Number.isInteger(value)) return value;
+    return Math.max(value, MIN_DISCORD_NETWORK_TIMEOUT_MS);
+  };
+  return {
+    ...config,
+    discordRestTimeoutMs: atLeastMinimum(config.discordRestTimeoutMs),
+    discordConnectTimeoutMs: atLeastMinimum(config.discordConnectTimeoutMs),
+  };
+}
 
 export function resolveAuthorizationConfig(config) {
   const normalizeIds = (values) => [...new Set((values ?? []).filter(Boolean))];
@@ -94,7 +110,7 @@ export function authorizationConfigErrors(config) {
 export function loadConfig() {
   const raw = readJsonIfPresent(configPath);
   if (!raw) throw new Error(`Missing or invalid configuration: ${configPath}`);
-  const config = resolveAuthorizationConfig({ ...defaults, ...raw });
+  const config = resolveDiscordTimeoutConfig(resolveAuthorizationConfig({ ...defaults, ...raw }));
   if (!raw.initialSnapshotMessages && raw.catchupMessages) config.initialSnapshotMessages = raw.catchupMessages;
   if (!raw.taskSyncIntervalMs && raw.autoCatchupIntervalMs) config.taskSyncIntervalMs = raw.autoCatchupIntervalMs;
   if (config.sharedLauncherPath && !path.isAbsolute(config.sharedLauncherPath)) {
@@ -123,9 +139,14 @@ export function loadConfig() {
     errors.push('taskSyncIntervalMs must be an integer of at least 10000.');
   }
   if (!Number.isInteger(config.discordRestTimeoutMs)
-    || config.discordRestTimeoutMs < 15_000
+    || config.discordRestTimeoutMs < MIN_DISCORD_NETWORK_TIMEOUT_MS
     || config.discordRestTimeoutMs > 900_000) {
-    errors.push('discordRestTimeoutMs must be an integer from 15000 to 900000.');
+    errors.push('discordRestTimeoutMs must be an integer from 300000 to 900000.');
+  }
+  if (!Number.isInteger(config.discordConnectTimeoutMs)
+    || config.discordConnectTimeoutMs < MIN_DISCORD_NETWORK_TIMEOUT_MS
+    || config.discordConnectTimeoutMs > 900_000) {
+    errors.push('discordConnectTimeoutMs must be an integer from 300000 to 900000.');
   }
   if (!Number.isInteger(config.initialSnapshotMessages)
     || config.initialSnapshotMessages < 2

@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WebSocketServer } from 'ws';
-import { AppServerClient } from '../src/app-server-client.mjs';
+import {
+  APP_SERVER_OPERATION_TIMEOUT_MS,
+  AppServerClient,
+} from '../src/app-server-client.mjs';
 
 test('AppServerClient handles responses, notifications, and server requests', async (context) => {
   const server = new WebSocketServer({ port: 0 });
@@ -27,6 +30,7 @@ test('AppServerClient handles responses, notifications, and server requests', as
   });
 
   const client = new AppServerClient(url);
+  assert.equal(client.requestTimeoutMs, APP_SERVER_OPERATION_TIMEOUT_MS);
   context.after(() => {
     client.close();
     server.close();

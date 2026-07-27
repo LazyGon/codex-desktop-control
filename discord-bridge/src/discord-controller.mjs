@@ -122,6 +122,41 @@ function taskTitleFromChannelName(channelName) {
   return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
 }
 
+export function managedProjectCategoryCleanupPlan(categories, active) {
+  const occupied = categories.filter((category) => category.children.cache.size > 0);
+  if (!active) {
+    return occupied.length > 0
+      ? { keep: categories, remove: [], removeProject: false }
+      : { keep: [], remove: categories, removeProject: true };
+  }
+  const keep = occupied.length > 0 ? occupied : categories.slice(0, 1);
+  const keepIds = new Set(keep.map((category) => category.id));
+  return {
+    keep,
+    remove: categories.filter((category) => !keepIds.has(category.id)),
+    removeProject: false,
+  };
+}
+
+export function completionRecoveryCandidate(binding) {
+  const entries = Object.entries(binding?.turnMessages ?? {});
+  const lastCompletedTurnId = binding?.lastCompletedTurnId ?? null;
+  const newerInProgress = entries
+    .filter(([turnId, record]) => record?.status === 'inProgress'
+      && (!lastCompletedTurnId || turnId > lastCompletedTurnId))
+    .map(([turnId]) => turnId)
+    .sort()
+    .at(-1);
+  if (newerInProgress) return newerInProgress;
+  if (!lastCompletedTurnId) return null;
+  const latestRecord = binding.turnMessages?.[lastCompletedTurnId];
+  if (!latestRecord || latestRecord.status === 'inProgress') return null;
+  if (!latestRecord.cardMessageId || !(latestRecord.finalMessageIds?.length > 0)) {
+    return lastCompletedTurnId;
+  }
+  return null;
+}
+
 function projectArchiveVolumeText(config) {
   const volume = formatFileSize(config.fileShareChunkBytes ?? 7_500_000);
   return `source/archiveの総量上限は設けず、${volume}以下のvolumeへ分割して1件ずつ送信します。容量に応じて作成・送信に時間がかかります。`;
@@ -173,7 +208,7 @@ export class DiscordController {
         maxFileBytes: config.inputAttachmentMaxBytes ?? 512_000_000,
         maxTotalBytes: config.inputAttachmentTotalMaxBytes ?? 512_000_000,
         maxCount: config.inputAttachmentMaxCount ?? 10,
-        timeoutMs: config.discordRestTimeoutMs ?? 120_000,
+        timeoutMs: config.discordRestTimeoutMs ?? 300_000,
       },
     );
     this.textTransferStore = textTransferStore ?? new TextTransferStore(
@@ -185,10 +220,15 @@ export class DiscordController {
     this.turnViews = new Map();
     this.recentUserInputs = [];
     this.taskSyncTimer = null;
+    this.taskSyncInitialTimer = null;
     this.taskSyncPromise = null;
     this.taskSyncDebounceTimer = null;
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
+    this.completionRecoveryJobs = new Map();
+    this.completionRetryBaseMs = config.completionRetryBaseMs ?? 1_000;
+    this.completionRetryMaxMs = config.completionRetryMaxMs ?? 300_000;
+    this.controllerShutdownTimeoutMs = config.controllerShutdownTimeoutMs ?? 300_000;
     this.recentHistoryRestoreJob = null;
     this.recentHistoryRestorePromise = null;
     this.notificationQueues = new Map();
@@ -212,6 +252,8 @@ export class DiscordController {
     this.canPinControlPanels = false;
     this.lastConnectionState = null;
     this.infrastructureReady = null;
+    this.stopping = false;
+    this.shutdownPromise = null;
   }
 
   attach() {
@@ -239,6 +281,56 @@ export class DiscordController {
       `購読復元失敗: ${event.binding.threadId}\n${event.error.message}`,
       'error',
     ));
+  }
+
+  stop() {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.stopping = true;
+    if (this.taskSyncTimer) clearInterval(this.taskSyncTimer);
+    if (this.taskSyncInitialTimer) clearTimeout(this.taskSyncInitialTimer);
+    if (this.taskSyncDebounceTimer) clearTimeout(this.taskSyncDebounceTimer);
+    this.taskSyncTimer = null;
+    this.taskSyncInitialTimer = null;
+    this.taskSyncDebounceTimer = null;
+    for (const view of this.turnViews.values()) {
+      if (view.timer) clearTimeout(view.timer);
+      view.timer = null;
+    }
+    const recoveryJobs = [...this.completionRecoveryJobs.values()];
+    for (const job of recoveryJobs) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.completionRecoveryJobs.clear();
+    const pending = [
+      ['task-sync', this.taskSyncPromise],
+      ['transcript-tail', this.transcriptSyncTail],
+      ['recent-history', this.recentHistoryRestorePromise],
+      ...[...this.notificationQueues].map(([key, promise]) => [`notification:${key}`, promise]),
+      ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
+      ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
+      ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
+      ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
+      ...recoveryJobs.map((job) => [`completion:${job.threadId}:${job.turnId ?? 'latest'}`, job.promise]),
+    ].filter(([, promise]) => Boolean(promise));
+    const unsettled = new Set(pending.map(([name]) => name));
+    this.#log('controller-stop-wait', { pending: [...unsettled] });
+    const settlement = Promise.allSettled(pending.map(([name, promise]) => Promise.resolve(promise)
+      .finally(() => unsettled.delete(name))));
+    this.shutdownPromise = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.#log('controller-stop-timeout', {
+          timeoutMs: this.controllerShutdownTimeoutMs,
+          pending: [...unsettled],
+        });
+        resolve({ timedOut: true, pending: [...unsettled] });
+      }, this.controllerShutdownTimeoutMs);
+      timeout.unref?.();
+      settlement.then((results) => {
+        clearTimeout(timeout);
+        resolve({ timedOut: false, results });
+      });
+    });
+    return this.shutdownPromise;
   }
 
   async ready() {
@@ -2860,9 +2952,9 @@ export class DiscordController {
   }
 
   #startTaskSyncPolling() {
-    if (this.taskSyncTimer) return;
+    if (this.stopping || this.taskSyncTimer) return;
     const run = () => {
-      if (!this.codex.connected) return;
+      if (this.stopping || !this.codex.connected) return;
       this.#syncAllTasks().then((result) => {
         if (result.created > 0 || result.moved > 0) this.#postTaskSyncSummary(result).catch(() => {});
       }).catch((error) => {
@@ -2872,8 +2964,11 @@ export class DiscordController {
     };
     this.taskSyncTimer = setInterval(run, this.config.taskSyncIntervalMs);
     this.taskSyncTimer.unref?.();
-    const initialTimer = setTimeout(run, 5_000);
-    initialTimer.unref?.();
+    this.taskSyncInitialTimer = setTimeout(() => {
+      this.taskSyncInitialTimer = null;
+      run();
+    }, 5_000);
+    this.taskSyncInitialTimer.unref?.();
   }
 
   async #syncAllTasks() {
@@ -3398,17 +3493,22 @@ export class DiscordController {
       .map((binding) => binding.projectKey));
     let removed = 0;
     for (const [projectKey, project] of Object.entries(state.projectCategories ?? {})) {
-      if (activeProjectKeys.has(projectKey)) continue;
       const categories = (project.categoryIds ?? [])
         .map((categoryId) => context.channels.get(categoryId))
         .filter((category) => category?.type === ChannelType.GuildCategory);
-      if (categories.some((category) => category.children.cache.size > 0)) continue;
-      for (const category of categories) {
+      const plan = managedProjectCategoryCleanupPlan(categories, activeProjectKeys.has(projectKey));
+      for (const category of plan.remove) {
         await category.delete('Remove unused Codex project category after task synchronization');
         context.channels.delete(category.id);
         removed += 1;
       }
-      this.stateStore.removeProjectCategory(projectKey);
+      if (plan.removeProject) {
+        this.stateStore.removeProjectCategory(projectKey);
+      } else if (plan.keep.length !== (project.categoryIds ?? []).length) {
+        this.stateStore.setProjectCategory(projectKey, {
+          categoryIds: plan.keep.map((category) => category.id),
+        });
+      }
     }
 
     state = this.stateStore.snapshot();
@@ -3485,6 +3585,17 @@ export class DiscordController {
       subscribe: !archived && (!existingBinding || existingBinding.archived),
     });
     await this.#ensureTaskPanel(thread, channel, archived);
+    const incompleteTurnId = completionRecoveryCandidate(existingBinding);
+    if (!archived
+      && thread.status?.type !== 'active'
+      && (existingBinding?.taskStatus === 'active' || incompleteTurnId)) {
+      this.#scheduleCompletionRecovery(
+        thread.id,
+        incompleteTurnId,
+        'task-sync-detected-incomplete-completion',
+        0,
+      );
+    }
     if (created || (existingBinding?.transcriptVersion ?? 0) < 11) {
       if (!this.transcriptSyncPromises.has(thread.id)) {
         this.#log('task-transcript-sync-scheduled', {
@@ -4152,6 +4263,7 @@ export class DiscordController {
     recentSinceMs = null,
     includeHistoricalDetails = false,
   } = {}) {
+    if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
     const binding = this.stateStore.binding(threadId);
     if (!binding) throw new Error(`Task is not bound: ${threadId}`);
     const channel = knownChannel ?? await this.client.channels.fetch(binding.channelId);
@@ -4212,11 +4324,13 @@ export class DiscordController {
     const latestCompleted = completedTurns.at(-1);
     if (!activeOnly) {
       for (const turn of completedTurns) {
+        if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
         await this.#ensureTurnUserMessages(binding, turn, channel, messages);
         const detailItems = includeHistoricalDetails
           ? historicalAssistantItems(turn)
           : requiredByTurn.get(turn.id) ?? [];
         for (const item of detailItems) {
+          if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
           await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
         }
         const finalText = finalTextFromTurn(
@@ -4239,6 +4353,7 @@ export class DiscordController {
         ? historicalAssistantItems(activeTurn)
         : requiredByTurn.get(activeTurn.id) ?? [];
       for (const item of activeDetailItems) {
+        if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
         if (`${activeTurn.id}:${item.id}` === activeMessageKey) continue;
         await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
       }
@@ -4326,7 +4441,9 @@ export class DiscordController {
   async #readInternalTextAttachment(attachment) {
     const maximumBytes = 5_000_000;
     if (attachment.size > maximumBytes) throw new Error('カード本文添付が大きすぎます。');
-    const response = await fetch(attachment.url, { signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(attachment.url, {
+      signal: AbortSignal.timeout(this.config.discordRestTimeoutMs ?? 300_000),
+    });
     if (!response.ok) throw new Error(`カード本文添付を取得できませんでした: HTTP ${response.status}`);
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.length > maximumBytes) throw new Error('カード本文添付が大きすぎます。');
@@ -4338,6 +4455,7 @@ export class DiscordController {
   }
 
   async #handleCodexNotification(message) {
+    const threadId = message.params?.threadId ?? message.params?.thread?.id;
     try {
       if (message.method === 'serverRequest/resolved') {
         const record = [...this.pendingRequests.values()].find((candidate) => String(candidate.request.id) === String(message.params.requestId));
@@ -4348,7 +4466,6 @@ export class DiscordController {
         if (this.#isSyncableThread(message.params?.thread)) this.#scheduleTaskSync('thread/started');
         return;
       }
-      const threadId = message.params?.threadId ?? message.params?.thread?.id;
       if (!threadId) return;
       if (['thread/archived', 'thread/unarchived', 'thread/name/updated'].includes(message.method)) {
         this.#scheduleTaskSync(message.method);
@@ -4392,10 +4509,102 @@ export class DiscordController {
       }
     } catch (error) {
       this.#log('notification-handler-error', { method: message.method, error: error.stack ?? error.message });
+      if (message.method === 'turn/completed') {
+        this.#scheduleCompletionRecovery(
+          threadId,
+          message.params?.turn?.id ?? message.params?.turnId ?? null,
+          'turn-completed-handler-error',
+        );
+      }
     }
   }
 
+  #clearCompletionRecovery(threadId, turnId) {
+    for (const [key, job] of this.completionRecoveryJobs) {
+      if (job.threadId !== threadId || (turnId && job.turnId && job.turnId !== turnId)) continue;
+      if (job.timer) clearTimeout(job.timer);
+      this.completionRecoveryJobs.delete(key);
+    }
+  }
+
+  #scheduleCompletionRecovery(threadId, turnId = null, reason = 'unspecified', delayMs = null) {
+    if (this.stopping || !threadId || typeof this.codex.readThread !== 'function') return;
+    const key = `${threadId}:${turnId ?? 'latest'}`;
+    if (this.completionRecoveryJobs.has(key)) return;
+    const job = {
+      threadId,
+      turnId,
+      reason,
+      attempts: 0,
+      timer: null,
+      promise: null,
+    };
+    this.completionRecoveryJobs.set(key, job);
+
+    const run = async () => {
+      job.timer = null;
+      job.attempts += 1;
+      try {
+        const binding = this.stateStore.binding(threadId);
+        if (!binding || binding.archived) {
+          this.completionRecoveryJobs.delete(key);
+          return;
+        }
+        const result = await this.codex.readThread(threadId);
+        const turns = result?.thread?.turns ?? [];
+        const turn = turnId
+          ? turns.find((candidate) => candidate.id === turnId)
+          : [...turns].reverse().find((candidate) => candidate.status !== 'inProgress');
+        if (!turn || turn.status === 'inProgress') {
+          throw new Error(`Completed turn is not persisted yet: ${turnId ?? 'latest'}`);
+        }
+        await this.#turnCompleted(binding, { threadId, turn });
+        this.completionRecoveryJobs.delete(key);
+        this.#log('completion-recovery-completed', {
+          threadId,
+          turnId: turn.id,
+          reason,
+          attempts: job.attempts,
+        });
+      } catch (error) {
+        if (this.completionRecoveryJobs.get(key) !== job) return;
+        if (this.stopping) {
+          this.completionRecoveryJobs.delete(key);
+          return;
+        }
+        const retryDelayMs = Math.min(
+          this.completionRetryMaxMs,
+          this.completionRetryBaseMs * (2 ** Math.min(job.attempts, 8)),
+        );
+        this.#log('completion-recovery-retry', {
+          threadId,
+          turnId,
+          reason,
+          attempts: job.attempts,
+          retryDelayMs,
+          error: error.stack ?? error.message,
+        });
+        job.timer = setTimeout(() => {
+          job.promise = run();
+        }, retryDelayMs);
+        job.timer.unref?.();
+      }
+    };
+
+    this.#log('completion-recovery-scheduled', {
+      threadId,
+      turnId,
+      reason,
+      delayMs: delayMs ?? this.completionRetryBaseMs,
+    });
+    job.timer = setTimeout(() => {
+      job.promise = run();
+    }, delayMs ?? this.completionRetryBaseMs);
+    job.timer.unref?.();
+  }
+
   #queueCodexNotification(message) {
+    if (this.stopping) return;
     const threadId = message.params?.threadId ?? message.params?.thread?.id ?? '__global__';
     const previous = this.notificationQueues.get(threadId) ?? Promise.resolve();
     const queued = previous.then(() => this.#handleCodexNotification(message));
@@ -4406,7 +4615,7 @@ export class DiscordController {
   }
 
   #scheduleTaskSync(reason) {
-    if (this.taskSyncDebounceTimer) return;
+    if (this.stopping || this.taskSyncDebounceTimer) return;
     this.taskSyncDebounceTimer = setTimeout(() => {
       this.taskSyncDebounceTimer = null;
       this.#syncAllTasks().catch((error) => {
@@ -4640,6 +4849,7 @@ export class DiscordController {
       }
       this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
     }
+    this.#clearCompletionRecovery(binding.threadId, turn.id);
     this.turnViews.delete(`${binding.threadId}:${turn.id}`);
     this.#scheduleTaskSync('turn/completed');
   }
@@ -5146,12 +5356,19 @@ export class DiscordController {
     const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
     if (!channel) return;
     const latestBinding = this.stateStore.binding(binding.threadId);
-    const needsHistory = (latestBinding?.transcriptVersion ?? 0) < 11 || missedCompletion?.needsCompletionMessage;
+    const needsHistory = (latestBinding?.transcriptVersion ?? 0) < 11;
     const hasActiveTurn = (thread.turns ?? []).some((turn) => turn.status === 'inProgress');
     if (needsHistory) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });
     } else if (hasActiveTurn) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel, activeOnly: true });
+    }
+    if (missedCompletion?.needsCompletionMessage && missedCompletion.turn?.id) {
+      await this.#turnCompleted(
+        this.stateStore.binding(binding.threadId) ?? latestBinding,
+        { threadId: binding.threadId, turn: missedCompletion.turn },
+      );
+      return;
     }
     if (missedCompletion?.turn?.id) {
       await this.#repostTaskPanelAfterCompletion(binding.threadId, missedCompletion.turn.id, channel).catch((error) => {

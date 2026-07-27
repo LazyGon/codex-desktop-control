@@ -6,9 +6,108 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ChannelType } from 'discord.js';
-import { DiscordController } from '../src/discord-controller.mjs';
+import {
+  completionRecoveryCandidate,
+  DiscordController,
+  managedProjectCategoryCleanupPlan,
+} from '../src/discord-controller.mjs';
 import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
+
+test('managed project category cleanup removes empty overflow categories but preserves occupied ones', () => {
+  const category = (id, children) => ({
+    id,
+    children: { cache: { size: children } },
+  });
+  const primary = category('primary', 3);
+  const occupiedOverflow = category('occupied-overflow', 1);
+  const emptyOverflow = category('empty-overflow', 0);
+
+  assert.deepEqual(
+    managedProjectCategoryCleanupPlan([primary, emptyOverflow], true),
+    { keep: [primary], remove: [emptyOverflow], removeProject: false },
+  );
+  assert.deepEqual(
+    managedProjectCategoryCleanupPlan([primary, occupiedOverflow, emptyOverflow], true),
+    {
+      keep: [primary, occupiedOverflow],
+      remove: [emptyOverflow],
+      removeProject: false,
+    },
+  );
+  assert.deepEqual(
+    managedProjectCategoryCleanupPlan([emptyOverflow], false),
+    { keep: [], remove: [emptyOverflow], removeProject: true },
+  );
+});
+
+test('completion recovery targets only a newer live record or a broken latest completion card', () => {
+  assert.equal(completionRecoveryCandidate({
+    lastCompletedTurnId: '019fa200',
+    turnMessages: {
+      '019f9500': { status: 'inProgress' },
+      '019fa200': { status: 'completed', cardMessageId: 'card', finalMessageIds: ['card'] },
+    },
+  }), null);
+  assert.equal(completionRecoveryCandidate({
+    lastCompletedTurnId: '019fa200',
+    turnMessages: {
+      '019fa200': { status: 'completed', cardMessageId: 'card', finalMessageIds: ['card'] },
+      '019fa300': { status: 'inProgress' },
+    },
+  }), '019fa300');
+  assert.equal(completionRecoveryCandidate({
+    lastCompletedTurnId: '019fa200',
+    turnMessages: {
+      '019fa200': { status: 'completed', cardMessageId: null, finalMessageIds: ['commentary'] },
+    },
+  }), '019fa200');
+});
+
+test('controller shutdown clears polling and recovery timers before Discord closes', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-stop-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  const codex = new EventEmitter();
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore: { snapshot: () => ({ infrastructure: {} }) },
+    config: {},
+    logDir: directory,
+  });
+  controller.taskSyncTimer = setInterval(() => {}, 60_000);
+  controller.taskSyncInitialTimer = setTimeout(() => {}, 60_000);
+  controller.taskSyncDebounceTimer = setTimeout(() => {}, 60_000);
+  const recoveryTimer = setTimeout(() => {}, 60_000);
+  controller.completionRecoveryJobs.set('thread:turn', { timer: recoveryTimer });
+
+  await controller.stop();
+
+  assert.equal(controller.stopping, true);
+  assert.equal(controller.taskSyncTimer, null);
+  assert.equal(controller.taskSyncInitialTimer, null);
+  assert.equal(controller.taskSyncDebounceTimer, null);
+  assert.equal(controller.completionRecoveryJobs.size, 0);
+});
+
+test('controller shutdown waits up to five minutes in production and reports a stuck operation', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-stop-timeout-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const controller = new DiscordController({
+    client: new EventEmitter(),
+    codex: new EventEmitter(),
+    stateStore: { snapshot: () => ({ infrastructure: {} }) },
+    config: { controllerShutdownTimeoutMs: 5 },
+    logDir: directory,
+  });
+  controller.taskSyncPromise = new Promise(() => {});
+
+  const result = await controller.stop();
+
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(result.pending, ['task-sync']);
+});
 
 test('control panel recent history button opens a maximum seven-day selector and confirms the chosen window', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-recent-history-ui-'));
@@ -65,7 +164,7 @@ test('control panel recent history button opens a maximum seven-day selector and
   assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
 });
 
-test('completed turns replace the pinned task panel below the final card exactly once', async (context) => {
+test('completed turns retry transient delivery failure and replace the pinned task panel exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -179,7 +278,18 @@ test('completed turns replace the pinned task panel below the final card exactly
       return message;
     },
   };
-  client.channels = { fetch: async () => channel };
+  let channelFetchAttempts = 0;
+  client.channels = {
+    fetch: async () => {
+      channelFetchAttempts += 1;
+      if (channelFetchAttempts === 1) {
+        const error = new Error('attempted address discord.com:443, timeout: 10000ms');
+        error.name = 'ConnectTimeoutError';
+        throw error;
+      }
+      return channel;
+    },
+  };
 
   const completionMessages = new Map();
   const completions = {
@@ -208,6 +318,8 @@ test('completed turns replace the pinned task panel below the final card exactly
       authorizedUserIds: ['user-1', 'executor-user'],
       completionMentionUserIds: ['subscriber-user'],
       liveUpdateIntervalMs: 10,
+      completionRetryBaseMs: 5,
+      completionRetryMaxMs: 10,
     },
     logDir: directory,
   });
@@ -236,6 +348,7 @@ test('completed turns replace the pinned task panel below the final card exactly
   }
 
   assert.equal(binding.lastPanelCompletionTurnId, 'turn-complete');
+  assert.ok(channelFetchAttempts >= 2);
   assert.equal(channelMessages.has('panel-old'), false);
   const panel = channelMessages.get(binding.controlPanelMessageId);
   assert.ok(panel);
