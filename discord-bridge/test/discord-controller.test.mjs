@@ -1772,6 +1772,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
   }
   assert.deepEqual(copied.deferReplyOptions, { ephemeral: true });
   assert.match(copied.lastReply.content, /Full assistant card text/);
+  assert.doesNotMatch(copied.lastReply.content, /カード本文/);
   assert.match(copied.lastReply.content, /全文は添付/);
   assert.equal(copied.lastReply.files[0].name, 'codex-card-assistant-card.txt');
   assert.equal(copied.lastReply.files[0].attachment.toString('utf8'), copyText);

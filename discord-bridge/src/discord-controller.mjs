@@ -1574,7 +1574,6 @@ export class DiscordController {
     const isLong = escaped.length > previewLimit;
     const preview = isLong ? `${escaped.slice(0, previewLimit)}\n…` : escaped;
     const options = messageOptions([
-      isLong ? '**カード本文（プレビュー）**' : '**カード本文**',
       '```text',
       preview,
       '```',
