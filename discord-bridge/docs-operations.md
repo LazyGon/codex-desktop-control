@@ -194,6 +194,11 @@ app-server reconnects, every non-archived task is resumed on the same server and
 from persisted history. Historical reconciliation backfills user cards and final
 assistant cards only. Commentary is captured while the turn is actively subscribed;
 already-persisted commentary cards are preserved by task, turn, and item identity.
+Transient gateway, REST, app-server, attachment-fetch, DNS, TCP, and TLS
+failures do not terminate the Bridge even if they reach the process error
+boundary. Initial Discord login and setup retry with exponential backoff capped
+at five minutes. Authentication, certificate, configuration, and programming
+errors remain fatal and rely on the scheduled-task restart policy.
 The confirmed `履歴復元` control is the only bounded exception: it can backfill
 commentary and available reasoning summaries for completed turns from the last
 1, 3, or 7 days across non-archived managed tasks.

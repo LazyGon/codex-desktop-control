@@ -12,10 +12,16 @@ import {
   requireBotToken,
 } from './config.mjs';
 import { CodexService } from './codex-service.mjs';
+import { isTransientCommunicationError } from './communication-error.mjs';
 import { DiscordController } from './discord-controller.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
 import { StateStore } from './state-store.mjs';
-import { appendJsonLine, atomicWriteJson, nowIso } from './util.mjs';
+import {
+  appendJsonLine,
+  atomicWriteJson,
+  nowIso,
+  sleep,
+} from './util.mjs';
 
 ensureRuntimeDirectories();
 const config = loadConfig();
@@ -89,6 +95,30 @@ function writeRuntime(phase, extra = {}) {
   });
 }
 
+function communicationRetryDelay(attempt) {
+  return Math.min(1_000 * (2 ** Math.min(Math.max(0, attempt - 1), 8)), 300_000);
+}
+
+async function waitForCommunicationRetry(delayMs) {
+  const deadline = Date.now() + delayMs;
+  while (!shuttingDown && Date.now() < deadline) {
+    if (fs.existsSync(stopRequestPath)) {
+      await shutdown('stop requested');
+      return false;
+    }
+    await sleep(Math.min(1_000, deadline - Date.now()));
+  }
+  return !shuttingDown;
+}
+
+function logRecoverableCommunicationError(source, error, extra = {}) {
+  appendJsonLine(processLog, 'recoverable-communication-error', {
+    source,
+    error: error?.stack ?? String(error),
+    ...extra,
+  });
+}
+
 async function shutdown(reason, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -119,38 +149,80 @@ const startupAt = nowIso();
 appendJsonLine(processLog, 'startup', { pid: process.pid, node: process.version });
 writeRuntime('starting');
 
-client.once('clientReady', async () => {
-  try {
-    await controller.ready();
-    codex.start().catch((error) => appendJsonLine(processLog, 'codex-loop-failed', { error: error.stack ?? error.message }));
-    writeRuntime('running');
-  } catch (error) {
-    appendJsonLine(processLog, 'discord-setup-failed', { error: error.stack ?? error.message });
-    await shutdown(`Discord setup failed: ${error.message}`, 1);
-  }
+client.once('clientReady', () => {
+  const initializeController = async () => {
+    let attempt = 0;
+    while (!shuttingDown) {
+      try {
+        await controller.ready();
+        codex.start().catch((error) => appendJsonLine(processLog, 'codex-loop-failed', { error: error.stack ?? error.message }));
+        writeRuntime('running');
+        return;
+      } catch (error) {
+        if (!isTransientCommunicationError(error)) {
+          appendJsonLine(processLog, 'discord-setup-failed', { error: error.stack ?? error.message });
+          await shutdown(`Discord setup failed: ${error.message}`, 1);
+          return;
+        }
+        attempt += 1;
+        const retryDelayMs = communicationRetryDelay(attempt);
+        logRecoverableCommunicationError('discord-setup', error, { attempt, retryDelayMs });
+        writeRuntime('starting', { setupRetryAttempt: attempt, setupRetryDelayMs: retryDelayMs });
+        if (!await waitForCommunicationRetry(retryDelayMs)) return;
+      }
+    }
+  };
+  initializeController().catch((error) => {
+    appendJsonLine(processLog, 'discord-setup-retry-failed', { error: error.stack ?? error.message });
+    shutdown('Discord setup retry loop failed', 1).catch(() => {});
+  });
 });
+
+async function loginDiscord() {
+  let attempt = 0;
+  while (!shuttingDown) {
+    try {
+      await client.login(token);
+      return;
+    } catch (error) {
+      if (!isTransientCommunicationError(error)) {
+        appendJsonLine(processLog, 'discord-login-failed', { error: error.message });
+        await shutdown(`Discord login failed: ${error.message}`, 1);
+        return;
+      }
+      attempt += 1;
+      const retryDelayMs = communicationRetryDelay(attempt);
+      logRecoverableCommunicationError('discord-login', error, { attempt, retryDelayMs });
+      writeRuntime('starting', { loginRetryAttempt: attempt, loginRetryDelayMs: retryDelayMs });
+      if (!await waitForCommunicationRetry(retryDelayMs)) return;
+    }
+  }
+}
 
 client.on('error', (error) => appendJsonLine(processLog, 'discord-error', { error: error.stack ?? error.message }));
 client.on('shardError', (error, shardId) => appendJsonLine(processLog, 'discord-shard-error', { shardId, error: error.message }));
 
-try {
-  await client.login(token);
-} catch (error) {
-  appendJsonLine(processLog, 'discord-login-failed', { error: error.message });
-  await shutdown(`Discord login failed: ${error.message}`, 1);
-}
+process.on('SIGINT', () => shutdown('SIGINT').catch(() => {}));
+process.on('SIGTERM', () => shutdown('SIGTERM').catch(() => {}));
+process.on('uncaughtException', (error) => {
+  if (isTransientCommunicationError(error)) {
+    logRecoverableCommunicationError('uncaughtException', error);
+    return;
+  }
+  appendJsonLine(processLog, 'uncaught-exception', { error: error.stack ?? error.message });
+  shutdown('uncaughtException', 1).catch(() => {});
+});
+process.on('unhandledRejection', (error) => {
+  if (isTransientCommunicationError(error)) {
+    logRecoverableCommunicationError('unhandledRejection', error);
+    return;
+  }
+  appendJsonLine(processLog, 'unhandled-rejection', { error: error?.stack ?? String(error) });
+});
+
+await loginDiscord();
 
 runtimeTimer = setInterval(() => writeRuntime(shuttingDown ? 'stopping' : 'running'), 5_000);
 stopTimer = setInterval(() => {
   if (fs.existsSync(stopRequestPath)) shutdown('stop requested').catch(() => {});
 }, 1_000);
-
-process.on('SIGINT', () => shutdown('SIGINT').catch(() => {}));
-process.on('SIGTERM', () => shutdown('SIGTERM').catch(() => {}));
-process.on('uncaughtException', (error) => {
-  appendJsonLine(processLog, 'uncaught-exception', { error: error.stack ?? error.message });
-  shutdown('uncaughtException', 1).catch(() => {});
-});
-process.on('unhandledRejection', (error) => {
-  appendJsonLine(processLog, 'unhandled-rejection', { error: error?.stack ?? String(error) });
-});

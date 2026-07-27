@@ -179,6 +179,13 @@ Completion post and notification message IDs are tracked separately so
 reconnect recovery can resend a missing notification without duplicating the
 task result.
 
+Transient communication failures are recoverable across the Discord gateway,
+Discord REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and
+TLS. Initial login/setup retries use exponential backoff capped at five
+minutes, and a network timeout reaching the process error boundary is logged
+without terminating the Bridge. Authentication, certificate, configuration,
+and programming errors remain fatal.
+
 No Discord project registration or catch-up command is required. The bridge
 paginates through active and archived task lists, reconciles categories every
 30 seconds and after reconnect, and reacts to task start, archive, unarchive,

@@ -15,6 +15,10 @@ Codex Desktop, local controller commands, and a private Discord remote UI.
 - `discord-bridge/`: persistent private Discord UI for task display, control,
   approvals, Desktop message mirroring, archive synchronization, reconnect
   recovery, and phone operation.
+  Transient failures across Discord gateway/REST, the Codex app-server,
+  attachment fetches, DNS, TCP, and TLS recover without terminating the
+  Bridge; authentication, certificate, configuration, and programming errors
+  remain fatal.
 - `Install.ps1`: installs both the shared Desktop launcher and Discord Bridge,
   then verifies that both Desktop UI and Discord are connected to the same
   app-server.

@@ -107,6 +107,12 @@ outbound connection to Discord.
   kill the task process.
 - Reconnects indefinitely, re-subscribes bound tasks, reconciles persisted
   message IDs with visible Discord IDs, and reports missed completions.
+- Treats transient communication failures across the Discord gateway, Discord
+  REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and TLS as
+  recoverable. Initial Discord login and setup retry with exponential backoff
+  up to 300 seconds; a network timeout reaching the process error boundary is
+  logged without terminating the Bridge. Authentication, certificate,
+  configuration, and programming errors remain fatal.
 - When completion reporting is enabled for the task, mentions the configured
   user with `タスクが完了しました。` on the first line in `codex-completions`,
   posts a one-line final-answer summary on the second line, and uses the bare
@@ -261,7 +267,9 @@ clamped to a minimum of 300 seconds. A failed `turn/completed` delivery is
 re-read from the app-server and retried idempotently, while periodic task sync
 also repairs stopped tasks whose Discord turn record is still `inProgress`.
 Codex app-server WebSocket establishment and operation requests also wait up to
-300 seconds before timing out.
+300 seconds before timing out. Transient timeout, disconnect, DNS, socket, and
+fetch errors share one recovery classification regardless of which transport
+reported them.
 
 Task status reconciliation does not wait for Discord's comparatively slow
 channel-name rate-limit bucket. Channel name/topic updates are coalesced per
