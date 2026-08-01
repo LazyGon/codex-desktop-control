@@ -226,6 +226,7 @@ export class DiscordController {
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
     this.completionRecoveryJobs = new Map();
+    this.completionNoticePromises = new Map();
     this.completionRetryBaseMs = config.completionRetryBaseMs ?? 1_000;
     this.completionRetryMaxMs = config.completionRetryMaxMs ?? 300_000;
     this.controllerShutdownTimeoutMs = config.controllerShutdownTimeoutMs ?? 300_000;
@@ -312,6 +313,7 @@ export class DiscordController {
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
+      ...[...this.completionNoticePromises].map(([key, promise]) => [`completion-notice:${key}`, promise]),
       ...recoveryJobs.map((job) => [`completion:${job.threadId}:${job.turnId ?? 'latest'}`, job.promise]),
     ].filter(([, promise]) => Boolean(promise));
     const unsettled = new Set(pending.map(([name]) => name));
@@ -4885,6 +4887,21 @@ export class DiscordController {
   }
 
   async #postCompletionNotice(completionMessage, finalText, threadId, turnId) {
+    const key = `${threadId}:${turnId}`;
+    const pending = this.completionNoticePromises.get(key);
+    if (pending) return pending;
+    const operation = this.#postCompletionNoticeOnce(completionMessage, finalText, threadId, turnId);
+    this.completionNoticePromises.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.completionNoticePromises.get(key) === operation) {
+        this.completionNoticePromises.delete(key);
+      }
+    }
+  }
+
+  async #postCompletionNoticeOnce(completionMessage, finalText, threadId, turnId) {
     if (this.stateStore.binding(threadId)?.completionReportsEnabled === false) return null;
     const { completions } = await this.infrastructureReady;
     const record = this.stateStore.turnRecord(threadId, turnId) ?? {};

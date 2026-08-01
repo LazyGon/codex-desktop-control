@@ -200,7 +200,7 @@ test('control panel recent history button opens a maximum seven-day selector and
   assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
 });
 
-test('completed turns retry transient delivery failure and replace the pinned task panel exactly once', async (context) => {
+test('completed turns retry transient delivery failure, deduplicate concurrent reports, and replace the pinned task panel exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -328,6 +328,7 @@ test('completed turns retry transient delivery failure and replace the pinned ta
   };
 
   const completionMessages = new Map();
+  let completionSendDelayMs = 0;
   const completions = {
     messages: {
       fetch: async (value) => (typeof value === 'string'
@@ -335,6 +336,9 @@ test('completed turns retry transient delivery failure and replace the pinned ta
         : collection(completionMessages)),
     },
     send: async (options) => {
+      if (completionSendDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, completionSendDelayMs));
+      }
       const message = {
         id: `completion-${completionMessages.size + 1}`,
         author: { id: 'bot-user', bot: true },
@@ -419,6 +423,40 @@ test('completed turns retry transient delivery failure and replace the pinned ta
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(binding.controlPanelMessageId, firstPanelId);
   assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === taskPanelMarker(binding.threadId)).length, 1);
+
+  completionMessages.clear();
+  delete binding.turnMessages['turn-complete'].completionNoticeMessageId;
+  binding.lastNotifiedCompletedTurnId = null;
+  binding.transcriptVersion = 11;
+  completionSendDelayMs = 20;
+  codex.emit('notification', notification);
+  codex.emit('subscriptionRestored', {
+    binding: structuredClone(binding),
+    thread: {
+      id: binding.threadId,
+      name: binding.name,
+      cwd: binding.cwd,
+      path: null,
+      status: { type: 'idle' },
+      turns: [notification.params.turn],
+    },
+    runtime: {},
+    missedCompletion: {
+      turn: notification.params.turn,
+      finalText: 'Finished.',
+      needsCompletionMessage: false,
+      needsCompletionNotice: true,
+    },
+  });
+  for (let attempt = 0; attempt < 100
+    && (controller.notificationQueues.size || controller.subscriptionSyncPromises.size); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(completionMessages.size, 1);
+  assert.equal(
+    binding.turnMessages['turn-complete'].completionNoticeMessageId,
+    [...completionMessages.keys()][0],
+  );
 
   binding.completionReportsEnabled = false;
   const suppressedNotification = {
