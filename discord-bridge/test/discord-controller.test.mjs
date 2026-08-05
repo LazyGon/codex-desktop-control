@@ -409,11 +409,11 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   const completionNotice = [...completionMessages.values()][0];
   assert.equal(
     completionNotice.content,
-    `<@subscriber-user> <@executor-user> タスクが完了しました。\n要約: Finished.\n${sent[finalIndex].url}`,
+    `<@subscriber-user> タスクが完了しました。\n要約: Finished.\n${sent[finalIndex].url}`,
   );
   assert.deepEqual(completionNotice.allowedMentions, {
     parse: [],
-    users: ['subscriber-user', 'executor-user'],
+    users: ['subscriber-user'],
   });
   assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);

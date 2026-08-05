@@ -5085,11 +5085,7 @@ export class DiscordController {
       this.stateStore.setTurnRecord(threadId, turnId, { completionNoticeMessageId: notice.id });
       return notice;
     }
-    const mentionUserIds = [...new Set([
-      ...this.completionMentionUserIds,
-      ...(record.executorUserIds ?? []),
-      record.executorUserId,
-    ].filter(Boolean))];
+    const mentionUserIds = this.completionMentionUserIds;
     notice = await completions.send({
       content: completionNoticeContent(mentionUserIds, completionMessage.url, finalText),
       allowedMentions: { parse: [], users: mentionUserIds },
