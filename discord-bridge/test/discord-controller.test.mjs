@@ -200,7 +200,7 @@ test('control panel recent history button opens a maximum seven-day selector and
   assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
 });
 
-test('completed turns retry transient delivery failure, deduplicate concurrent reports, and replace the pinned task panel exactly once', async (context) => {
+test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the pinned task panel exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -419,10 +419,39 @@ test('completed turns retry transient delivery failure, deduplicate concurrent r
   assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
   const firstPanelId = panel.id;
+  const finalizedAt = binding.turnMessages['turn-complete'].finalizedAt;
+  const sentCount = sent.length;
+  channelMessages.delete(liveCommentary.id);
   codex.emit('notification', notification);
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.equal(binding.controlPanelMessageId, firstPanelId);
   assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === taskPanelMarker(binding.threadId)).length, 1);
+  assert.equal(binding.turnMessages['turn-complete'].finalizedAt, finalizedAt);
+  assert.equal(sent.length, sentCount);
+  assert.deepEqual(binding.turnMessages['turn-complete'].assistantEntries['persisted-commentary'].messageIds, [liveCommentary.id]);
+
+  const restoredThread = {
+    id: binding.threadId,
+    name: binding.name,
+    cwd: binding.cwd,
+    path: null,
+    status: { type: 'active' },
+    turns: [notification.params.turn, { id: 'turn-active', status: 'inProgress', items: [] }],
+  };
+  binding.transcriptVersion = 11;
+  codex.readThread = async () => ({ thread: restoredThread });
+  codex.emit('subscriptionRestored', {
+    binding: structuredClone(binding),
+    thread: restoredThread,
+    runtime: {},
+    missedCompletion: null,
+  });
+  for (let attempt = 0; attempt < 100 && controller.subscriptionSyncPromises.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(sent.filter((message) => message.embeds[0]?.title === 'Codex message').length, 0);
 
   completionMessages.clear();
   delete binding.turnMessages['turn-complete'].completionNoticeMessageId;

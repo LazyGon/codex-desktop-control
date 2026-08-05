@@ -61,6 +61,8 @@ outbound connection to Discord.
   running card below the user card instead of waiting for the app-server echo.
   Historical and reconnect reconciliation does not backfill
   commentary cards; it synchronizes user messages and final answers only.
+  Completion recovery is serialized per turn and never recreates a missing
+  commentary card after that turn's final card has been persisted.
   `履歴復元` is the bounded, confirmation-protected exception described above.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
   only on the latest card. A past commentary card contains only its title,

@@ -226,6 +226,7 @@ export class DiscordController {
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
     this.completionRecoveryJobs = new Map();
+    this.turnCompletionPromises = new Map();
     this.completionNoticePromises = new Map();
     this.completionRetryBaseMs = config.completionRetryBaseMs ?? 1_000;
     this.completionRetryMaxMs = config.completionRetryMaxMs ?? 300_000;
@@ -315,6 +316,7 @@ export class DiscordController {
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
+      ...[...this.turnCompletionPromises].map(([key, promise]) => [`turn-completion:${key}`, promise]),
       ...[...this.completionNoticePromises].map(([key, promise]) => [`completion-notice:${key}`, promise]),
       ...recoveryJobs.map((job) => [`completion:${job.threadId}:${job.turnId ?? 'latest'}`, job.promise]),
     ].filter(([, promise]) => Boolean(promise));
@@ -3672,10 +3674,19 @@ export class DiscordController {
       subscribe: !archived && (!existingBinding || existingBinding.archived),
     });
     await this.#ensureTaskPanel(thread, channel, archived);
-    const incompleteTurnId = completionRecoveryCandidate(existingBinding);
+    const recoveryBinding = this.stateStore.binding(thread.id) ?? existingBinding;
+    const incompleteTurnId = completionRecoveryCandidate(recoveryBinding);
+    const completedDuringSyncId = recoveryBinding?.lastCompletedTurnId !== existingBinding?.lastCompletedTurnId
+      ? recoveryBinding?.lastCompletedTurnId
+      : null;
+    const completedDuringSync = completedDuringSyncId
+      ? this.stateStore.turnRecord(thread.id, completedDuringSyncId)
+      : null;
+    const staleActiveNeedsRecovery = existingBinding?.taskStatus === 'active'
+      && !(completedDuringSync?.finalizedAt && completedDuringSync.finalMessageIds?.length > 0);
     if (!archived
       && thread.status?.type !== 'active'
-      && (existingBinding?.taskStatus === 'active' || incompleteTurnId)) {
+      && (staleActiveNeedsRecovery || incompleteTurnId)) {
       this.#scheduleCompletionRecovery(
         thread.id,
         incompleteTurnId,
@@ -4413,9 +4424,7 @@ export class DiscordController {
       for (const turn of completedTurns) {
         if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
         await this.#ensureTurnUserMessages(binding, turn, channel, messages);
-        const detailItems = includeHistoricalDetails
-          ? historicalAssistantItems(turn)
-          : requiredByTurn.get(turn.id) ?? [];
+        const detailItems = includeHistoricalDetails ? historicalAssistantItems(turn) : [];
         for (const item of detailItems) {
           if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
           await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
@@ -4431,7 +4440,6 @@ export class DiscordController {
       // thread/read. Reconcile only the latest completed user cards here so a
       // reconnect converges without backfilling old commentary.
       await this.#ensureTurnUserMessages(binding, latestCompleted, channel, messages);
-      await this.#reconcileStableAssistantMessages(binding, latestCompleted, channel, messages);
     }
 
     if (activeTurn) {
@@ -4901,7 +4909,61 @@ export class DiscordController {
   }
 
   async #turnCompleted(binding, params) {
+    const turnId = params.turn?.id ?? params.turnId;
+    const key = `${binding.threadId}:${turnId}`;
+    const pending = this.turnCompletionPromises.get(key);
+    if (pending) return pending;
+    const operation = this.#turnCompletedOnce(binding, params);
+    this.turnCompletionPromises.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.turnCompletionPromises.get(key) === operation) {
+        this.turnCompletionPromises.delete(key);
+      }
+    }
+  }
+
+  async #turnCompletedOnce(binding, params) {
     const turn = params.turn;
+    const completedRecord = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
+    if (completedRecord.status !== 'inProgress'
+      && completedRecord.finalizedAt
+      && completedRecord.finalMessageIds?.[0]) {
+      const channel = await this.client.channels.fetch(binding.channelId);
+      const completionMessage = await channel.messages.fetch(completedRecord.finalMessageIds[0]).catch(() => null);
+      if (completionMessage) {
+        const finalText = completedRecord.finalText
+          || turn.error?.message
+          || 'このターンにはassistantメッセージが記録されていません。';
+        this.stateStore.setBinding(binding.threadId, {
+          lastCompletedTurnId: turn.id,
+          lastCompletionMessageId: completionMessage.id,
+          taskStatus: 'idle',
+        });
+        await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
+          this.#log('task-panel-completion-repost-failed', {
+            threadId: binding.threadId,
+            turnId: turn.id,
+            error: error.stack ?? error.message,
+          });
+        });
+        if (turn.status === 'completed') {
+          const notice = await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
+          if (!notice) {
+            this.#log('completion-notice-suppressed', {
+              threadId: binding.threadId,
+              turnId: turn.id,
+            });
+          }
+          this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
+        }
+        this.#clearCompletionRecovery(binding.threadId, turn.id);
+        this.turnViews.delete(`${binding.threadId}:${turn.id}`);
+        this.#scheduleTaskSync('turn/completed-idempotent');
+        return completionMessage;
+      }
+    }
     const view = this.#view(binding.threadId, turn.id, binding.channelId);
     view.status = turn.status;
     view.completedAt = Date.now();
