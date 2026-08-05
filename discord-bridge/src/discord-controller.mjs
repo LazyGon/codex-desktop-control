@@ -4574,6 +4574,25 @@ export class DiscordController {
       }
       const binding = this.stateStore.binding(threadId);
       if (!binding) return;
+      const turnId = message.params?.turnId ?? message.params?.turn?.id ?? null;
+      const turnRecord = turnId ? this.stateStore.turnRecord(threadId, turnId) : null;
+      const finalizedTurnUpdate = turnRecord?.status !== 'inProgress'
+        && turnRecord?.finalizedAt
+        && turnRecord?.finalMessageIds?.length > 0
+        && message.method !== 'turn/completed'
+        && (message.method === 'turn/started'
+          || message.method.startsWith('item/')
+          || message.method === 'turn/plan/updated'
+          || message.method === 'thread/tokenUsage/updated');
+      if (finalizedTurnUpdate) {
+        if (message.method === 'thread/tokenUsage/updated') {
+          this.stateStore.setBinding(threadId, { tokenUsage: message.params.tokenUsage });
+        }
+        if (!message.method.endsWith('/delta')) {
+          this.#log('finalized-turn-update-ignored', { threadId, turnId, method: message.method });
+        }
+        return;
+      }
       if (message.method === 'thread/settings/updated') {
         const settings = message.params.threadSettings ?? {};
         this.stateStore.setBinding(threadId, {

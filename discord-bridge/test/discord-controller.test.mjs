@@ -418,6 +418,23 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
+  const sentBeforeLateItem = sent.length;
+  codex.emit('notification', {
+    method: 'item/completed',
+    params: {
+      threadId: binding.threadId,
+      turnId: 'turn-complete',
+      item: { type: 'agentMessage', id: 'late-commentary', phase: 'commentary', text: 'Too late.' },
+    },
+  });
+  for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(sent.length, sentBeforeLateItem);
+  assert.equal(sent[finalIndex].embeds[0].title, 'Codex turn completed');
+  assert.equal(binding.turnMessages['turn-complete'].assistantEntries['late-commentary'], undefined);
+  assert.equal(binding.turnMessages['turn-complete'].status, 'completed');
+
   const firstPanelId = panel.id;
   const finalizedAt = binding.turnMessages['turn-complete'].finalizedAt;
   const sentCount = sent.length;
