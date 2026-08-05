@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ChannelType } from 'discord.js';
+import { ChannelType, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
 import {
   completionRecoveryCandidate,
   DiscordController,
@@ -611,7 +611,7 @@ test('task panel completion-report selection persists the task setting', async (
   assert.equal(binding.lastNotifiedCompletedTurnId, 'turn-missed');
 });
 
-test('ordinary allowed-user messages in bound task channels are delivered once', async (context) => {
+test('Discord-permitted non-operator messages in bound task channels are delivered once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -645,14 +645,18 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
       }));
     },
   };
-  const binding = { threadId: 'thread-1', channelId: 'task-channel', cwd: 'C:\\work', watchLevel: 'normal' };
+  const binding = {
+    threadId: 'thread-1', channelId: 'task-channel', cwd: 'C:\\work', watchLevel: 'normal', turnMessages: {},
+  };
   const stateStore = {
     binding: (threadId) => (threadId === 'thread-1' ? binding : null),
     bindingByChannel: (channelId) => (channelId === 'task-channel' ? binding : null),
     turnRecord: (threadId, turnId) => turnRecords.get(`${threadId}:${turnId}`) ?? null,
     setTurnRecord: (threadId, turnId, patch) => {
       const key = `${threadId}:${turnId}`;
-      turnRecords.set(key, { ...turnRecords.get(key), ...patch });
+      const next = { ...turnRecords.get(key), ...patch };
+      turnRecords.set(key, next);
+      binding.turnMessages[turnId] = next;
     },
     setBinding: () => {},
   };
@@ -665,6 +669,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
         ? channelMessages.get(value) ?? null
         : Object.assign(new Map(channelMessages), {
           last: () => [...channelMessages.values()].at(-1) ?? null,
+          find: (predicate) => [...channelMessages.values()].find(predicate),
         })),
     },
     send: async (options) => {
@@ -713,7 +718,10 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     guildId: 'guild-1',
     channelId: 'task-channel',
     webhookId: null,
-    author: { id: 'user-1', tag: 'user#0001', bot: false },
+    author: { id: 'task-member', tag: 'member#0001', bot: false },
+    memberPermissions: {
+      has: (permission) => [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages].includes(permission),
+    },
     content: 'run the requested task',
     attachments: new Map([
       ['attachment-image', {
@@ -775,6 +783,35 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.equal(originalDeleted, true);
   const userCard = sent.find((message) => message.embeds[0]?.title === 'User message');
   assert.ok(userCard);
+  const runningAfterInput = sent.at(-1);
+  assert.equal(runningAfterInput.embeds[0]?.title, 'Codex running');
+  assert.ok(sent.indexOf(runningAfterInput) > sent.indexOf(userCard));
+  const trailingCard = await channel.send({ embeds: [new EmbedBuilder().setTitle('Trailing test card')] });
+  binding.transcriptVersion = 11;
+  binding.runtimeSettings = {};
+  codex.readThread = async () => ({
+    thread: {
+      id: binding.threadId,
+      name: 'Task',
+      cwd: binding.cwd,
+      path: null,
+      status: { type: 'active' },
+      turns: [{ id: 'turn-1', status: 'inProgress', items: [] }],
+    },
+  });
+  codex.emit('subscriptionRestored', {
+    binding: structuredClone(binding),
+    thread: (await codex.readThread()).thread,
+    runtime: {},
+    missedCompletion: null,
+  });
+  for (let attempt = 0; attempt < 100 && controller.subscriptionSyncPromises.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const runningAfterRestore = sent.at(-1);
+  assert.equal(runningAfterRestore.embeds[0]?.title, 'Codex running');
+  assert.ok(sent.indexOf(runningAfterRestore) > sent.indexOf(trailingCard));
+  assert.notEqual(runningAfterRestore.id, runningAfterInput.id);
   assert.equal(userCard.embeds[0].color, 0xe67e22);
   assert.equal(userCard.embeds[0].description, 'run the requested task');
   assert.equal(userCard.components[0].components[0].custom_id, 'cx:copy:card');
@@ -784,7 +821,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     `\`${delivered.clientUserMessageId}\``,
   );
   assert.deepEqual(turnRecords.get('thread-1:turn-1').userMessageIds, [userCard.id]);
-  assert.deepEqual(turnRecords.get('thread-1:turn-1').executorUserIds, ['user-1']);
+  assert.deepEqual(turnRecords.get('thread-1:turn-1').executorUserIds, ['task-member']);
   assert.deepEqual(
     turnRecords.get('thread-1:turn-1').userEntries[delivered.clientUserMessageId].messageIds,
     [userCard.id],
@@ -795,6 +832,7 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     ...originalMessage,
     id: 'message-unauthorized',
     author: { id: 'user-2', tag: 'other#0002', bot: false },
+    memberPermissions: { has: () => false },
     content: 'do not deliver this prompt',
     reply: async (options) => { unauthorizedReplies.push(options); },
     delete: async () => { throw new Error('Unauthorized prompt must not be deleted.'); },
@@ -828,6 +866,57 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
   assert.match(unauthorizedCommand.lastReply.content, /拒否しました/);
   assert.equal(unauthorizedCommand.lastReply.ephemeral, true);
 
+  const permittedTaskCommand = {
+    ...unauthorizedCommand,
+    user: { id: 'task-member' },
+    memberPermissions: {
+      has: (permission) => [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages].includes(permission),
+    },
+    options: {
+      getSubcommand: () => 'help',
+      getSubcommandGroup: () => null,
+    },
+    lastReply: null,
+  };
+  client.emit('interactionCreate', permittedTaskCommand);
+  for (let attempt = 0; attempt < 50 && !permittedTaskCommand.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(permittedTaskCommand.lastReply.ephemeral, true);
+  assert.match(permittedTaskCommand.lastReply.content, /codex deliver/);
+
+  const deniedControlCommand = {
+    ...permittedTaskCommand,
+    options: {
+      getSubcommand: () => 'sync',
+      getSubcommandGroup: () => null,
+    },
+    lastReply: null,
+  };
+  client.emit('interactionCreate', deniedControlCommand);
+  for (let attempt = 0; attempt < 50 && !deniedControlCommand.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(deniedControlCommand.lastReply.content, /制御者権限/);
+
+  const deniedOtherTaskCommand = {
+    ...permittedTaskCommand,
+    options: {
+      getSubcommand: () => 'status',
+      getSubcommandGroup: () => null,
+      getString: (name) => (name === 'task' ? 'other-thread' : null),
+    },
+    deferred: false,
+    lastReply: null,
+    deferReply: async function deferReply() { this.deferred = true; },
+    editReply: async function editReply(options) { this.lastReply = options; },
+  };
+  client.emit('interactionCreate', deniedOtherTaskCommand);
+  for (let attempt = 0; attempt < 50 && !deniedOtherTaskCommand.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(deniedOtherTaskCommand.lastReply.content, /現在のタスク以外/);
+
   codex.emit('notification', {
     method: 'item/started',
     params: {
@@ -842,13 +931,21 @@ test('ordinary allowed-user messages in bound task channels are delivered once',
     },
   });
   for (let attempt = 0; attempt < 100
-    && !turnRecords.get('thread-1:turn-1')?.userEntries?.['user-item-1']; attempt += 1) {
+    && (controller.notificationQueues.size
+      || !turnRecords.get('thread-1:turn-1')?.userEntries?.['user-item-1']); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.deepEqual(turnRecords.get('thread-1:turn-1').userEntries['user-item-1'].messageIds, [userCard.id]);
+  const stableUserCards = [...channelMessages.values()]
+    .filter((message) => message.embeds?.[0]?.title === 'User message');
+  assert.equal(stableUserCards.length, 1);
+  const stableUserCard = stableUserCards[0];
+  assert.deepEqual(
+    turnRecords.get('thread-1:turn-1').userEntries['user-item-1'].messageIds,
+    [stableUserCard.id],
+  );
   assert.equal(turnRecords.get('thread-1:turn-1').userEntries[delivered.clientUserMessageId], undefined);
   assert.equal(
-    userCard.embeds[0].fields.find((field) => field.name === 'Message').value,
+    stableUserCard.embeds[0].fields.find((field) => field.name === 'Message').value,
     '`user-item-1`',
   );
   for (let attempt = 0; attempt < 100
@@ -1828,7 +1925,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
   for (let attempt = 0; attempt < 100 && !linked.lastReply; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  assert.deepEqual(linkedPickerOrder.slice(0, 2), ['defer', 'binding']);
+  assert.deepEqual(linkedPickerOrder.slice(0, 2), ['binding', 'defer']);
   linkedPickerOrder = null;
   const linkedOptions = linked.lastReply.components[0].toJSON().components[0].options;
   assert.equal(linkedOptions[0].label, 'cross-project');

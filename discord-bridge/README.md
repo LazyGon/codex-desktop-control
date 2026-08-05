@@ -57,7 +57,9 @@ outbound connection to Discord.
   duplicated when app-server echoes them back.
 - While an active turn is subscribed live, keeps one latest assistant card and
   freezes each previous commentary message as an immutable card when the next
-  message starts. Historical and reconnect reconciliation does not backfill
+  message starts. After each accepted user input, it immediately reposts the
+  running card below the user card instead of waiting for the app-server echo.
+  Historical and reconnect reconciliation does not backfill
   commentary cards; it synchronizes user messages and final answers only.
   `履歴復元` is the bounded, confirmation-protected exception described above.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
@@ -360,13 +362,16 @@ time is deferred before execution.
   the root `.git` directory or worktree gitfile after warning that Git history,
   remote URLs, hooks, configuration, and credentials may be exposed. It does
   not include ordinary working-tree files or nested repositories.
-- Ordinary-message input is accepted only in bound task channels or unbound
-  text channels inside a managed project category, from the configured guild
-  and a user in `authorizedUserIds` in `config/config.json`. Other users receive
-  a rejection and their content is never sent to Codex. Unbound control,
-  archive, and unrelated channels never create tasks. It requires Discord's
-  privileged Message Content Intent. Bot and webhook messages are ignored in
-  task channels.
+- Ordinary-message input in a bound task channel follows Discord's effective
+  channel permissions: a human with both `ViewChannel` and `SendMessages` may
+  execute that task. `authorizedUserIds` in `config/config.json` is the separate
+  Codex Remote operator list for control-plane commands and for creating a task
+  from the first message in an unbound managed-project channel. Other users are
+  rejected and their content is never sent to Codex. Unbound control, archive,
+  and unrelated channels never create tasks. It requires Discord's privileged
+  Message Content Intent. Bot and webhook messages are ignored in task channels.
+  Existing category permission overwrites remain owned by Discord administrators;
+  newly created managed categories copy the current control or parent category.
 - Incoming attachments are downloaded only from Discord's attachment URL after
   the guild and user checks pass. The Bridge does not execute them. Files are
   stored under `data/incoming-files/<task-id>/<Discord-message-id>/`, remain
@@ -381,10 +386,13 @@ time is deferred before execution.
   creates one numeric millisecond timestamp `.txt` file and removes the prior
   timestamped text file, then deletes the source Discord message. A failed
   local write leaves the Discord message in place.
-- Slash commands, buttons, selects, and modal submissions use the same
-  `authorizedUserIds` check. Completion recipients are configured independently
-  through `completionMentionUserIds`; each Discord prompt also records and
-  mentions its actual executor when that turn completes.
+- Slash commands and controls in the control plane require `authorizedUserIds`.
+  Task-channel commands, buttons, selects, and modal submissions accept either
+  an operator or a user with the same effective task-channel permissions. A
+  non-operator cannot target a different task by supplying its thread ID.
+  Completion recipients are configured independently through
+  `completionMentionUserIds`; each Discord prompt also records and mentions its
+  actual executor when that turn completes.
 - Mentions are disabled in general bot output. Completion notifications allow
   only the turn executors and configured `completionMentionUserIds`.
 - app-server remains loopback-only and is never tunneled to Discord or a LAN.

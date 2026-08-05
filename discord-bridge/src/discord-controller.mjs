@@ -235,6 +235,7 @@ export class DiscordController {
     this.notificationQueues = new Map();
     this.subscriptionSyncPromises = new Map();
     this.discordMessageQueues = new Map();
+    this.liveCardMovePromises = new Map();
     this.pendingChannelBindings = new Map();
     this.panelSyncPromises = new Map();
     this.projectCategoryPromises = new Map();
@@ -310,6 +311,7 @@ export class DiscordController {
       ...[...this.notificationQueues].map(([key, promise]) => [`notification:${key}`, promise]),
       ...[...this.subscriptionSyncPromises].map(([key, promise]) => [`subscription:${key}`, promise]),
       ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
+      ...[...this.liveCardMovePromises].map(([key, promise]) => [`live-card:${key}`, promise]),
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
@@ -374,6 +376,7 @@ export class DiscordController {
     const guild = await this.client.guilds.fetch(this.config.guildId);
     const channels = await guild.channels.fetch();
     const state = this.stateStore.snapshot();
+    this.canPinControlPanels = guild.members.me?.permissions.has(PermissionFlagsBits.PinMessages) ?? false;
     const completionNotificationsAlreadyConfigured = Boolean(state.infrastructure.completionsChannelId);
 
     let controlCategory = state.infrastructure.controlCategoryId
@@ -383,16 +386,18 @@ export class DiscordController {
       controlCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
         && [this.config.controlCategoryName, 'Codex Remote'].includes(channel.name));
     }
+    let controlCategoryCreated = false;
     if (!controlCategory) {
       controlCategory = await guild.channels.create({
         name: this.config.controlCategoryName,
         type: ChannelType.GuildCategory,
       });
+      controlCategoryCreated = true;
     }
     if (controlCategory.name !== this.config.controlCategoryName) {
       await controlCategory.setName(this.config.controlCategoryName, 'Codex Remote 2.0 control-plane migration');
     }
-    await this.#configurePrivateCategory(controlCategory, guild);
+    if (controlCategoryCreated) await this.#configurePrivateCategory(controlCategory, guild);
 
     const archiveCategories = (state.infrastructure.archiveCategoryIds ?? [])
       .map((categoryId) => channels.get(categoryId))
@@ -403,12 +408,13 @@ export class DiscordController {
       if (existingArchiveCategory) archiveCategories.push(existingArchiveCategory);
     }
     if (archiveCategories.length === 0) {
-      archiveCategories.push(await guild.channels.create({
+      const archiveCategory = await guild.channels.create({
         name: this.config.archiveCategoryName,
         type: ChannelType.GuildCategory,
-      }));
+      });
+      await this.#copyCategoryPermissions(controlCategory, archiveCategory, guild);
+      archiveCategories.push(archiveCategory);
     }
-    for (const category of archiveCategories) await this.#configurePrivateCategory(category, guild);
 
     let transferCategory = null;
     if (this.config.textTransferEnabled) {
@@ -419,11 +425,13 @@ export class DiscordController {
         transferCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
           && channel.name === this.config.transferCategoryName);
       }
+      let transferCategoryCreated = false;
       if (!transferCategory) {
         transferCategory = await guild.channels.create({
           name: this.config.transferCategoryName,
           type: ChannelType.GuildCategory,
         });
+        transferCategoryCreated = true;
       }
       if (transferCategory.name !== this.config.transferCategoryName) {
         await transferCategory.setName(
@@ -431,7 +439,9 @@ export class DiscordController {
           'Refresh the text-transfer category name',
         );
       }
-      await this.#configurePrivateCategory(transferCategory, guild);
+      if (transferCategoryCreated) {
+        await this.#copyCategoryPermissions(controlCategory, transferCategory, guild);
+      }
     }
 
     const ensureTextChannel = async (storedId, name, topic, parentCategory = controlCategory) => {
@@ -540,6 +550,22 @@ export class DiscordController {
         note: 'Control panels remain available but cannot be pinned until the bot is reauthorized.',
       });
     }
+  }
+
+  async #copyCategoryPermissions(source, target, guild) {
+    const overwrites = source?.permissionOverwrites?.cache
+      ? [...source.permissionOverwrites.cache.values()].map((overwrite) => ({
+        id: overwrite.id,
+        type: overwrite.type,
+        allow: overwrite.allow.bitfield,
+        deny: overwrite.deny.bitfield,
+      }))
+      : [];
+    if (overwrites.length === 0) {
+      await this.#configurePrivateCategory(target, guild);
+      return;
+    }
+    await target.permissionOverwrites.set(overwrites, 'Copy Codex Remote Discord permissions');
   }
 
   async #handleInteraction(interaction) {
@@ -682,7 +708,9 @@ export class DiscordController {
       project = this.#managedProjectForChannel(channel);
       if (!project) return;
     }
-    if (!this.#isAuthorizedUser(message.author.id)) {
+    const canExecuteTask = binding && this.#hasMessageExecutionPermission(message);
+    const canCreateTask = !binding && this.#isAuthorizedUser(message.author.id);
+    if (!canExecuteTask && !canCreateTask) {
       this.#log('unauthorized-message', {
         guildId: message.guildId,
         channelId: message.channelId,
@@ -728,6 +756,7 @@ export class DiscordController {
       );
       reservation.turnId ??= result.turnId;
       await this.#ensureReservedUserInputPosted(reservation);
+      await this.#moveLiveCardAfterReservedInput(reservation);
       await message.react('✅').catch(() => {});
       this.#log('plain-message-delivered', {
         messageId: message.id,
@@ -984,8 +1013,11 @@ export class DiscordController {
   }
 
   #authorized(interaction) {
+    const taskBinding = this.stateStore.bindingByChannel?.(interaction.channelId) ?? null;
+    const hasTaskPermission = Boolean(taskBinding)
+      && this.#hasDiscordExecutionPermission(interaction.memberPermissions);
     const allowed = interaction.guildId === this.config.guildId
-      && this.#isAuthorizedUser(interaction.user.id);
+      && (this.#isAuthorizedUser(interaction.user.id) || hasTaskPermission);
     if (!allowed) {
       this.#log('unauthorized-interaction', {
         guildId: interaction.guildId,
@@ -1004,6 +1036,19 @@ export class DiscordController {
 
   #isAuthorizedUser(userId) {
     return this.authorizedUserIds.includes(userId);
+  }
+
+  #hasDiscordExecutionPermission(permissions) {
+    return Boolean(permissions?.has?.(PermissionFlagsBits.ViewChannel)
+      && permissions.has(PermissionFlagsBits.SendMessages));
+  }
+
+  #hasMessageExecutionPermission(message) {
+    if (this.#isAuthorizedUser(message.author?.id)) return true;
+    const permissions = message.memberPermissions
+      ?? message.member?.permissionsIn?.(message.channel)
+      ?? message.channel?.permissionsFor?.(message.member ?? message.author);
+    return this.#hasDiscordExecutionPermission(permissions);
   }
 
   async #handleAutocomplete(interaction) {
@@ -1031,6 +1076,7 @@ export class DiscordController {
       const threadId = interaction.options.getString('task')
         ?? this.stateStore.bindingByChannel(interaction.channelId)?.threadId
         ?? null;
+      if (threadId) this.#assertThreadAccess(interaction, threadId);
       const cwd = threadId ? this.stateStore.binding(threadId)?.cwd : null;
       const profiles = await this.codex.listPermissionProfiles(cwd);
       const choices = profiles
@@ -1044,7 +1090,11 @@ export class DiscordController {
       return;
     }
     const result = await this.codex.listThreads({ limit: 20, search: query || null });
-    const choices = result.data.slice(0, 25).map((thread) => ({
+    const channelThreadId = this.stateStore.bindingByChannel?.(interaction.channelId)?.threadId ?? null;
+    const visibleThreads = this.#isAuthorizedUser(interaction.user.id)
+      ? result.data
+      : result.data.filter((thread) => thread.id === channelThreadId);
+    const choices = visibleThreads.slice(0, 25).map((thread) => ({
       name: truncate(`${threadStatusEmoji(thread.status)} ${thread.name ?? thread.preview ?? thread.id}`, 100, ''),
       value: thread.id,
     }));
@@ -1944,14 +1994,22 @@ export class DiscordController {
     this.#log('command', {
       subcommandGroup, subcommand, userId: interaction.user.id, channelId: interaction.channelId,
     });
+    if (['tasks', 'open', 'pending', 'sync', 'usage'].includes(subcommand)) {
+      this.#assertControlOperator(interaction);
+    }
 
     if (subcommand === 'status') {
       await interaction.deferReply({ ephemeral: true });
       const explicit = interaction.options.getString('task');
       const channelBinding = this.stateStore.bindingByChannel(interaction.channelId);
       const threadId = explicit ?? channelBinding?.threadId ?? null;
-      if (threadId) await this.#showTaskStatus(interaction, threadId);
-      else await interaction.editReply({ embeds: [await this.#statusEmbed()] });
+      if (threadId) {
+        this.#assertThreadAccess(interaction, threadId);
+        await this.#showTaskStatus(interaction, threadId);
+      } else {
+        this.#assertControlOperator(interaction);
+        await interaction.editReply({ embeds: [await this.#statusEmbed()] });
+      }
       return;
     }
 
@@ -2017,6 +2075,7 @@ export class DiscordController {
       await this.#ensureReservedUserInputPosted(mirror).catch((error) => {
         this.#log('user-input-mirror-error', { threadId, source: mirror.source, error: error.message });
       });
+      await this.#moveLiveCardAfterReservedInput(mirror);
       await interaction.editReply(`受理されました: **${result.mode}** / turn \`${result.turnId ?? 'pending'}\``);
       return;
     }
@@ -2118,6 +2177,8 @@ export class DiscordController {
       const kind = interaction.options.getString('kind', true);
       const explicit = interaction.options.getString('task');
       const threadId = explicit ?? this.stateStore.bindingByChannel(interaction.channelId)?.threadId ?? null;
+      if (threadId) this.#assertThreadAccess(interaction, threadId);
+      else this.#assertControlOperator(interaction);
       await interaction.editReply({ embeds: [await this.#resourceResponse(kind, threadId)] });
       return;
     }
@@ -2499,7 +2560,7 @@ export class DiscordController {
     const [prefix, kind, key, indexText] = interaction.customId.split(':');
     if (prefix !== 'cx' || kind !== 'q') return;
     const record = this.pendingRequests.get(key);
-    this.#assertPendingRequest(record, interaction.user.id);
+    this.#assertPendingRequest(record);
     const index = Number.parseInt(indexText, 10);
     const question = record.request.params.questions[index];
     const selected = interaction.values[0];
@@ -2816,7 +2877,7 @@ export class DiscordController {
     const key = parts[2];
     const action = parts[3];
     const record = this.pendingRequests.get(key);
-    this.#assertPendingRequest(record, interaction.user.id);
+    this.#assertPendingRequest(record);
 
     if (action === 'toolModal') {
       const questions = record.request.params.questions;
@@ -2871,6 +2932,7 @@ export class DiscordController {
       await this.#ensureReservedUserInputPosted(mirror).catch((error) => {
         this.#log('user-input-mirror-error', { threadId: action.threadId, source: mirror.source, error: error.message });
       });
+      await this.#moveLiveCardAfterReservedInput(mirror);
       await interaction.editReply(`受理されました: **${result.mode}** / turn \`${result.turnId ?? 'pending'}\``);
       return;
     }
@@ -2911,7 +2973,7 @@ export class DiscordController {
     const key = parts[2];
     const mode = parts[3];
     const record = this.pendingRequests.get(key);
-    this.#assertPendingRequest(record, interaction.user.id);
+    this.#assertPendingRequest(record);
     await interaction.deferReply({ ephemeral: true });
 
     let result;
@@ -2944,10 +3006,27 @@ export class DiscordController {
 
   #resolveThreadId(interaction) {
     const explicit = interaction.options.getString('task');
-    if (explicit) return explicit;
     const binding = this.stateStore.bindingByChannel(interaction.channelId);
+    if (explicit) {
+      this.#assertThreadAccess(interaction, explicit);
+      return explicit;
+    }
     if (!binding) throw new Error('taskを指定するか、タスク専用チャンネルで実行してください。');
     return binding.threadId;
+  }
+
+  #assertThreadAccess(interaction, threadId) {
+    if (this.#isAuthorizedUser(interaction.user.id)) return;
+    const binding = this.stateStore.bindingByChannel(interaction.channelId);
+    if (!binding || binding.threadId !== threadId) {
+      throw new Error('Discordで権限を持つ現在のタスク以外は操作できません。');
+    }
+  }
+
+  #assertControlOperator(interaction) {
+    if (!this.#isAuthorizedUser(interaction.user.id)) {
+      throw new Error('この操作にはCodex Remote制御者権限が必要です。');
+    }
   }
 
   #isSyncableThread(thread) {
@@ -2994,10 +3073,11 @@ export class DiscordController {
     ]);
     const active = activeThreads.filter((thread) => this.#isSyncableThread(thread));
     const archived = archivedThreads.filter((thread) => this.#isSyncableThread(thread));
-    const { guild } = await this.infrastructureReady;
+    const { guild, controlCategory } = await this.infrastructureReady;
     const channels = await guild.channels.fetch();
     const context = {
       guild,
+      controlCategory,
       channels,
       desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
     };
@@ -3407,11 +3487,15 @@ export class DiscordController {
       const name = stored?.name ?? this.#projectCategoryName(descriptor);
       let category = context.channels.find((channel) => channel?.type === ChannelType.GuildCategory
         && channel.name === name);
+      let categoryCreated = false;
       if (!category) {
         category = await context.guild.channels.create({ name, type: ChannelType.GuildCategory });
+        categoryCreated = true;
       }
       context.channels.set(category.id, category);
-      await this.#configurePrivateCategory(category, context.guild);
+      if (categoryCreated) {
+        await this.#copyCategoryPermissions(context.controlCategory, category, context.guild);
+      }
       categories.push(category);
     }
     this.stateStore.setProjectCategory(descriptor.key, {
@@ -3452,7 +3536,7 @@ export class DiscordController {
       name: truncate(`${baseName} (${categories.length + 1})`, 100, ''),
       type: ChannelType.GuildCategory,
     });
-    await this.#configurePrivateCategory(category, context.guild);
+    await this.#copyCategoryPermissions(categories[0], category, context.guild);
     context.channels.set(category.id, category);
     categories.push(category);
     await onCreate(categories.map((candidate) => candidate.id));
@@ -3971,7 +4055,7 @@ export class DiscordController {
       let message = await this.#resolveChannelMessage(channel, messages, existingIds[0]);
       let sourceMessage = null;
       let migratedEntryId = null;
-      if (message && this.#isAuthorizedUser(message.author.id)) {
+      if (message && this.#hasMessageExecutionPermission(message)) {
         sourceMessage = message;
         message = null;
       }
@@ -3991,7 +4075,7 @@ export class DiscordController {
         if (!candidate || !sameText) continue;
         migratedEntryId = entryId;
         if (candidate.author.id === this.client.user.id) message = candidate;
-        else if (this.#isAuthorizedUser(candidate.author.id)) sourceMessage = candidate;
+        else if (this.#hasMessageExecutionPermission(candidate)) sourceMessage = candidate;
       }
 
       if (!message) {
@@ -4008,7 +4092,7 @@ export class DiscordController {
 
       if (!sourceMessage) {
         sourceMessage = [...messages.values()]
-          .filter((candidate) => this.#isAuthorizedUser(candidate.author.id)
+          .filter((candidate) => this.#hasMessageExecutionPermission(candidate)
             && !claimedIds.has(candidate.id)
             && !globallyClaimedIds.has(candidate.id)
             && !allIds.includes(candidate.id))
@@ -4039,7 +4123,7 @@ export class DiscordController {
       staleIds.delete(message.id);
       for (const staleId of staleIds) {
         const stale = await this.#resolveChannelMessage(channel, messages, staleId);
-        if (stale && (stale.author.id === this.client.user.id || this.#isAuthorizedUser(stale.author.id))) {
+        if (stale && (stale.author.id === this.client.user.id || this.#hasMessageExecutionPermission(stale))) {
           await stale.delete().catch((error) => {
             if (error.code !== 10008) throw error;
           });
@@ -4371,6 +4455,8 @@ export class DiscordController {
         view.text = activeAgentItem?.text ?? '';
         view.reasoning = activeAgentItem ? reasoningSummaryFromTurn(activeTurn) : '';
         await this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages);
+      } else {
+        await this.#repostLiveTurnCardToLatest(binding, existingView);
       }
     }
 
@@ -4777,7 +4863,8 @@ export class DiscordController {
         if (mirrored && params.item.id) {
           this.stateStore.setBinding(binding.threadId, { lastMirroredUserItemId: params.item.id });
         }
-        userMessageChanged = mirrored;
+        if (mirrored && reservation) await this.#moveLiveCardAfterReservedInput(reservation);
+        userMessageChanged = mirrored && !reservation;
       }
     }
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
@@ -5007,6 +5094,10 @@ export class DiscordController {
   }
 
   async #moveLiveTurnCardToLatest(binding, view) {
+    return this.#queueLiveCardMove(binding, view, () => this.#moveLiveTurnCardToLatestOnce(binding, view));
+  }
+
+  async #moveLiveTurnCardToLatestOnce(binding, view) {
     if (view.timer) {
       clearTimeout(view.timer);
       view.timer = null;
@@ -5029,6 +5120,38 @@ export class DiscordController {
       liveMessageId: null,
     });
     await this.#renderTurn(binding, view);
+  }
+
+  async #repostLiveTurnCardToLatest(binding, view) {
+    return this.#queueLiveCardMove(binding, view, async () => {
+      if (view.timer) {
+        clearTimeout(view.timer);
+        view.timer = null;
+      }
+      const channel = await this.client.channels.fetch(binding.channelId);
+      if (view.messageId) {
+        const message = await channel.messages.fetch(view.messageId).catch(() => null);
+        if (message?.author.id === this.client.user.id) await message.delete().catch(() => {});
+      }
+      view.messageId = null;
+      this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
+        cardMessageId: null,
+        liveMessageId: null,
+      });
+      await this.#renderTurn(binding, view);
+    });
+  }
+
+  async #queueLiveCardMove(binding, view, operation) {
+    const key = `${binding.threadId}:${view.turnId}`;
+    const previous = this.liveCardMovePromises.get(key) ?? Promise.resolve();
+    const queued = previous.catch(() => {}).then(operation);
+    this.liveCardMovePromises.set(key, queued);
+    try {
+      return await queued;
+    } finally {
+      if (this.liveCardMovePromises.get(key) === queued) this.liveCardMovePromises.delete(key);
+    }
   }
 
   #turnEmbed(view) {
@@ -5346,9 +5469,8 @@ export class DiscordController {
     await interaction.followUp(messageOptions('Codexへ回答しました。', { ephemeral: true }));
   }
 
-  #assertPendingRequest(record, userId) {
+  #assertPendingRequest(record) {
     if (!record) throw new Error('この要求は回答済み、または接続更新により期限切れです。');
-    if (!this.#isAuthorizedUser(userId)) throw new Error('この要求に回答する権限がありません。');
   }
 
   async #resolvePending(record, note, userId) {
@@ -5570,6 +5692,23 @@ export class DiscordController {
         });
     }
     return record.postPromise;
+  }
+
+  async #moveLiveCardAfterReservedInput(record) {
+    if (!record.turnId) return;
+    if (!record.liveCardMovePromise) {
+      record.liveCardMovePromise = (async () => {
+        const binding = this.stateStore.binding(record.threadId);
+        if (!binding) return;
+        const view = this.#view(record.threadId, record.turnId, binding.channelId);
+        view.status = 'inProgress';
+        await this.#moveLiveTurnCardToLatest(binding, view);
+      })().catch((error) => {
+        record.liveCardMovePromise = null;
+        throw error;
+      });
+    }
+    return record.liveCardMovePromise;
   }
 
   async #waitForReservationTurnId(record) {

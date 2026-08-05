@@ -5,7 +5,6 @@ import {
   ChannelType,
   Client,
   GatewayIntentBits,
-  OverwriteType,
   PermissionFlagsBits,
 } from 'discord.js';
 import { dataDir, loadConfig } from '../src/config.mjs';
@@ -204,25 +203,17 @@ try {
     if (!everyone?.deny.has(PermissionFlagsBits.ViewChannel)) {
       errors.push(`${category.name}: @everyone is not denied ViewChannel.`);
     }
-    for (const userId of config.authorizedUserIds) {
-      const authorized = overwrites.get(userId);
-      for (const permission of [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-      ]) {
-        if (!authorized?.allow.has(permission)) {
-          errors.push(`${category.name}: authorized user ${userId} is missing permission ${permission}.`);
-        }
+    const botPermissions = category.permissionsFor(guild.members.me);
+    for (const permission of [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.ReadMessageHistory,
+      PermissionFlagsBits.ManageChannels,
+      PermissionFlagsBits.ManageMessages,
+    ]) {
+      if (!botPermissions?.has(permission)) {
+        errors.push(`${category.name}: Bridge bot is missing permission ${permission}.`);
       }
-    }
-    const unexpectedMembers = [...overwrites.values()]
-      .filter((overwrite) => overwrite.type === OverwriteType.Member
-        && overwrite.id !== client.user.id
-        && !config.authorizedUserIds.includes(overwrite.id))
-      .map((overwrite) => overwrite.id);
-    if (unexpectedMembers.length) {
-      errors.push(`${category.name}: unexpected member permission overwrites: ${unexpectedMembers.join(', ')}`);
     }
   }
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
@@ -266,7 +257,7 @@ try {
     archives: [...archiveCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     tasks: { total: taskChannels.size, active: activeTasks.size, archived: archivedTasks.size },
     access: {
-      authorizedUsers: config.authorizedUserIds.length,
+      controlOperators: config.authorizedUserIds.length,
       completionSubscribers: config.completionMentionUserIds.length,
       privateCategories: privateCategories.length,
     },
