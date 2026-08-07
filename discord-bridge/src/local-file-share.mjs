@@ -91,6 +91,18 @@ export function isDiscordInlineImageTarget(value) {
   return DISCORD_INLINE_IMAGE_EXTENSIONS.has(path.win32.extname(withoutLocation).toLocaleLowerCase('en-US'));
 }
 
+export function uniqueDiscordAttachmentName(fileName, usedNames = []) {
+  const used = usedNames instanceof Set
+    ? usedNames
+    : new Set([...usedNames].map((name) => String(name).toLocaleLowerCase('en-US')));
+  const originalName = safeAttachmentName(fileName);
+  let attachmentName = originalName;
+  for (let suffix = 2; used.has(attachmentName.toLocaleLowerCase('en-US')); suffix += 1) {
+    attachmentName = safeAttachmentName(`${suffix}-${originalName}`);
+  }
+  return attachmentName;
+}
+
 export function blockedPathReason(filePath) {
   const normalized = normalizeLocalTarget(filePath);
   if (!normalized) return null;

@@ -58,6 +58,7 @@ import {
   listProjectDirectory,
   resolveShareFile,
   safeAttachmentName,
+  uniqueDiscordAttachmentName,
 } from './local-file-share.mjs';
 import {
   cleanupStaleSplitArchives,
@@ -1491,11 +1492,7 @@ export class DiscordController {
           continue;
         }
         const transfer = await hashResolvedFile(file, maximumBytes);
-        const originalName = safeAttachmentName(transfer.name);
-        let attachmentName = originalName;
-        for (let suffix = 2; usedNames.has(attachmentName.toLocaleLowerCase('en-US')); suffix += 1) {
-          attachmentName = safeAttachmentName(`${suffix}-${originalName}`);
-        }
+        const attachmentName = uniqueDiscordAttachmentName(transfer.name, usedNames);
         usedNames.add(attachmentName.toLocaleLowerCase('en-US'));
         names.push(attachmentName);
 

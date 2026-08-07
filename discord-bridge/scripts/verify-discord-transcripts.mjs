@@ -5,7 +5,11 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { AppServerClient } from '../src/app-server-client.mjs';
 import { dataDir, loadConfig } from '../src/config.mjs';
 import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
-import { extractLocalFileReferences } from '../src/local-file-share.mjs';
+import {
+  extractLocalFileReferences,
+  isDiscordInlineImageTarget,
+  uniqueDiscordAttachmentName,
+} from '../src/local-file-share.mjs';
 import {
   completionTextFromSession,
   finalTextFromTurn,
@@ -63,6 +67,18 @@ function userEmbedIdentity(message) {
 
 function hasLinkedFilesButton(message) {
   return message.components.some((row) => row.components.some((component) => component.customId === 'cx:files:linked'));
+}
+
+function expectedInlineImageAttachmentNames(references) {
+  const usedNames = new Set();
+  const names = [];
+  for (const reference of references.filter((entry) => isDiscordInlineImageTarget(entry.target))) {
+    const target = reference.target.replace(/:(\d+)(?::\d+)?$/, '');
+    const name = uniqueDiscordAttachmentName(path.win32.basename(target), usedNames);
+    usedNames.add(name.toLocaleLowerCase('en-US'));
+    names.push(name);
+  }
+  return new Set(names);
 }
 
 async function fetchHistory(channel) {
@@ -222,13 +238,16 @@ try {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card linked-file button does not match its text.`);
         }
         const attachmentNames = [...card.attachments.values()].map((attachment) => attachment.name);
+        const expectedInlineImages = expectedInlineImageAttachmentNames(expectedLocalFiles);
         const fullTextName = `codex-turn-${turnId}-${itemId}-assistant.txt`;
         const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
+        const unexpectedAttachments = attachmentNames.filter((name) => name !== fullTextName
+          && !expectedInlineImages.has(name));
         if (value.length > 3900 && fullTextAttachments !== 1) {
           errors.push(`${threadId}/${turnId}/${itemId}: long assistant card has ${fullTextAttachments} full-text attachments.`);
         }
-        if (value.length <= 3900 && card.attachments.size) {
-          errors.push(`${threadId}/${turnId}/${itemId}: short assistant card has an unexpected attachment.`);
+        if (unexpectedAttachments.length) {
+          errors.push(`${threadId}/${turnId}/${itemId}: assistant card has unexpected attachments: ${unexpectedAttachments.join(', ')}.`);
         }
         }
       }
@@ -273,20 +292,23 @@ try {
             errors.push(`${threadId}/${turnId}: final card linked-file button does not match its text.`);
           }
           const attachmentNames = [...(card?.attachments.values() ?? [])].map((attachment) => attachment.name);
+          const expectedInlineImages = expectedInlineImageAttachmentNames(expectedLocalFiles);
           const duplicateAttachmentNames = attachmentNames.filter((name, index) => attachmentNames.indexOf(name) !== index);
           if (duplicateAttachmentNames.length) {
             errors.push(`${threadId}/${turnId}: past card has duplicate attachments: ${[...new Set(duplicateAttachmentNames)].join(', ')}.`);
           }
           const fullTextName = `codex-turn-${turnId}-final.txt`;
           const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
+          const unexpectedAttachments = attachmentNames.filter((name) => name !== fullTextName
+            && !expectedInlineImages.has(name));
           if (expectedText.length > 3900 && !card?.attachments.size) {
             errors.push(`${threadId}/${turnId}: long past card message has no full-text attachment.`);
           }
           if (expectedText.length > 3900 && fullTextAttachments !== 1) {
             errors.push(`${threadId}/${turnId}: long past card has ${fullTextAttachments} full-text attachments.`);
           }
-          if (expectedText.length <= 3900 && card?.attachments.size) {
-            errors.push(`${threadId}/${turnId}: short past card message has an unexpected attachment.`);
+          if (unexpectedAttachments.length) {
+            errors.push(`${threadId}/${turnId}: past card has unexpected attachments: ${unexpectedAttachments.join(', ')}.`);
           }
         }
       }

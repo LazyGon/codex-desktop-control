@@ -9,6 +9,7 @@ import {
   isDiscordInlineImageTarget,
   listProjectDirectory,
   resolveShareFile,
+  uniqueDiscordAttachmentName,
 } from '../src/local-file-share.mjs';
 
 test('local Markdown links accept Windows file targets and reject remote or relative targets', () => {
@@ -38,6 +39,14 @@ test('Discord inline image detection accepts renderable local image links only',
   assert.equal(isDiscordInlineImageTarget('C:\\work\\diagram.svg'), false);
   assert.equal(isDiscordInlineImageTarget('C:\\work\\notes.txt'), false);
   assert.equal(isDiscordInlineImageTarget('https://example.com/preview.png'), false);
+});
+
+test('Discord attachment names remain safe and unique within one card', () => {
+  const used = new Set(['preview.png']);
+  assert.equal(uniqueDiscordAttachmentName('preview.png', used), '2-preview.png');
+  used.add('2-preview.png');
+  assert.equal(uniqueDiscordAttachmentName('preview.png', used), '3-preview.png');
+  assert.equal(uniqueDiscordAttachmentName('unsafe:name.png'), 'unsafe_name.png');
 });
 
 test('project browser allows ordinary development folders and secret-named files', async (context) => {
