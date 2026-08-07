@@ -54,6 +54,7 @@ import {
 } from './discord-file-ui.mjs';
 import {
   extractLocalFileReferences,
+  isDiscordInlineImageTarget,
   listProjectDirectory,
   resolveShareFile,
   safeAttachmentName,
@@ -108,6 +109,14 @@ const COLORS = {
   completed: 0x1971c2,
   user: 0xe67e22,
 };
+
+const MAX_DISCORD_MESSAGE_ATTACHMENTS = 10;
+
+export const ATTACHMENT_ONLY_PROMPT = [
+  '添付ファイルがユーザーからの依頼です。',
+  '内容を読み取り、意図を判断して、可能な分析・回答・作業を進めてください。',
+  '単なる確認だけで終わらず、意図を確定できない場合だけ質問してください。',
+].join('');
 
 function messageOptions(content, extra = {}) {
   return { content, allowedMentions: { parse: [] }, ...extra };
@@ -730,7 +739,7 @@ export class DiscordController {
     if (!content && attachments.length === 0) return;
 
     await message.react('⏳').catch(() => {});
-    const prompt = content || '添付ファイルを確認してください。';
+    const prompt = content || ATTACHMENT_ONLY_PROMPT;
     let reservation = null;
     try {
       if (!binding) binding = await this.#ensureTaskBinding(channel, project);
@@ -1450,6 +1459,64 @@ export class DiscordController {
       }
     }
     return roots;
+  }
+
+  async #inlineImageCardAttachments(binding, references, existingMessage, reservedNames = []) {
+    if (this.config.fileShareEnabled === false) {
+      return { attachments: [], files: [], names: [] };
+    }
+    const candidates = references.filter((reference) => isDiscordInlineImageTarget(reference.target));
+    const availableSlots = Math.max(0, MAX_DISCORD_MESSAGE_ATTACHMENTS - reservedNames.length);
+    if (candidates.length === 0 || availableSlots === 0) {
+      return { attachments: [], files: [], names: [] };
+    }
+
+    const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+    const maximumBytes = this.config.fileShareChunkBytes ?? 7_500_000;
+    const existingAttachments = [...(existingMessage?.attachments.values() ?? [])];
+    const usedNames = new Set(reservedNames.map((name) => name.toLocaleLowerCase('en-US')));
+    const attachments = [];
+    const files = [];
+    const names = [];
+
+    for (const reference of candidates) {
+      if (names.length >= availableSlots) break;
+      try {
+        const file = await resolveShareFile(reference.target, roots);
+        if (file.size > maximumBytes) {
+          this.#log('inline-image-skipped', {
+            threadId: binding.threadId,
+            reason: `画像がDiscord添付上限を超えています (${file.size} > ${maximumBytes})`,
+          });
+          continue;
+        }
+        const transfer = await hashResolvedFile(file, maximumBytes);
+        const originalName = safeAttachmentName(transfer.name);
+        let attachmentName = originalName;
+        for (let suffix = 2; usedNames.has(attachmentName.toLocaleLowerCase('en-US')); suffix += 1) {
+          attachmentName = safeAttachmentName(`${suffix}-${originalName}`);
+        }
+        usedNames.add(attachmentName.toLocaleLowerCase('en-US'));
+        names.push(attachmentName);
+
+        const existing = existingAttachments.find((attachment) => attachment.name === attachmentName
+          && (attachment.size == null || attachment.size === transfer.size));
+        if (existing) {
+          attachments.push({ id: existing.id });
+        } else {
+          files.push(new AttachmentBuilder(
+            await readHashedFile(transfer),
+            { name: attachmentName },
+          ));
+        }
+      } catch (error) {
+        this.#log('inline-image-skipped', {
+          threadId: binding.threadId,
+          reason: error.message,
+        });
+      }
+    }
+    return { attachments, files, names };
   }
 
   #fileSession(key, userId, type = null) {
@@ -3816,7 +3883,7 @@ export class DiscordController {
       && (expectsAttachment ? message.attachments.size > 0 : message.attachments.size === 0);
   }
 
-  #cardMessageMatches(message, options, expectsAttachment) {
+  #cardMessageMatches(message, options, expectedAttachments) {
     const normalizeEmbed = (embed) => {
       const value = typeof embed?.toJSON === 'function' ? embed.toJSON() : embed ? { ...embed } : null;
       if (!value) return value;
@@ -3833,6 +3900,12 @@ export class DiscordController {
     const actualEmbed = normalizeEmbed(message.embeds[0]);
     const expectedEmbed = normalizeEmbed(options.embeds[0]);
     const componentData = (component) => (typeof component?.toJSON === 'function' ? component.toJSON() : component);
+    const attachmentsMatch = Array.isArray(expectedAttachments)
+      ? isDeepStrictEqual(
+        [...message.attachments.values()].map((attachment) => attachment.name).sort(),
+        [...expectedAttachments].sort(),
+      )
+      : (expectedAttachments ? message.attachments.size > 0 : message.attachments.size === 0);
     return message.content === (options.content ?? '')
       && message.embeds.length === 1
       && isDeepStrictEqual(actualEmbed, expectedEmbed)
@@ -3840,7 +3913,7 @@ export class DiscordController {
         (message.components ?? []).map(componentData),
         (options.components ?? []).map(componentData),
       )
-      && (expectsAttachment ? message.attachments.size > 0 : message.attachments.size === 0);
+      && attachmentsMatch;
   }
 
   #embedTurnId(message) {
@@ -3880,7 +3953,7 @@ export class DiscordController {
       && message.embeds.some((embed) => /^Codex (?:running|turn )/.test(embed.title ?? ''));
   }
 
-  #assistantMessageCardOptions(binding, turn, item, existingMessage = null) {
+  async #assistantMessageCardOptions(binding, turn, item, existingMessage = null) {
     const value = String(item.text ?? '').trim() || '(empty)';
     const localFiles = extractLocalFileReferences(value);
     const embed = new EmbedBuilder()
@@ -3897,17 +3970,35 @@ export class DiscordController {
       ? [...(existingMessage?.attachments.values() ?? [])]
         .find((attachment) => attachment.name === fullTextName)
       : null;
+    const inlineImages = await this.#inlineImageCardAttachments(
+      binding,
+      localFiles,
+      existingMessage,
+      value.length > 3900 ? [fullTextName] : [],
+    );
     const options = {
       content: '',
       embeds: [embed],
       components: contentCardComponents(localFiles.length),
-      attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
+      attachments: [
+        ...(matchingAttachment ? [{ id: matchingAttachment.id }] : []),
+        ...inlineImages.attachments,
+      ],
       allowedMentions: { parse: [] },
     };
-    if (value.length > 3900 && !matchingAttachment) {
-      options.files = [this.#textAttachment(value, fullTextName)];
-    }
-    return { options, expectsAttachment: value.length > 3900, localFiles };
+    const files = [
+      ...(value.length > 3900 && !matchingAttachment ? [this.#textAttachment(value, fullTextName)] : []),
+      ...inlineImages.files,
+    ];
+    if (files.length) options.files = files;
+    return {
+      options,
+      expectedAttachmentNames: [
+        ...(value.length > 3900 ? [fullTextName] : []),
+        ...inlineImages.names,
+      ],
+      localFiles,
+    };
   }
 
   async #ensureAssistantMessageCard(
@@ -3941,9 +4032,9 @@ export class DiscordController {
         && this.#embedTurnId(candidate) === turn.id
         && this.#embedAssistantMessageId(candidate) === item.id)
       .map((candidate) => candidate.id);
-    const card = this.#assistantMessageCardOptions(binding, turn, item, message);
+    const card = await this.#assistantMessageCardOptions(binding, turn, item, message);
     if (message?.author.id === this.client.user.id) {
-      if (!this.#cardMessageMatches(message, card.options, card.expectsAttachment)) {
+      if (!this.#cardMessageMatches(message, card.options, card.expectedAttachmentNames)) {
         message = await message.edit(card.options);
       }
     } else {
@@ -4193,22 +4284,37 @@ export class DiscordController {
       ? [...(message?.attachments.values() ?? [])]
         .find((attachment) => attachment.name === fullTextName)
       : null;
+    const inlineImages = await this.#inlineImageCardAttachments(
+      binding,
+      localFiles,
+      message,
+      value.length > 3900 ? [fullTextName] : [],
+    );
     const options = {
       content: '',
       embeds: [embed],
       components: contentCardComponents(localFiles.length),
-      attachments: matchingAttachment ? [{ id: matchingAttachment.id }] : [],
+      attachments: [
+        ...(matchingAttachment ? [{ id: matchingAttachment.id }] : []),
+        ...inlineImages.attachments,
+      ],
       allowedMentions: { parse: [] },
     };
     const attachmentText = value.length > 3900 ? value : null;
-    if (attachmentText && !matchingAttachment) {
-      options.files = [this.#textAttachment(attachmentText, fullTextName)];
-    }
+    const files = [
+      ...(attachmentText && !matchingAttachment ? [this.#textAttachment(attachmentText, fullTextName)] : []),
+      ...inlineImages.files,
+    ];
+    if (files.length) options.files = files;
+    const expectedAttachmentNames = [
+      ...(attachmentText ? [fullTextName] : []),
+      ...inlineImages.names,
+    ];
     const duplicateCardIds = [...messages.values()]
       .filter((candidate) => this.#isAssistantTurnCard(candidate, turn.id))
       .map((candidate) => candidate.id);
     if (message?.author.id === this.client.user.id) {
-      if (!this.#cardMessageMatches(message, options, Boolean(attachmentText))) {
+      if (!this.#cardMessageMatches(message, options, expectedAttachmentNames)) {
         message = await message.edit(options);
       }
     } else message = await channel.send(options);

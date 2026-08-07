@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ChannelType, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
 import {
+  ATTACHMENT_ONLY_PROMPT,
   completionRecoveryCandidate,
   DiscordController,
   managedProjectCategoryCleanupPlan,
@@ -660,6 +661,11 @@ test('task panel completion-report selection persists the task setting', async (
 test('Discord-permitted non-operator messages in bound task channels are delivered once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const inlineImagePath = path.join(directory, 'inline-preview.png');
+  fs.writeFileSync(
+    inlineImagePath,
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+  );
 
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
@@ -709,6 +715,12 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   const channelMessages = new Map();
   const sent = [];
   let nextMessage = 1;
+  let nextAttachment = 1;
+  const materializeFiles = (files = []) => new Map(files.map((file) => {
+    const id = `bot-attachment-${nextAttachment++}`;
+    const size = Buffer.isBuffer(file.attachment) ? file.attachment.length : file.size;
+    return [id, { id, name: file.name, size }];
+  }));
   const channel = {
     messages: {
       fetch: async (value) => (typeof value === 'string'
@@ -725,12 +737,19 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
         content: options.content ?? '',
         embeds: (options.embeds ?? []).map((embed) => embed.toJSON()),
         components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
-        attachments: new Map(),
+        attachments: materializeFiles(options.files),
         edit: async (next) => {
           message.content = next.content ?? message.content;
           if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
           if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
-          if (next.attachments?.length === 0) message.attachments.clear();
+          if (next.attachments) {
+            message.attachments = new Map(next.attachments
+              .map((attachment) => [attachment.id, message.attachments.get(attachment.id)])
+              .filter(([, attachment]) => attachment));
+          }
+          for (const [id, attachment] of materializeFiles(next.files)) {
+            message.attachments.set(id, attachment);
+          }
           return message;
         },
         delete: async () => { channelMessages.delete(message.id); },
@@ -749,6 +768,8 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
       plainMessageInputEnabled: true,
       guildId: 'guild-1',
       authorizedUserIds: ['user-1'],
+      fileShareEnabled: true,
+      fileShareChunkBytes: 100_000,
       liveUpdateIntervalMs: 100,
     },
     logDir: directory,
@@ -963,6 +984,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   }
   assert.match(deniedOtherTaskCommand.lastReply.content, /現在のタスク以外/);
 
+  const assistantText = `first update [artifact](C:\\work\\artifact.txt) ![preview](<${inlineImagePath}>)`;
   codex.emit('notification', {
     method: 'item/started',
     params: {
@@ -1017,7 +1039,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
       threadId: 'thread-1',
       turnId: 'turn-1',
       itemId: 'assistant-item-1',
-      delta: 'first update [artifact](C:\\work\\artifact.txt)',
+      delta: assistantText,
     },
   });
   codex.emit('notification', {
@@ -1025,11 +1047,11 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
     params: {
       threadId: 'thread-1',
       turnId: 'turn-1',
-      item: { type: 'agentMessage', id: 'assistant-item-1', phase: 'commentary', text: 'first update [artifact](C:\\work\\artifact.txt)' },
+      item: { type: 'agentMessage', id: 'assistant-item-1', phase: 'commentary', text: assistantText },
     },
   });
   for (let attempt = 0; attempt < 100
-    && turnRecords.get('thread-1:turn-1')?.assistantEntries?.['assistant-item-1']?.text !== 'first update [artifact](C:\\work\\artifact.txt)'; attempt += 1) {
+    && turnRecords.get('thread-1:turn-1')?.assistantEntries?.['assistant-item-1']?.text !== assistantText; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   codex.emit('notification', {
@@ -1057,7 +1079,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   })));
   assert.ok(pastAssistant, diagnostic);
   assert.ok(liveAssistant, diagnostic);
-  assert.equal(pastAssistant.embeds[0].description, 'first update [artifact](C:\\work\\artifact.txt)');
+  assert.equal(pastAssistant.embeds[0].description, assistantText);
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');
   assert.equal(liveAssistant.components[0].components.at(-1).custom_id, 'cx:copy:card');
@@ -1065,8 +1087,36 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   assert.equal(liveAssistant.embeds[0].fields.find((field) => field.name === 'Message').value, '`assistant-item-2`');
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].messageIds, [pastAssistant.id]);
   assert.equal(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].localFiles[0].target, 'C:\\work\\artifact.txt');
+  assert.equal(
+    turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].localFiles[1].target,
+    inlineImagePath,
+  );
+  assert.deepEqual(
+    [...pastAssistant.attachments.values()].map((attachment) => attachment.name),
+    ['inline-preview.png'],
+  );
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-2'].messageIds, [liveAssistant.id]);
   assert.equal(new Set(turnRecords.get('thread-1:turn-1').assistantMessageIds).size, 2);
+
+  const previousClientUserMessageId = delivered.clientUserMessageId;
+  const attachmentOnlyReactions = [];
+  const attachmentOnlyMessage = {
+    ...originalMessage,
+    id: 'message-attachment-only',
+    content: '',
+    attachments: new Map([['attachment-image', originalMessage.attachments.get('attachment-image')]]),
+    react: async (reaction) => { attachmentOnlyReactions.push(reaction); },
+    delete: async () => { channelMessages.delete('message-attachment-only'); },
+  };
+  channelMessages.set(attachmentOnlyMessage.id, attachmentOnlyMessage);
+  client.emit('messageCreate', attachmentOnlyMessage);
+  for (let attempt = 0; attempt < 100
+    && delivered.clientUserMessageId === previousClientUserMessageId; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(delivered.prompt, ATTACHMENT_ONLY_PROMPT);
+  assert.match(delivered.prompt, /単なる確認だけで終わらず/);
+  assert.deepEqual(attachmentOnlyReactions, ['⏳', '✅']);
 });
 
 test('transfer-text accepts authorized users and webhooks while rejecting other senders', async (context) => {

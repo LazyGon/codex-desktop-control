@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   blockedPathReason,
   extractLocalFileReferences,
+  isDiscordInlineImageTarget,
   listProjectDirectory,
   resolveShareFile,
 } from '../src/local-file-share.mjs';
@@ -27,6 +28,16 @@ test('local Markdown links accept Windows file targets and reject remote or rela
     'C:\\git\\project\\other.txt',
     'C:\\git\\project\\image.png',
   ]);
+});
+
+test('Discord inline image detection accepts renderable local image links only', () => {
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\preview.PNG'), true);
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\photo.jpeg:12'), true);
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\animation.gif'), true);
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\preview.webp'), true);
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\diagram.svg'), false);
+  assert.equal(isDiscordInlineImageTarget('C:\\work\\notes.txt'), false);
+  assert.equal(isDiscordInlineImageTarget('https://example.com/preview.png'), false);
 });
 
 test('project browser allows ordinary development folders and secret-named files', async (context) => {

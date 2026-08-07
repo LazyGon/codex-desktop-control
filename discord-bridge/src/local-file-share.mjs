@@ -1,6 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const DISCORD_INLINE_IMAGE_EXTENSIONS = new Set([
+  '.gif',
+  '.jpeg',
+  '.jpg',
+  '.png',
+  '.webp',
+]);
+
 function normalizeCase(value) {
   return path.win32.normalize(value).toLocaleLowerCase('en-US');
 }
@@ -74,6 +82,13 @@ export function extractLocalFileReferences(markdown) {
     });
   }
   return references;
+}
+
+export function isDiscordInlineImageTarget(value) {
+  const normalized = normalizeLocalTarget(value);
+  if (!normalized) return false;
+  const withoutLocation = normalized.replace(/:(\d+)(?::\d+)?$/, '');
+  return DISCORD_INLINE_IMAGE_EXTENSIONS.has(path.win32.extname(withoutLocation).toLocaleLowerCase('en-US'));
 }
 
 export function blockedPathReason(filePath) {

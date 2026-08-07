@@ -44,7 +44,9 @@ discovery or status reconciliation for other channels.
    as local image inputs. PDFs, Office documents, spreadsheets, presentations,
    archives, audio, video, source files, and other regular files are stored in
    the private task-scoped runtime inbox and passed to Codex as local file
-   links. The same path works when `deliver` steers an active turn.
+   links. An attachment-only input tells Codex to infer the intended work and
+   proceed rather than stop after acknowledging the files. The same path works
+   when `deliver` steers an active turn.
 5. Watch the latest turn card. It shows current commentary, reasoning, and work
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,
@@ -62,6 +64,10 @@ discovery or status reconciliation for other channels.
 The `Linked files` picker also provides `Download all as ZIP`. It archives all
 downloadable links, preserves a project-relative path when one is available,
 and posts a SHA-256 manifest with the ZIP or numbered ZIP volumes.
+
+Linked PNG, JPEG, GIF, and WebP files that fit one Discord attachment are also
+attached to their assistant card and rendered inline. The linked-file picker
+remains available for downloading the original file.
 
 Files that fit in one attachment are posted directly. Larger files are posted
 as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every

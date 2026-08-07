@@ -72,7 +72,9 @@ outbound connection to Discord.
   to absolute local Windows files. A linked regular file may be anywhere on the
   local machine except a Windows-protected system directory, and the selected
   file is posted to its private task channel. The same picker offers
-  `Download all as ZIP`, which packages every downloadable link.
+  `Download all as ZIP`, which packages every downloadable link. Linked PNG,
+  JPEG, GIF, and WebP files that fit one Discord attachment are also attached
+  directly to the assistant card so Discord renders the image inline.
 - Browses one directory level at a time from a task's project root through the
   `Project files` panel button or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
@@ -138,7 +140,9 @@ outbound connection to Discord.
   `localImage` inputs; PDFs, Office documents, archives, audio, video, source
   files, and other regular files are stored in the task-scoped runtime inbox
   and passed to Codex by absolute local file link. The files are never
-  executed by the Bridge. Attachments can also steer an active turn. Slash
+  executed by the Bridge. An attachment-only message asks Codex to infer the
+  intended analysis, answer, or work and proceed instead of merely confirming
+  receipt. Attachments can also steer an active turn. Slash
   commands remain available for explicit modes and a single attachment.
 - Starts at Windows logon and can start the formal shared Desktop launcher when
   the app-server is absent.
