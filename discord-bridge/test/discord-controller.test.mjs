@@ -10,10 +10,16 @@ import {
   ATTACHMENT_ONLY_PROMPT,
   completionRecoveryCandidate,
   DiscordController,
+  isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
+  subagentDiscordThreadName,
+  subagentIdsFromThread,
+  subagentMetadata,
+  subagentOwnTurns,
 } from '../src/discord-controller.mjs';
 import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
+import { StateStore } from '../src/state-store.mjs';
 
 test('managed project category cleanup removes empty overflow categories but preserves occupied ones', () => {
   const category = (id, children) => ({
@@ -40,6 +46,223 @@ test('managed project category cleanup removes empty overflow categories but pre
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
   );
+});
+
+test('subagent descriptors preserve stable parent identity and flatten a readable Discord name', () => {
+  const child = {
+    id: '019fe224-d88a-7b60-a9f0-e6a744ceb422',
+    parentThreadId: 'parent-thread',
+    status: { type: 'active' },
+    source: {
+      subAgent: {
+        thread_spawn: {
+          parent_thread_id: 'parent-thread',
+          depth: 2,
+          agent_path: '/root/local_gap_audit',
+          agent_nickname: 'Pasteur',
+        },
+      },
+    },
+  };
+  assert.equal(isSubagentCodexThread(child), true);
+  assert.equal(isSubagentCodexThread({ ...child, ephemeral: true }), false);
+  assert.deepEqual(subagentMetadata(child), {
+    parentThreadId: 'parent-thread',
+    depth: 2,
+    agentPath: '/root/local_gap_audit',
+    nickname: 'Pasteur',
+    role: null,
+  });
+  assert.equal(subagentDiscordThreadName(child), '🟢 Pasteur · local-gap-audit · 44ceb422');
+  assert.deepEqual(subagentIdsFromThread({
+    turns: [{
+      items: [
+        { type: 'subAgentActivity', agentThreadId: child.id },
+        { type: 'collabAgentToolCall', receiverThreadIds: [child.id, 'nested-child'] },
+      ],
+    }],
+  }), [child.id, 'nested-child']);
+  assert.deepEqual(subagentOwnTurns({
+    ...child,
+    turns: [
+      { id: '019fe224-17f3-7533-b896-cbb51f975224', completedAt: '2099-01-01T00:00:00Z' },
+      { id: '019fe224-dc15-7f81-adbe-1060f31756bc' },
+      { id: '019fe225-0000-7000-8000-000000000000' },
+    ],
+  }).map((turn) => turn.id), [
+    '019fe224-dc15-7f81-adbe-1060f31756bc',
+    '019fe225-0000-7000-8000-000000000000',
+  ]);
+});
+
+test('an unknown live subagent notification creates an isolated Discord thread mirror', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subagent-thread-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setBinding('parent-thread', {
+    channelId: 'parent-channel',
+    cwd: 'C:\\work',
+    archived: false,
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const childThread = {
+    id: '019fe224-d88a-7b60-a9f0-e6a744ceb422',
+    parentThreadId: 'parent-thread',
+    status: { type: 'active' },
+    cwd: 'C:\\work',
+    turns: [
+      { id: '019fe224-17f3-7533-b896-cbb51f975224', status: 'completed', items: [] },
+      { id: '019fe224-dc15-7f81-adbe-1060f31756bc', status: 'inProgress', items: [] },
+    ],
+    source: {
+      subAgent: {
+        thread_spawn: {
+          parent_thread_id: 'parent-thread',
+          depth: 1,
+          agent_path: '/root/local_gap_audit',
+          agent_nickname: 'Pasteur',
+        },
+      },
+    },
+  };
+  codex.readThread = async (threadId) => {
+    assert.equal(threadId, childThread.id);
+    return { thread: structuredClone(childThread) };
+  };
+
+  const messages = new Map();
+  const collection = () => {
+    const value = new Map(messages);
+    value.last = () => [...value.values()].at(-1) ?? null;
+    return value;
+  };
+  let nextMessageId = 1;
+  let bulkDeleted = [];
+  const discordThread = {
+    id: 'discord-subagent-thread',
+    parentId: 'parent-channel',
+    name: 'temporary',
+    archived: false,
+    isThread: () => true,
+    setArchived: async (archived) => { discordThread.archived = archived; return discordThread; },
+    setName: async (name) => { discordThread.name = name; return discordThread; },
+    bulkDelete: async (ids) => {
+      bulkDeleted = [...ids];
+      const deleted = new Map();
+      for (const id of ids) {
+        const message = messages.get(id);
+        if (message) deleted.set(id, message);
+        messages.delete(id);
+      }
+      return deleted;
+    },
+    messages: {
+      fetch: async (value) => (typeof value === 'string' ? messages.get(value) ?? null : collection()),
+    },
+    send: async (payload) => {
+      const message = {
+        id: `message-${nextMessageId++}`,
+        author: { id: 'bot-user', bot: true },
+        content: payload.content ?? '',
+        embeds: (payload.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
+        components: payload.components ?? [],
+        attachments: new Map(),
+        edit: async (next) => {
+          message.content = next.content ?? message.content;
+          if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+          message.components = next.components ?? message.components;
+          return message;
+        },
+        delete: async () => messages.delete(message.id),
+      };
+      messages.set(message.id, message);
+      return message;
+    },
+  };
+  const parentChannel = {
+    id: 'parent-channel',
+    threads: {
+      fetchActive: async () => ({ threads: new Map() }),
+      fetchArchived: async () => ({ threads: new Map() }),
+      create: async () => discordThread,
+    },
+  };
+  client.channels = {
+    fetch: async (channelId) => ({
+      'parent-channel': parentChannel,
+      'discord-subagent-thread': discordThread,
+    })[channelId] ?? null,
+  };
+  messages.set('inherited-card-1', {
+    id: 'inherited-card-1',
+    author: { id: 'bot-user', bot: true },
+    content: '',
+    embeds: [{
+      title: 'Codex turn completed',
+      fields: [
+        { name: 'Task', value: `\`${childThread.id}\`` },
+        { name: 'Turn', value: '`019fe224-17f3-7533-b896-cbb51f975224`' },
+      ],
+    }],
+    components: [],
+    attachments: new Map(),
+    delete: async () => messages.delete('inherited-card-1'),
+  });
+  messages.set('inherited-card-2', {
+    ...messages.get('inherited-card-1'),
+    id: 'inherited-card-2',
+    delete: async () => messages.delete('inherited-card-2'),
+  });
+
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { liveUpdateIntervalMs: 1, elapsedUpdateIntervalMs: 60_000 },
+    logDir: directory,
+  });
+  controller.attach();
+  codex.emit('notification', {
+    method: 'thread/status/changed',
+    params: { threadId: childThread.id },
+  });
+  for (let attempt = 0; attempt < 100 && !stateStore.subagentThread(childThread.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  for (let attempt = 0; attempt < 100 && bulkDeleted.length < 2; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  const binding = stateStore.subagentThread(childThread.id);
+  const diagnosticLog = fs.readdirSync(directory)
+    .filter((name) => name.startsWith('discord-') && name.endsWith('.jsonl'))
+    .map((name) => fs.readFileSync(path.join(directory, name), 'utf8'))
+    .join('\n');
+  assert.ok(binding, diagnosticLog || 'subagent binding was not created');
+  assert.equal(binding.channelId, discordThread.id);
+  assert.equal(binding.topLevelParentThreadId, 'parent-thread');
+  assert.equal(stateStore.bindings().length, 1);
+  assert.equal(stateStore.bindingByChannel(discordThread.id), null);
+  assert.equal(discordThread.name, '🟢 Pasteur · local-gap-audit · 44ceb422');
+  assert.ok([...messages.values()].some((message) => message.embeds[0]?.title === 'Codex subagent'));
+  assert.deepEqual(bulkDeleted.sort(), ['inherited-card-1', 'inherited-card-2']);
+  assert.deepEqual(Object.keys(stateStore.subagentThread(childThread.id).turnMessages), [
+    '019fe224-dc15-7f81-adbe-1060f31756bc',
+  ]);
+
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: { threadId: childThread.id, turn: { id: 'child-turn', status: 'inProgress' } },
+  });
+  for (let attempt = 0; attempt < 100
+    && ![...messages.values()].some((message) => message.embeds[0]?.title === 'Codex running'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok([...messages.values()].some((message) => message.embeds[0]?.title === 'Codex running'));
+  await controller.stop();
 });
 
 test('completion recovery targets only a newer live record or a broken latest completion card', () => {

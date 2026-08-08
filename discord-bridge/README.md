@@ -195,6 +195,7 @@ The state schema is the durable lookup table:
 
 - project ID -> one or more Discord category IDs;
 - Codex task ID -> Discord task channel ID;
+- Codex subagent thread ID -> its parent task ID and Discord thread ID;
 - Codex turn ID -> user, live commentary, final, and completion-notice message IDs.
 
 Before sending during recovery, the bridge checks both that ledger and visible
@@ -204,9 +205,16 @@ creating a second copy.
 
 No project registration is required. The bridge follows every page of both the
 active and archived `thread/list` views. User-owned top-level tasks are synced;
-ephemeral and subagent child tasks remain represented inside their parent task
-instead of becoming separate Discord channels. Discord category overflow is
-sharded automatically when a category reaches 50 channels.
+ephemeral tasks remain inside their parent representation. A Codex subagent is
+mirrored as a Discord thread under its top-level parent task channel. Its agent
+path, nickname, depth, commentary, App Server reasoning summaries, tool progress,
+and final answer stay in that thread. Nested agents are flattened under the same
+top-level task channel because Discord cannot nest threads. The mapping is
+persisted by child thread ID, recovered from parent history after reconnect, and
+kept read-only; Discord posts inside a subagent thread are not delivered to
+Codex. Finished subagent threads use the stopped marker and are archived without
+posting to `codex-completions`. Discord category overflow is sharded automatically
+when a category reaches 50 channels.
 Folder selection is read from Codex Desktop's `.codex-global-state.json`.
 If that file cannot be read, the bridge fails safe to the App Server `cwd`
 category behavior instead of treating every task as projectless.

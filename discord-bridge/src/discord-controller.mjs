@@ -14,6 +14,7 @@ import {
   StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
+  ThreadAutoArchiveDuration,
 } from 'discord.js';
 import {
   appendJsonLine,
@@ -140,6 +141,63 @@ function taskTitleFromChannelName(channelName) {
   return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
 }
 
+export function subagentMetadata(thread) {
+  const spawn = thread?.source?.subAgent?.thread_spawn
+    ?? thread?.source?.subAgent?.threadSpawn
+    ?? {};
+  return {
+    parentThreadId: thread?.parentThreadId ?? spawn.parent_thread_id ?? spawn.parentThreadId ?? null,
+    depth: Number.isSafeInteger(spawn.depth) ? spawn.depth : null,
+    agentPath: spawn.agent_path ?? spawn.agentPath ?? null,
+    nickname: spawn.agent_nickname ?? spawn.agentNickname ?? null,
+    role: spawn.agent_role ?? spawn.agentRole ?? null,
+  };
+}
+
+export function isSubagentCodexThread(thread) {
+  return Boolean(thread?.id && !thread.ephemeral && subagentMetadata(thread).parentThreadId);
+}
+
+export function subagentIdsFromThread(thread) {
+  const ids = [];
+  for (const turn of thread?.turns ?? []) {
+    for (const item of turn.items ?? []) {
+      if (item.type === 'subAgentActivity' && item.agentThreadId) ids.push(item.agentThreadId);
+      if (item.type === 'collabAgentToolCall') ids.push(...(item.receiverThreadIds ?? []));
+    }
+  }
+  return [...new Set(ids.filter(Boolean))];
+}
+
+export function subagentOwnTurns(thread) {
+  if (!isSubagentCodexThread(thread)) return thread?.turns ?? [];
+  const childTimestamp = uuidV7TimestampMs(thread.id);
+  if (childTimestamp === null) return thread?.turns ?? [];
+  return (thread.turns ?? []).filter((turn) => {
+    const timestamp = uuidV7TimestampMs(turn.id) ?? turnTimestampMs(turn);
+    if (timestamp === null || timestamp < childTimestamp) return false;
+    if (timestamp > childTimestamp) return true;
+    return String(turn.id ?? '').localeCompare(String(thread.id)) >= 0;
+  });
+}
+
+export function subagentDiscordThreadName(thread) {
+  const metadata = subagentMetadata(thread);
+  const pathName = String(metadata.agentPath ?? '')
+    .split('/')
+    .filter(Boolean)
+    .at(-1)
+    ?.replaceAll('_', '-')
+    ?? 'subagent';
+  const identity = [metadata.nickname, pathName].filter(Boolean).join(' · ');
+  const status = thread?.status?.type === 'active' ? '🟢' : '⚫';
+  return truncate(`${status} ${identity} · ${String(thread?.id ?? '').slice(-8)}`, 100, '');
+}
+
+function subagentMarker(threadId) {
+  return `Codex subagent: ${threadId}`;
+}
+
 export function managedProjectCategoryCleanupPlan(categories, active) {
   const occupied = categories.filter((category) => category.children.cache.size > 0);
   if (!active) {
@@ -263,6 +321,8 @@ export class DiscordController {
     this.pendingChannelBindings = new Map();
     this.panelSyncPromises = new Map();
     this.projectCategoryPromises = new Map();
+    this.subagentSyncPromises = new Map();
+    this.nonSubagentThreadIds = new Map();
     this.internalChannelMoves = new Map();
     this.internalChannelNames = new Map();
     this.taskChannelMetadataUpdates = new LatestUpdateQueue({
@@ -349,6 +409,7 @@ export class DiscordController {
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
+      ...[...this.subagentSyncPromises].map(([key, promise]) => [`subagent:${key}`, promise]),
       ...[...this.turnCompletionPromises].map(([key, promise]) => [`turn-completion:${key}`, promise]),
       ...[...this.completionNoticePromises].map(([key, promise]) => [`completion-notice:${key}`, promise]),
       ...recoveryJobs.map((job) => [`completion:${job.threadId}:${job.turnId ?? 'latest'}`, job.promise]),
@@ -3178,6 +3239,9 @@ export class DiscordController {
       existing: 0,
       failed: 0,
       removedEmptyCategories: 0,
+      subagentsCreated: 0,
+      subagentsExisting: 0,
+      subagentsFailed: 0,
       channels: [],
     };
 
@@ -3213,6 +3277,10 @@ export class DiscordController {
     for (const [threads, isArchived] of [[active, false], [archived, true]]) {
       await syncThreads(threads, isArchived);
     }
+    const subagents = await this.#syncSubagentsForTasks(active);
+    result.subagentsCreated = subagents.created;
+    result.subagentsExisting = subagents.existing;
+    result.subagentsFailed = subagents.failed;
     context.channels = await guild.channels.fetch();
     result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
     await this.#ensureControlPanel();
@@ -3796,6 +3864,283 @@ export class DiscordController {
     return { channel, created, moved };
   }
 
+  async #syncSubagentsForTasks(parentThreads) {
+    if (typeof this.stateStore.subagentThreads !== 'function') {
+      return { created: 0, existing: 0, failed: 0 };
+    }
+    const childIds = new Set(this.stateStore.subagentThreads()
+      .filter((binding) => binding.taskStatus === 'active' || !binding.discordArchived)
+      .map((binding) => binding.threadId));
+
+    for (const parent of parentThreads) {
+      const binding = this.stateStore.binding(parent.id);
+      if (!binding) continue;
+      const sourceUpdatedAt = parent.updatedAt ?? parent.recencyAt ?? null;
+      if (binding.subagentScanVersion === 1
+        && binding.subagentScanUpdatedAt === sourceUpdatedAt
+        && Array.isArray(binding.subagentThreadIds)) {
+        for (const childId of binding.subagentThreadIds) childIds.add(childId);
+        continue;
+      }
+      try {
+        const hydrated = (await this.codex.readThread(parent.id)).thread;
+        const discoveredIds = subagentIdsFromThread(hydrated);
+        for (const childId of discoveredIds) childIds.add(childId);
+        this.stateStore.setBinding(parent.id, {
+          subagentScanVersion: 1,
+          subagentScanUpdatedAt: sourceUpdatedAt,
+          subagentThreadIds: discoveredIds,
+        });
+      } catch (error) {
+        this.#log('subagent-parent-scan-failed', {
+          threadId: parent.id,
+          error: error.stack ?? error.message,
+        });
+      }
+    }
+
+    const result = { created: 0, existing: 0, failed: 0 };
+    let nextIndex = 0;
+    const ids = [...childIds];
+    const worker = async () => {
+      while (nextIndex < ids.length) {
+        const childId = ids[nextIndex];
+        nextIndex += 1;
+        const existed = Boolean(this.stateStore.subagentThread(childId)?.channelId);
+        try {
+          const binding = await this.#ensureSubagentBinding(childId, { force: true });
+          if (!binding) continue;
+          if (existed) result.existing += 1;
+          else result.created += 1;
+        } catch (error) {
+          result.failed += 1;
+          this.#log('subagent-sync-failed', {
+            threadId: childId,
+            error: error.stack ?? error.message,
+          });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, () => worker()));
+    return result;
+  }
+
+  async #ensureSubagentBinding(threadId, { force = false } = {}) {
+    const existing = this.stateStore.binding(threadId);
+    if (!force && existing?.isSubagent && existing.channelId) return existing;
+    const rejectedAt = this.nonSubagentThreadIds.get(threadId);
+    if (!force && rejectedAt && Date.now() - rejectedAt < 300_000) return null;
+    const pending = this.subagentSyncPromises.get(threadId);
+    if (pending) return pending;
+    const operation = (async () => {
+      if (!existing?.isSubagent && typeof this.codex.threadMetadata === 'function') {
+        const metadata = (await this.codex.threadMetadata(threadId))?.thread;
+        if (!isSubagentCodexThread(metadata)) {
+          this.nonSubagentThreadIds.set(threadId, Date.now());
+          return null;
+        }
+      }
+      const result = await this.codex.readThread(threadId);
+      const thread = result?.thread;
+      if (!isSubagentCodexThread(thread)) {
+        this.nonSubagentThreadIds.set(threadId, Date.now());
+        return null;
+      }
+      this.nonSubagentThreadIds.delete(threadId);
+      return this.#syncSubagentThread(thread);
+    })();
+    this.subagentSyncPromises.set(threadId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.subagentSyncPromises.get(threadId) === operation) {
+        this.subagentSyncPromises.delete(threadId);
+      }
+    }
+  }
+
+  async #topLevelParentBinding(thread) {
+    const { parentThreadId } = subagentMetadata(thread);
+    if (!parentThreadId) return null;
+    let parent = this.stateStore.binding(parentThreadId);
+    if (parent?.isSubagent && !parent.topLevelParentThreadId) {
+      const result = await this.codex.readThread(parentThreadId);
+      parent = await this.#syncSubagentThread(result.thread);
+    } else if (!parent) {
+      const result = await this.codex.readThread(parentThreadId);
+      if (isSubagentCodexThread(result.thread)) parent = await this.#syncSubagentThread(result.thread);
+      else parent = this.stateStore.binding(parentThreadId);
+    }
+    if (!parent) return null;
+    const topLevelParentThreadId = parent.isSubagent ? parent.topLevelParentThreadId : parent.threadId;
+    const topLevel = this.stateStore.binding(topLevelParentThreadId);
+    return topLevel && !topLevel.isSubagent ? topLevel : null;
+  }
+
+  async #findExistingDiscordSubagentThread(parentChannel, threadId, storedChannelId = null) {
+    if (storedChannelId) {
+      const stored = await this.client.channels.fetch(storedChannelId).catch(() => null);
+      if (stored?.isThread?.() && stored.parentId === parentChannel.id) return stored;
+    }
+    const suffix = String(threadId).slice(-8);
+    const active = await parentChannel.threads.fetchActive(false).catch(() => null);
+    let match = active?.threads
+      ? [...active.threads.values()].find((candidate) => candidate.name.endsWith(suffix)) ?? null
+      : null;
+    if (match) return match;
+    const archived = await parentChannel.threads.fetchArchived({ type: 'public', limit: 100 }, false).catch(() => null);
+    match = archived?.threads
+      ? [...archived.threads.values()].find((candidate) => candidate.name.endsWith(suffix)) ?? null
+      : null;
+    return match;
+  }
+
+  async #ensureSubagentHeader(binding, thread, channel) {
+    const metadata = subagentMetadata(thread);
+    let message = binding.headerMessageId
+      ? await channel.messages.fetch(binding.headerMessageId).catch(() => null)
+      : null;
+    if (!message) {
+      const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+      message = recent
+        ? [...recent.values()].find((candidate) => candidate.author.id === this.client.user.id
+          && candidate.embeds.some((embed) => embed.footer?.text === subagentMarker(thread.id))) ?? null
+        : null;
+    }
+    const embed = new EmbedBuilder()
+      .setTitle('Codex subagent')
+      .setColor(thread.status?.type === 'active' ? COLORS.active : COLORS.neutral)
+      .setDescription('親タスクから起動されたサブエージェントの閲覧専用ミラーです。')
+      .addFields(
+        { name: 'Agent', value: metadata.nickname ?? '(nicknameなし)', inline: true },
+        { name: 'Path', value: `\`${metadata.agentPath ?? '(unknown)'}\``, inline: true },
+        { name: 'Depth', value: String(metadata.depth ?? '?'), inline: true },
+        { name: 'Agent thread', value: `\`${thread.id}\`` },
+        { name: 'Parent task', value: `<#${binding.parentChannelId}> / \`${binding.topLevelParentThreadId}\`` },
+      )
+      .setFooter({ text: subagentMarker(thread.id) })
+      .setTimestamp();
+    const payload = { embeds: [embed], allowedMentions: { parse: [] } };
+    if (message) await message.edit(payload);
+    else message = await channel.send(payload);
+    if (binding.headerMessageId !== message.id) {
+      this.stateStore.setSubagentThread(thread.id, { headerMessageId: message.id });
+    }
+    return message;
+  }
+
+  async #syncSubagentThread(thread) {
+    const metadata = subagentMetadata(thread);
+    const topLevel = await this.#topLevelParentBinding(thread);
+    if (!topLevel) {
+      this.#scheduleTaskSync('subagent-parent-not-bound');
+      return null;
+    }
+    const parentChannel = await this.client.channels.fetch(topLevel.channelId).catch(() => null);
+    if (!parentChannel?.threads) throw new Error(`Parent task channel is unavailable: ${topLevel.channelId}`);
+    const existing = this.stateStore.subagentThread(thread.id);
+    let channel = await this.#findExistingDiscordSubagentThread(parentChannel, thread.id, existing?.channelId);
+    let created = false;
+    if (!channel) {
+      channel = await parentChannel.threads.create({
+        name: subagentDiscordThreadName(thread),
+        autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+        type: ChannelType.PublicThread,
+        reason: `Mirror Codex subagent ${thread.id}`,
+      });
+      created = true;
+    }
+    if (channel.archived) await channel.setArchived(false, 'Synchronize Codex subagent');
+    const desiredName = subagentDiscordThreadName(thread);
+    if (channel.name !== desiredName) await channel.setName(desiredName, 'Refresh Codex subagent status');
+    this.stateStore.setSubagentThread(thread.id, {
+      channelId: channel.id,
+      parentChannelId: parentChannel.id,
+      parentThreadId: metadata.parentThreadId,
+      topLevelParentThreadId: topLevel.threadId,
+      agentPath: metadata.agentPath,
+      nickname: metadata.nickname,
+      role: metadata.role,
+      depth: metadata.depth,
+      cwd: thread.cwd ?? topLevel.cwd ?? null,
+      sessionPath: thread.path ?? existing?.sessionPath ?? null,
+      name: thread.name ?? metadata.nickname ?? metadata.agentPath ?? 'subagent',
+      taskStatus: thread.status?.type ?? 'unknown',
+      watchLevel: 'normal',
+      completionReportsEnabled: false,
+      discordArchived: false,
+      snapshotInitialized: existing?.snapshotInitialized ?? false,
+    });
+    let binding = this.stateStore.subagentThread(thread.id);
+    await this.#ensureSubagentHeader(binding, thread, channel);
+    binding = this.stateStore.subagentThread(thread.id);
+    const needsTranscript = created || (binding.transcriptVersion ?? 0) < 11
+      || subagentOwnTurns(thread).some((turn) => turn.status === 'inProgress');
+    if (needsTranscript) {
+      this.#reconcileThreadTranscript(thread.id, {
+        channel,
+        activeOnly: !created && (binding.transcriptVersion ?? 0) >= 11,
+        includeHistoricalDetails: true,
+      }).then(async () => {
+        const latest = this.stateStore.subagentThread(thread.id);
+        if (latest?.taskStatus !== 'active' && !channel.archived) {
+          await channel.setArchived(true, 'Codex subagent is idle');
+          this.stateStore.setSubagentThread(thread.id, { discordArchived: true });
+        }
+      }).catch((error) => {
+        this.#log('subagent-transcript-sync-failed', {
+          threadId: thread.id,
+          channelId: channel.id,
+          error: error.stack ?? error.message,
+        });
+      });
+    } else if (thread.status?.type !== 'active') {
+      await channel.setArchived(true, 'Codex subagent is idle');
+      this.stateStore.setSubagentThread(thread.id, { discordArchived: true });
+    }
+    this.#log('subagent-thread-synced', {
+      threadId: thread.id,
+      parentThreadId: metadata.parentThreadId,
+      topLevelParentThreadId: topLevel.threadId,
+      channelId: channel.id,
+      created,
+      status: thread.status?.type ?? 'unknown',
+    });
+    return this.stateStore.subagentThread(thread.id);
+  }
+
+  #subagentThreadFromBinding(binding, status) {
+    return {
+      id: binding.threadId,
+      status: { type: status },
+      source: {
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: binding.parentThreadId,
+            depth: binding.depth,
+            agent_path: binding.agentPath,
+            agent_nickname: binding.nickname,
+            agent_role: binding.role,
+          },
+        },
+      },
+    };
+  }
+
+  async #setSubagentDiscordStatus(binding, status) {
+    if (!binding?.isSubagent) return;
+    const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
+    if (!channel?.isThread?.()) return;
+    if (channel.archived) await channel.setArchived(false, 'Refresh Codex subagent status');
+    const thread = this.#subagentThreadFromBinding(binding, status);
+    const desiredName = subagentDiscordThreadName(thread);
+    if (channel.name !== desiredName) await channel.setName(desiredName, 'Refresh Codex subagent status');
+    await this.#ensureSubagentHeader(binding, thread, channel);
+    const discordArchived = status !== 'active';
+    if (discordArchived) await channel.setArchived(true, 'Codex subagent is idle');
+    this.stateStore.setSubagentThread(binding.threadId, { taskStatus: status, discordArchived });
+  }
+
   async #openTaskChannel(thread) {
     const { guild } = await this.infrastructureReady;
     const context = {
@@ -3943,6 +4288,15 @@ export class DiscordController {
       const field = embed.fields?.find((candidate) => candidate.name === 'Turn');
       const fieldMatch = field?.value?.match(/`([^`]+)`/);
       if (fieldMatch) return fieldMatch[1];
+    }
+    return null;
+  }
+
+  #embedTaskId(message) {
+    for (const embed of message.embeds) {
+      const field = embed.fields?.find((candidate) => candidate.name === 'Task');
+      const match = field?.value?.match(/`([^`]+)`/);
+      if (match) return match[1];
     }
     return null;
   }
@@ -4444,6 +4798,35 @@ export class DiscordController {
     }
   }
 
+  async #cleanupInheritedSubagentMessages(binding, channel, messages, ownTurnIds) {
+    const stale = [];
+    for (const message of [...messages.values()]) {
+      if (message.author.id !== this.client.user.id) continue;
+      if (this.#embedTaskId(message) !== binding.threadId) continue;
+      const turnId = this.#embedTurnId(message);
+      if (!turnId || ownTurnIds.has(turnId)) continue;
+      stale.push(message);
+    }
+    if (stale.length > 1 && typeof channel.bulkDelete === 'function') {
+      for (let index = 0; index < stale.length; index += 100) {
+        const batch = stale.slice(index, index + 100);
+        const deleted = await channel.bulkDelete(
+          batch.map((message) => message.id),
+          true,
+          `Remove inherited Codex turns from subagent ${binding.threadId}`,
+        );
+        for (const id of deleted.keys()) messages.delete(id);
+      }
+    }
+    for (const message of stale) {
+      if (!messages.has(message.id)) continue;
+      await message.delete().catch((error) => {
+        if (error.code !== 10008) throw error;
+      });
+      messages.delete(message.id);
+    }
+  }
+
   async #reconcileThreadTranscript(threadId, options = {}) {
     if (this.transcriptSyncPromises.has(threadId)) {
       const existing = this.transcriptSyncPromises.get(threadId);
@@ -4494,8 +4877,18 @@ export class DiscordController {
     const channel = knownChannel ?? await this.client.channels.fetch(binding.channelId);
     // thread/list entries can omit historical turns and items. Reconciliation
     // must only prune Discord messages against a fully hydrated transcript.
-    const thread = (await this.codex.readThread(threadId)).thread;
+    const hydratedThread = (await this.codex.readThread(threadId)).thread;
+    const thread = binding.isSubagent
+      ? { ...hydratedThread, turns: subagentOwnTurns(hydratedThread) }
+      : hydratedThread;
+    const ownTurnIds = new Set((thread.turns ?? []).map((turn) => turn.id));
+    if (binding.isSubagent && typeof this.stateStore.retainSubagentTurnRecords === 'function') {
+      this.stateStore.retainSubagentTurnRecords(threadId, ownTurnIds);
+    }
     const messages = await this.#fetchChannelHistory(channel);
+    if (binding.isSubagent) {
+      await this.#cleanupInheritedSubagentMessages(binding, channel, messages, ownTurnIds);
+    }
     const completedTurns = recentSinceMs === null
       ? (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress')
       : completedTurnsSince(thread.turns, recentSinceMs);
@@ -4703,6 +5096,9 @@ export class DiscordController {
       }
       if (message.method === 'thread/started') {
         if (this.#isSyncableThread(message.params?.thread)) this.#scheduleTaskSync('thread/started');
+        else if (isSubagentCodexThread(message.params?.thread)) {
+          await this.#ensureSubagentBinding(message.params.thread.id, { force: true });
+        }
         return;
       }
       if (!threadId) return;
@@ -4714,8 +5110,13 @@ export class DiscordController {
         await this.#moveDeletedTaskToArchive(threadId);
         return;
       }
-      const binding = this.stateStore.binding(threadId);
+      let binding = this.stateStore.binding(threadId);
+      if (!binding) binding = await this.#ensureSubagentBinding(threadId);
       if (!binding) return;
+      if (message.method === 'thread/status/changed' && binding.isSubagent) {
+        await this.#ensureSubagentBinding(threadId, { force: true });
+        return;
+      }
       const turnId = message.params?.turnId ?? message.params?.turn?.id ?? null;
       const turnRecord = turnId ? this.stateStore.turnRecord(threadId, turnId) : null;
       const finalizedTurnUpdate = turnRecord?.status !== 'inProgress'
@@ -4933,6 +5334,7 @@ export class DiscordController {
 
   async #turnStarted(binding, params) {
     const turnId = params.turn?.id ?? params.turnId;
+    if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, 'active');
     const view = this.#view(binding.threadId, turnId, binding.channelId);
     view.status = 'inProgress';
     view.startedAt = turnTimestampMs(params.turn ?? { id: turnId }) ?? view.startedAt ?? Date.now();
@@ -5145,14 +5547,14 @@ export class DiscordController {
           lastCompletionMessageId: completionMessage.id,
           taskStatus: 'idle',
         });
-        await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
+        if (!binding.isSubagent) await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
           this.#log('task-panel-completion-repost-failed', {
             threadId: binding.threadId,
             turnId: turn.id,
             error: error.stack ?? error.message,
           });
         });
-        if (turn.status === 'completed') {
+        if (!binding.isSubagent && turn.status === 'completed') {
           const notice = await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
           if (!notice) {
             this.#log('completion-notice-suppressed', {
@@ -5162,6 +5564,7 @@ export class DiscordController {
           }
           this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
         }
+        if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, turn.status ?? 'idle');
         this.#clearCompletionRecovery(binding.threadId, turn.id);
         const completedView = this.turnViews.get(`${binding.threadId}:${turn.id}`);
         if (completedView?.elapsedTimer) clearTimeout(completedView.elapsedTimer);
@@ -5223,14 +5626,14 @@ export class DiscordController {
       lastCompletionMessageId: completionMessage.id,
       taskStatus: 'idle',
     });
-    await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
+    if (!binding.isSubagent) await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
       this.#log('task-panel-completion-repost-failed', {
         threadId: binding.threadId,
         turnId: turn.id,
         error: error.stack ?? error.message,
       });
     });
-    if (turn.status === 'completed') {
+    if (!binding.isSubagent && turn.status === 'completed') {
       const notice = await this.#postCompletionNotice(completionMessage, finalText, binding.threadId, turn.id);
       if (!notice) {
         this.#log('completion-notice-suppressed', {
@@ -5240,6 +5643,7 @@ export class DiscordController {
       }
       this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
     }
+    if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, turn.status ?? 'idle');
     this.#clearCompletionRecovery(binding.threadId, turn.id);
     this.turnViews.delete(`${binding.threadId}:${turn.id}`);
     this.#scheduleTaskSync('turn/completed');

@@ -50,6 +50,28 @@ test('StateStore persists bindings atomically', () => {
     });
     assert.equal(second.turnRecord('thread-1', 'turn-1').liveMessageId, null);
     assert.deepEqual(second.turnRecord('thread-1', 'turn-1').finalMessageIds, ['message-final']);
+    second.setSubagentThread('child-thread-1', {
+      channelId: 'discord-thread-1',
+      parentThreadId: 'thread-1',
+      topLevelParentThreadId: 'thread-1',
+      discordArchived: false,
+    });
+    second.setTurnRecord('child-thread-1', 'child-turn-1', {
+      cardMessageId: 'child-card-1',
+      status: 'inProgress',
+    });
+    second.setTurnRecord('child-thread-1', 'inherited-parent-turn', {
+      cardMessageId: 'wrong-card',
+    });
+    second.retainSubagentTurnRecords('child-thread-1', new Set(['child-turn-1']));
+    assert.equal(second.binding('child-thread-1').isSubagent, true);
+    assert.equal(second.subagentThreadByDiscordId('discord-thread-1').threadId, 'child-thread-1');
+    assert.equal(second.turnRecord('child-thread-1', 'child-turn-1').cardMessageId, 'child-card-1');
+    assert.equal(second.turnRecord('child-thread-1', 'inherited-parent-turn'), null);
+    assert.equal(second.bindings().some((binding) => binding.threadId === 'child-thread-1'), false);
+    const subagentReload = new StateStore(directory, '123456789012345');
+    assert.equal(subagentReload.subagentThread('child-thread-1').parentThreadId, 'thread-1');
+    assert.equal(subagentReload.subagentThreads().length, 1);
     assert.throws(() => second.setBinding(undefined, { channelId: 'broken' }), /valid threadId/);
     second.setProjectCategory('c:\\git\\example', {
       path: 'C:\\git\\Example',
@@ -84,7 +106,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
       autoCatchupProjects: { legacy: { path: 'C:\\work' } },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.schemaVersion, 6);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
@@ -115,11 +137,31 @@ test('StateStore migrates v2 project and completed-turn identities into the curr
       },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.schemaVersion, 6);
     assert.equal(state.projectCategories['c:\\git\\example'].projectId, 'prj_35574e3c6147');
     assert.deepEqual(state.bindings['thread-1'].turnMessages['turn-1'].finalMessageIds, ['message-final']);
     assert.equal(state.bindings['thread-1'].turnMessages['turn-1'].cardMessageId, 'message-final');
     assert.equal(state.bindings['thread-1'].turnMessages['turn-1'].status, 'completed');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('StateStore migrates v5 state with an isolated subagent ledger', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-v5-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'state.json'), JSON.stringify({
+      schemaVersion: 5,
+      guildId: '123456789012345',
+      infrastructure: {},
+      projectCategories: {},
+      bindings: { 'thread-1': { channelId: 'channel-1' } },
+      clientToolRequests: {},
+    }));
+    const store = new StateStore(directory, '123456789012345');
+    assert.equal(store.snapshot().schemaVersion, 6);
+    assert.deepEqual(store.snapshot().subagentThreads, {});
+    assert.equal(store.binding('thread-1').channelId, 'channel-1');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

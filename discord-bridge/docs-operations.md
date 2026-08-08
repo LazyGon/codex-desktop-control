@@ -51,6 +51,12 @@ discovery or status reconciliation for other channels.
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,
    then reposts the pinned task control panel directly below it.
+   Subagents appear as read-only Discord threads under this task channel. Their
+   header records nickname, agent path, depth, child ID, and parent ID. Open a
+   child thread to follow its own commentary, App Server reasoning summaries,
+   tools, and final response. Nested agents are flattened as sibling Discord
+   threads. Finished child threads change to `⚫` and archive automatically;
+   they do not create `codex-completions` posts.
 6. Respond to approval or input cards when they appear.
 7. Use `Project files` in the pinned task panel to browse the task working
    directory. Select a directory to open it or a file to post it into the

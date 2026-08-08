@@ -42,6 +42,9 @@ const stats = {
   liveCards: 0,
   reasoningCards: 0,
   turnRecords: 0,
+  subagentThreads: 0,
+  unloadedTaskThreads: 0,
+  unloadedSubagentThreads: 0,
 };
 
 function embedIdentity(message) {
@@ -104,7 +107,7 @@ try {
   await client.login(token);
   if (!client.isReady()) await new Promise((resolve) => client.once('clientReady', resolve));
   await codex.connect();
-  if (state.schemaVersion !== 5) errors.push(`State schema is ${state.schemaVersion}; expected 5.`);
+  if (state.schemaVersion !== 6) errors.push(`State schema is ${state.schemaVersion}; expected 6.`);
 
   const guild = await client.guilds.fetch(config.guildId);
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
@@ -126,7 +129,21 @@ try {
     }
 
     const messages = await fetchHistory(channel);
-    const { thread } = await codex.call('thread/read', { threadId, includeTurns: true }, 60_000);
+    const result = await codex.call('thread/read', { threadId, includeTurns: true }, 60_000).catch((error) => {
+      if (error.message.includes('thread not loaded')) {
+        stats.unloadedTaskThreads += 1;
+        return null;
+      }
+      throw error;
+    });
+    if (!result && binding.taskStatus === 'active') {
+      errors.push(`${threadId}: active Codex task is not loaded by app-server.`);
+    }
+    const thread = result?.thread ?? {
+      name: binding.name,
+      path: binding.sessionPath,
+      turns: [],
+    };
     if (thread.name && binding.name !== thread.name) {
       errors.push(`${threadId}: binding name ${binding.name} does not match Codex task name ${thread.name}.`);
     }
@@ -427,6 +444,45 @@ try {
     for (const categoryId of project.categoryIds ?? []) {
       const category = await guild.channels.fetch(categoryId).catch(() => null);
       if (!category) errors.push(`${projectKey}: project category ${categoryId} is unavailable.`);
+    }
+  }
+
+  for (const [threadId, binding] of Object.entries(state.subagentThreads ?? {})) {
+    stats.subagentThreads += 1;
+    const channel = await guild.channels.fetch(binding.channelId).catch(() => null);
+    if (!channel?.isThread?.()) {
+      errors.push(`${threadId}: subagent Discord thread ${binding.channelId} is unavailable.`);
+      continue;
+    }
+    if (channel.parentId !== binding.parentChannelId) {
+      errors.push(`${threadId}: subagent Discord parent does not match the ledger.`);
+    }
+    if (!channel.name.endsWith(threadId.slice(-8))) {
+      errors.push(`${threadId}: subagent Discord thread name lacks its stable identity suffix.`);
+    }
+    if (!state.bindings?.[binding.topLevelParentThreadId]) {
+      errors.push(`${threadId}: top-level parent binding ${binding.topLevelParentThreadId} is missing.`);
+    }
+    const header = binding.headerMessageId
+      ? await channel.messages.fetch(binding.headerMessageId).catch(() => null)
+      : null;
+    if (!header?.embeds.some((embed) => embed.footer?.text === `Codex subagent: ${threadId}`)) {
+      errors.push(`${threadId}: subagent identity header is missing.`);
+    }
+    const result = await codex.call('thread/read', { threadId, includeTurns: false }, 60_000).catch((error) => {
+      if (error.message.includes('thread not loaded')) {
+        stats.unloadedSubagentThreads += 1;
+        return null;
+      }
+      throw error;
+    });
+    if (result?.thread.parentThreadId !== undefined && result.thread.parentThreadId !== binding.parentThreadId) {
+      errors.push(`${threadId}: Codex parent ${result.thread.parentThreadId} does not match the ledger.`);
+    }
+    const active = result?.thread.status?.type === 'active' || (!result && binding.taskStatus === 'active');
+    if (active && channel.archived) errors.push(`${threadId}: active subagent Discord thread is archived.`);
+    if (!active && binding.transcriptVersion === 11 && !channel.archived) {
+      errors.push(`${threadId}: synchronized idle subagent Discord thread is not archived.`);
     }
   }
 

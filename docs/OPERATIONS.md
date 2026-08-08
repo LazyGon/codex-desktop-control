@@ -140,6 +140,14 @@ review, and background terminals. Rename a task channel to rename the
 Codex task. The next sync normalizes the channel name and restores its status
 emoji prefix.
 
+When a task starts subagents, each child appears as a read-only Discord thread
+under the top-level task channel. Open that thread to follow the child's
+commentary, App Server reasoning summaries, tool progress, and final response.
+Nested children are listed as sibling Discord threads with their path and depth
+shown in the header. `🟢` means the child is running; `⚫` means it has finished.
+Finished child threads are archived but remain readable. Messages posted inside
+these mirror threads are intentionally not sent to Codex.
+
 Assistant-card `Linked files` pickers provide individual downloads and a
 `Download all as ZIP` action. Explicitly linked regular files may be anywhere
 outside Windows-protected system directories, including `.codex`, `.git`,

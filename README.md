@@ -164,6 +164,12 @@ to ON; turning it OFF keeps final cards in the task channel but suppresses
 future `codex-completions` posts for that task. After every turn ends, the task
 panel is reposted and pinned below the final card so its controls remain at the
 latest channel position.
+Codex subagents are shown as read-only Discord threads beneath their top-level
+task channel. Each thread mirrors that agent's commentary, App Server reasoning
+summaries, tool progress, and final answer. Nested agents are flattened beneath
+the same task channel with their full agent path and depth retained. Active
+subagent threads use `🟢`; finished threads use `⚫` and are archived without
+creating separate completion-channel notifications.
 Pinned control panels use a dedicated purple embed color, while completed
 Codex result cards remain blue, so the two surfaces are visually distinct.
 They also provide a project-file browser, while assistant

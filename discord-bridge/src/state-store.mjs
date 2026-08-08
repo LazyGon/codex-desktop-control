@@ -8,7 +8,7 @@ import {
 
 function initialState(guildId) {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     guildId,
     infrastructure: {
       controlCategoryId: null,
@@ -21,6 +21,7 @@ function initialState(guildId) {
     },
     projectCategories: {},
     bindings: {},
+    subagentThreads: {},
     clientToolRequests: {},
     lastReadyAt: null,
   };
@@ -62,8 +63,13 @@ export class StateStore {
       this.value.clientToolRequests ??= {};
       this.value.schemaVersion = 5;
     }
-    if (this.value.schemaVersion !== 5) this.value = initialState(guildId);
+    if (this.value.schemaVersion === 5) {
+      this.value.subagentThreads ??= {};
+      this.value.schemaVersion = 6;
+    }
+    if (this.value.schemaVersion !== 6) this.value = initialState(guildId);
     delete this.value.bindings?.undefined;
+    delete this.value.subagentThreads?.undefined;
     for (const binding of Object.values(this.value.bindings ?? {})) {
       binding.snapshotInitialized ??= true;
       binding.turnMessages ??= {};
@@ -76,6 +82,11 @@ export class StateStore {
     this.value.infrastructure.transferCategoryId ??= null;
     this.value.infrastructure.transferTextChannelId ??= null;
     this.value.projectCategories ??= {};
+    this.value.subagentThreads ??= {};
+    for (const subagent of Object.values(this.value.subagentThreads)) {
+      subagent.turnMessages ??= {};
+      subagent.discordArchived ??= false;
+    }
     this.value.clientToolRequests ??= {};
     delete this.value.autoCatchupProjects;
     this.#write();
@@ -92,9 +103,13 @@ export class StateStore {
   }
 
   binding(threadId) {
-    return this.value.bindings[threadId]
-      ? { ...deepClone(this.value.bindings[threadId]), threadId }
-      : null;
+    if (this.value.bindings[threadId]) {
+      return { ...deepClone(this.value.bindings[threadId]), threadId };
+    }
+    if (this.value.subagentThreads[threadId]) {
+      return { ...deepClone(this.value.subagentThreads[threadId]), threadId, isSubagent: true };
+    }
+    return null;
   }
 
   bindingByChannel(channelId) {
@@ -106,17 +121,72 @@ export class StateStore {
     return Object.entries(this.value.bindings).map(([threadId, binding]) => ({ threadId, ...deepClone(binding) }));
   }
 
+  subagentThread(threadId) {
+    const value = this.value.subagentThreads[threadId];
+    return value ? { ...deepClone(value), threadId, isSubagent: true } : null;
+  }
+
+  subagentThreadByDiscordId(discordThreadId) {
+    const entry = Object.entries(this.value.subagentThreads)
+      .find(([, value]) => value.channelId === discordThreadId);
+    return entry ? { threadId: entry[0], ...deepClone(entry[1]), isSubagent: true } : null;
+  }
+
+  subagentThreads() {
+    return Object.entries(this.value.subagentThreads)
+      .map(([threadId, value]) => ({ threadId, ...deepClone(value), isSubagent: true }));
+  }
+
+  setSubagentThread(threadId, patch) {
+    if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
+      throw new Error('A valid threadId is required for a Discord subagent thread.');
+    }
+    return this.update((state) => {
+      state.subagentThreads[threadId] = {
+        ...state.subagentThreads[threadId],
+        ...patch,
+        isSubagent: true,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
+  removeSubagentThread(threadId) {
+    return this.update((state) => {
+      delete state.subagentThreads[threadId];
+    });
+  }
+
+  retainSubagentTurnRecords(threadId, turnIds) {
+    if (!this.value.subagentThreads[threadId]) {
+      throw new Error(`Unknown subagent thread binding: ${threadId}`);
+    }
+    const retained = new Set(turnIds ?? []);
+    return this.update((state) => {
+      state.subagentThreads[threadId].turnMessages ??= {};
+      for (const turnId of Object.keys(state.subagentThreads[threadId].turnMessages)) {
+        if (!retained.has(turnId)) delete state.subagentThreads[threadId].turnMessages[turnId];
+      }
+    });
+  }
+
   turnRecord(threadId, turnId) {
-    const value = this.value.bindings[threadId]?.turnMessages?.[turnId];
+    const owner = this.value.bindings[threadId] ?? this.value.subagentThreads[threadId];
+    const value = owner?.turnMessages?.[turnId];
     return value ? deepClone(value) : null;
   }
 
   setTurnRecord(threadId, turnId, patch) {
-    if (!this.value.bindings[threadId]) throw new Error(`Unknown thread binding: ${threadId}`);
+    const collection = this.value.bindings[threadId]
+      ? 'bindings'
+      : this.value.subagentThreads[threadId]
+        ? 'subagentThreads'
+        : null;
+    if (!collection) throw new Error(`Unknown thread binding: ${threadId}`);
     return this.update((state) => {
-      state.bindings[threadId].turnMessages ??= {};
-      state.bindings[threadId].turnMessages[turnId] = {
-        ...state.bindings[threadId].turnMessages[turnId],
+      state[collection][threadId].turnMessages ??= {};
+      state[collection][threadId].turnMessages[turnId] = {
+        ...state[collection][threadId].turnMessages[turnId],
         ...patch,
         updatedAt: new Date().toISOString(),
       };
@@ -177,6 +247,9 @@ export class StateStore {
   setBinding(threadId, binding) {
     if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
       throw new Error('A valid threadId is required for a Discord binding.');
+    }
+    if (this.value.subagentThreads[threadId] && !this.value.bindings[threadId]) {
+      return this.setSubagentThread(threadId, binding);
     }
     return this.update((state) => {
       state.bindings[threadId] = { ...state.bindings[threadId], ...binding, updatedAt: new Date().toISOString() };
