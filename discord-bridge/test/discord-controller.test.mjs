@@ -1083,6 +1083,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');
   assert.equal(liveAssistant.components[0].components.at(-1).custom_id, 'cx:copy:card');
+  assert.equal(liveAssistant.embeds[0].fields.some((field) => field.name === 'Recent work'), false);
   assert.deepEqual(pastAssistant.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);
   assert.equal(liveAssistant.embeds[0].fields.find((field) => field.name === 'Message').value, '`assistant-item-2`');
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-1'].messageIds, [pastAssistant.id]);

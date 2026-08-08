@@ -5352,7 +5352,6 @@ export class DiscordController {
       embed.addFields({ name: 'Reasoning', value: '推論中...' });
     }
     if (view.currentItem) embed.addFields({ name: 'Current', value: truncate(view.currentItem, 600) });
-    if (view.items.length) embed.addFields({ name: 'Recent work', value: truncate(view.items.map((item) => `- ${item}`).join('\n'), 700) });
     if (view.plan.length) {
       embed.addFields({
         name: 'Plan',
