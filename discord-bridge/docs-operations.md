@@ -146,6 +146,18 @@ This rejection is intentional: the Bridge does not inherit a Desktop UI
 session or connector executor and never exposes a generic client-tool or shell
 escape hatch.
 
+Effectful `codex_app` client tools have one executor. When the shared launcher's
+current state confirms that Codex Desktop is connected to the same app-server,
+Desktop owns the request and the Bridge waits for `serverRequest/resolved` or
+subsequent source-turn progress without executing it. If every recorded Desktop process is gone while the
+recorded app-server generation is still alive, the Bridge provides the existing
+fallback once. An unreadable, stale, or mismatched owner state fails closed
+after five minutes and posts an alert; it never guesses by performing the side
+effect. The app-server generation plus request ID and final Bridge response are
+persisted in `data\state.json`, so reconnect delivery cannot repeat an already
+attempted effect. Read-only `list_threads`, `read_thread`, and `list_projects`
+remain immediately available through the Bridge.
+
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
 notifications. `/codex sync` forces the same reconciliation immediately.

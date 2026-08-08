@@ -104,7 +104,7 @@ try {
   await client.login(token);
   if (!client.isReady()) await new Promise((resolve) => client.once('clientReady', resolve));
   await codex.connect();
-  if (state.schemaVersion !== 4) errors.push(`State schema is ${state.schemaVersion}; expected 4.`);
+  if (state.schemaVersion !== 5) errors.push(`State schema is ${state.schemaVersion}; expected 5.`);
 
   const guild = await client.guilds.fetch(config.guildId);
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {

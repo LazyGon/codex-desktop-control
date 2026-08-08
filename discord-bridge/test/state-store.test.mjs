@@ -31,6 +31,14 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
     assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
     assert.equal(second.binding('thread-1').completionReportsEnabled, true);
+    second.setClientToolRequest('server|request:1', {
+      status: 'completed',
+      response: { success: true },
+    });
+    assert.equal(
+      new StateStore(directory, '123456789012345').clientToolRequest('server|request:1').status,
+      'completed',
+    );
     second.setTurnRecord('thread-1', 'turn-1', {
       liveMessageId: 'message-live',
       userMessageIds: ['message-user'],
@@ -76,7 +84,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
       autoCatchupProjects: { legacy: { path: 'C:\\work' } },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 4);
+    assert.equal(state.schemaVersion, 5);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
@@ -88,7 +96,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
   }
 });
 
-test('StateStore migrates v2 project and completed-turn identities into the v4 card ledger', () => {
+test('StateStore migrates v2 project and completed-turn identities into the current card ledger', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-v2-'));
   try {
     fs.writeFileSync(path.join(directory, 'state.json'), JSON.stringify({
@@ -107,7 +115,7 @@ test('StateStore migrates v2 project and completed-turn identities into the v4 c
       },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 4);
+    assert.equal(state.schemaVersion, 5);
     assert.equal(state.projectCategories['c:\\git\\example'].projectId, 'prj_35574e3c6147');
     assert.deepEqual(state.bindings['thread-1'].turnMessages['turn-1'].finalMessageIds, ['message-final']);
     assert.equal(state.bindings['thread-1'].turnMessages['turn-1'].cardMessageId, 'message-final');

@@ -8,7 +8,7 @@ import {
 
 function initialState(guildId) {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     guildId,
     infrastructure: {
       controlCategoryId: null,
@@ -21,6 +21,7 @@ function initialState(guildId) {
     },
     projectCategories: {},
     bindings: {},
+    clientToolRequests: {},
     lastReadyAt: null,
   };
 }
@@ -57,7 +58,11 @@ export class StateStore {
       }
       this.value.schemaVersion = 4;
     }
-    if (this.value.schemaVersion !== 4) this.value = initialState(guildId);
+    if (this.value.schemaVersion === 4) {
+      this.value.clientToolRequests ??= {};
+      this.value.schemaVersion = 5;
+    }
+    if (this.value.schemaVersion !== 5) this.value = initialState(guildId);
     delete this.value.bindings?.undefined;
     for (const binding of Object.values(this.value.bindings ?? {})) {
       binding.snapshotInitialized ??= true;
@@ -71,6 +76,7 @@ export class StateStore {
     this.value.infrastructure.transferCategoryId ??= null;
     this.value.infrastructure.transferTextChannelId ??= null;
     this.value.projectCategories ??= {};
+    this.value.clientToolRequests ??= {};
     delete this.value.autoCatchupProjects;
     this.#write();
   }
@@ -114,6 +120,30 @@ export class StateStore {
         ...patch,
         updatedAt: new Date().toISOString(),
       };
+    });
+  }
+
+  clientToolRequest(key) {
+    const value = this.value.clientToolRequests[key];
+    return value ? deepClone(value) : null;
+  }
+
+  setClientToolRequest(key, patch) {
+    if (typeof key !== 'string' || !key) throw new Error('A client tool request key is required.');
+    return this.update((state) => {
+      state.clientToolRequests ??= {};
+      state.clientToolRequests[key] = {
+        ...state.clientToolRequests[key],
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      const entries = Object.entries(state.clientToolRequests);
+      if (entries.length > 2_000) {
+        entries
+          .sort(([, left], [, right]) => String(left.updatedAt).localeCompare(String(right.updatedAt)))
+          .slice(0, entries.length - 2_000)
+          .forEach(([oldKey]) => delete state.clientToolRequests[oldKey]);
+      }
     });
   }
 

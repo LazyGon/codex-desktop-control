@@ -94,6 +94,11 @@ import {
   ClientToolRouter,
   ClientToolUnavailableError,
 } from './client-tool-router.mjs';
+import {
+  clientToolRequestKey,
+  inspectDesktopClientOwner,
+  requiresExclusiveClientToolOwner,
+} from './client-tool-ownership.mjs';
 import { TextTransferStore } from './text-transfer-store.mjs';
 import {
   projectDescriptorForThread,
@@ -195,6 +200,7 @@ export class DiscordController {
     logDir,
     automationStore = new AutomationStore(),
     clientToolRouter = null,
+    desktopClientInspector = inspectDesktopClientOwner,
     textTransferStore = null,
     incomingAttachmentStore = null,
   }) {
@@ -213,6 +219,8 @@ export class DiscordController {
     )];
     this.automationStore = automationStore;
     this.clientToolRouter = clientToolRouter ?? new ClientToolRouter({ codex, automationStore });
+    this.desktopClientInspector = desktopClientInspector;
+    this.clientToolOwnerTimeoutMs = config.clientToolOwnerTimeoutMs ?? 300_000;
     this.logPath = path.join(logDir, `discord-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.fileTransferTempRoot = path.join(path.dirname(logDir), 'data', 'file-transfers');
     this.incomingAttachmentStore = incomingAttachmentStore ?? new IncomingAttachmentStore(
@@ -229,6 +237,8 @@ export class DiscordController {
     );
     this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
     this.pendingRequests = new Map();
+    this.pendingClientToolRequests = new Map();
+    this.codexEventSequence = 0;
     this.pendingActions = new Map();
     this.turnViews = new Map();
     this.recentUserInputs = [];
@@ -287,8 +297,14 @@ export class DiscordController {
       });
       this.#postAlert(`Discordチャンネル操作によるタスク更新に失敗しました: ${newChannel.id}\n${error.message}`, 'error').catch(() => {});
     }));
-    this.codex.on('notification', (message) => this.#queueCodexNotification(message));
-    this.codex.on('serverRequest', (request) => this.#handleServerRequest(request));
+    this.codex.on('notification', (message) => this.#queueCodexNotification(
+      message,
+      ++this.codexEventSequence,
+    ));
+    this.codex.on('serverRequest', (request) => this.#handleServerRequest(
+      request,
+      ++this.codexEventSequence,
+    ));
     this.codex.on('connectionState', (status) => this.#handleConnectionState(status));
     this.codex.on('subscriptionRestored', (event) => this.#queueSubscriptionRestored(event));
     this.codex.on('subscriptionError', (event) => {
@@ -309,6 +325,7 @@ export class DiscordController {
     this.taskSyncTimer = null;
     this.taskSyncInitialTimer = null;
     this.taskSyncDebounceTimer = null;
+    this.#clearPendingClientToolRequests('controller-stop');
     for (const view of this.turnViews.values()) {
       if (view.timer) clearTimeout(view.timer);
       if (view.elapsedTimer) clearTimeout(view.elapsedTimer);
@@ -4674,10 +4691,12 @@ export class DiscordController {
     return new AttachmentBuilder(Buffer.from(String(text), 'utf8'), { name: filename });
   }
 
-  async #handleCodexNotification(message) {
+  async #handleCodexNotification(message, eventSequence) {
     const threadId = message.params?.threadId ?? message.params?.thread?.id;
     try {
+      this.#resolveDelegatedClientToolsFromProgress(message, eventSequence);
       if (message.method === 'serverRequest/resolved') {
+        this.#resolveDelegatedClientToolRequest(message.params.requestId);
         const record = [...this.pendingRequests.values()].find((candidate) => String(candidate.request.id) === String(message.params.requestId));
         if (record) await this.#resolvePending(record, '別のCodexクライアントで回答済み', null);
         return;
@@ -4845,11 +4864,11 @@ export class DiscordController {
     job.timer.unref?.();
   }
 
-  #queueCodexNotification(message) {
+  #queueCodexNotification(message, eventSequence) {
     if (this.stopping) return;
     const threadId = message.params?.threadId ?? message.params?.thread?.id ?? '__global__';
     const previous = this.notificationQueues.get(threadId) ?? Promise.resolve();
-    const queued = previous.then(() => this.#handleCodexNotification(message));
+    const queued = previous.then(() => this.#handleCodexNotification(message, eventSequence));
     this.notificationQueues.set(threadId, queued);
     queued.finally(() => {
       if (this.notificationQueues.get(threadId) === queued) this.notificationQueues.delete(threadId);
@@ -5463,7 +5482,7 @@ export class DiscordController {
     return embed.setTimestamp();
   }
 
-  async #handleServerRequest(request) {
+  async #handleServerRequest(request, eventSequence) {
     try {
       const threadId = request.params?.threadId;
       const binding = threadId ? this.stateStore.binding(threadId) : null;
@@ -5475,48 +5494,17 @@ export class DiscordController {
       if (request.method === 'item/tool/call') {
         const namespace = request.params?.namespace ?? 'default';
         const tool = request.params?.tool ?? 'unknown';
-        try {
-          const result = await this.clientToolRouter.execute(
+        if (requiresExclusiveClientToolOwner(namespace, tool)) {
+          await this.#handleExclusiveClientToolRequest(
+            request,
             namespace,
             tool,
-            request.params?.arguments,
-            { threadId },
+            threadId,
+            binding,
+            eventSequence,
           );
-          this.codex.respondToServerRequest(request.id, {
-            success: true,
-            contentItems: [{
-              type: 'inputText',
-              text: JSON.stringify(result),
-            }],
-          });
-          this.#log('client-tool-completed', {
-            requestId: request.id,
-            threadId,
-            namespace,
-            tool,
-          });
-        } catch (error) {
-          this.codex.respondToServerRequest(request.id, {
-            success: false,
-            contentItems: [{
-              type: 'inputText',
-              text: error.message,
-            }],
-          });
-          this.#log('client-tool-failed', {
-            requestId: request.id,
-            threadId,
-            namespace,
-            tool,
-            unavailable: error instanceof ClientToolUnavailableError,
-            error: error.message,
-          });
-          if (binding && error instanceof ClientToolUnavailableError) {
-            await this.#postTaskMessage(
-              binding,
-              `**Client tool unavailable through Discord**\n\`${namespace}/${tool}\`\n${error.message}`,
-            );
-          }
+        } else {
+          await this.#executeClientToolRequest(request, namespace, tool, threadId, binding, null);
         }
         return;
       }
@@ -5563,6 +5551,272 @@ export class DiscordController {
       this.#log('server-request-posted', { key, method: request.method, threadId, messageId: posted.id });
     } catch (error) {
       this.#log('server-request-handler-failed', { method: request.method, error: error.stack ?? error.message });
+    }
+  }
+
+  async #handleExclusiveClientToolRequest(
+    request,
+    namespace,
+    tool,
+    threadId,
+    binding,
+    eventSequence,
+  ) {
+    let ownership;
+    try {
+      ownership = this.desktopClientInspector({
+        launcherStatePath: this.config.launcherStatePath,
+        appServerUrl: this.codex.status?.().endpoint ?? this.config.appServerUrl,
+      });
+    } catch (error) {
+      ownership = { state: 'ambiguous', generation: null, reason: `inspection-error:${error.message}` };
+    }
+    const ledgerKey = ownership.generation
+      ? clientToolRequestKey(ownership.generation, request.id)
+      : null;
+    const pendingKey = String(request.id);
+    if (this.pendingClientToolRequests.has(pendingKey)) {
+      this.#log('client-tool-delegation-duplicate', { requestId: request.id, threadId, namespace, tool });
+      return;
+    }
+    const prior = ledgerKey ? this.stateStore.clientToolRequest?.(ledgerKey) : null;
+    if (prior?.response) {
+      this.codex.respondToServerRequest(request.id, prior.response);
+      this.#log('client-tool-response-replayed', {
+        requestId: request.id,
+        threadId,
+        namespace,
+        tool,
+        priorStatus: prior.status,
+      });
+      return;
+    }
+    if (prior?.status?.startsWith('resolved-by-desktop')) {
+      this.#log('client-tool-already-resolved', { requestId: request.id, threadId, namespace, tool });
+      return;
+    }
+    if (prior?.status === 'delegated') {
+      const response = this.#clientToolFailure(
+        'The Discord bridge cannot safely execute this client tool because it was delegated before reconnect and the Desktop outcome is unknown.',
+      );
+      this.#setClientToolRequest(ledgerKey, { status: 'failed-closed', response });
+      this.codex.respondToServerRequest(request.id, response);
+      this.#log('client-tool-delegated-retry-blocked', {
+        requestId: request.id,
+        threadId,
+        namespace,
+        tool,
+      });
+      return;
+    }
+    if (prior?.status === 'executing') {
+      const response = this.#clientToolFailure(
+        'The Discord bridge cannot safely retry this client tool because its previous execution outcome is unknown.',
+      );
+      this.#setClientToolRequest(ledgerKey, { status: 'failed-closed', response });
+      this.codex.respondToServerRequest(request.id, response);
+      this.#log('client-tool-retry-blocked', { requestId: request.id, threadId, namespace, tool });
+      return;
+    }
+    if (ownership.state === 'absent') {
+      await this.#executeClientToolRequest(request, namespace, tool, threadId, binding, ledgerKey);
+      return;
+    }
+
+    this.#setClientToolRequest(ledgerKey, {
+      status: 'delegated',
+      threadId,
+      namespace,
+      tool,
+      ownership: ownership.state,
+      reason: ownership.reason,
+    });
+    const timer = setTimeout(() => {
+      this.#expireDelegatedClientToolRequest(pendingKey).catch((error) => {
+        this.#log('client-tool-delegation-timeout-error', {
+          requestId: request.id,
+          error: error.stack ?? error.message,
+        });
+      });
+    }, this.clientToolOwnerTimeoutMs);
+    timer.unref?.();
+    this.pendingClientToolRequests.set(pendingKey, {
+      request,
+      ledgerKey,
+      namespace,
+      tool,
+      threadId,
+      turnId: request.params?.turnId ?? null,
+      eventSequence,
+      timer,
+      ownership,
+    });
+    this.#log('client-tool-delegated-to-desktop', {
+      requestId: request.id,
+      threadId,
+      namespace,
+      tool,
+      ownership: ownership.state,
+      reason: ownership.reason,
+      timeoutMs: this.clientToolOwnerTimeoutMs,
+    });
+  }
+
+  #resolveDelegatedClientToolRequest(requestId) {
+    const pendingKey = String(requestId);
+    const record = this.pendingClientToolRequests.get(pendingKey);
+    if (!record) return;
+    clearTimeout(record.timer);
+    this.pendingClientToolRequests.delete(pendingKey);
+    this.#setClientToolRequest(record.ledgerKey, {
+      status: 'resolved-by-desktop',
+      response: null,
+    });
+    this.#log('client-tool-resolved-by-desktop', {
+      requestId,
+      threadId: record.threadId,
+      namespace: record.namespace,
+      tool: record.tool,
+    });
+  }
+
+  #resolveDelegatedClientToolsFromProgress(message, eventSequence) {
+    if (!['item/completed', 'item/started', 'turn/completed'].includes(message.method)) return;
+    const threadId = message.params?.threadId ?? message.params?.thread?.id;
+    const turnId = message.params?.turnId ?? message.params?.turn?.id ?? null;
+    if (!threadId) return;
+    for (const [pendingKey, record] of this.pendingClientToolRequests) {
+      if (!record.timer || record.threadId !== threadId) continue;
+      if (eventSequence <= record.eventSequence) continue;
+      if (record.turnId && turnId && record.turnId !== turnId) continue;
+      clearTimeout(record.timer);
+      this.pendingClientToolRequests.delete(pendingKey);
+      this.#setClientToolRequest(record.ledgerKey, {
+        status: 'resolved-by-desktop-progress',
+        response: null,
+      });
+      this.#log('client-tool-resolved-by-desktop-progress', {
+        requestId: record.request.id,
+        threadId: record.threadId,
+        turnId: record.turnId,
+        namespace: record.namespace,
+        tool: record.tool,
+        progressMethod: message.method,
+      });
+    }
+  }
+
+  #clearPendingClientToolRequests(reason) {
+    const count = this.pendingClientToolRequests.size;
+    for (const record of this.pendingClientToolRequests.values()) {
+      if (record.timer) clearTimeout(record.timer);
+    }
+    this.pendingClientToolRequests.clear();
+    if (count > 0) this.#log('client-tool-pending-cleared', { reason, count });
+  }
+
+  async #expireDelegatedClientToolRequest(pendingKey) {
+    const record = this.pendingClientToolRequests.get(pendingKey);
+    if (!record) return;
+    this.pendingClientToolRequests.delete(pendingKey);
+    const response = this.#clientToolFailure(
+      `No exclusive Desktop client-tool owner resolved the request within ${this.clientToolOwnerTimeoutMs} ms. The Discord bridge did not execute it.`,
+    );
+    this.#setClientToolRequest(record.ledgerKey, { status: 'failed-closed', response });
+    try {
+      this.codex.respondToServerRequest(record.request.id, response);
+    } catch (error) {
+      this.#log('client-tool-timeout-response-error', {
+        requestId: record.request.id,
+        error: error.message,
+      });
+    }
+    this.#log('client-tool-delegation-timed-out', {
+      requestId: record.request.id,
+      threadId: record.threadId,
+      namespace: record.namespace,
+      tool: record.tool,
+      ownership: record.ownership.state,
+      reason: record.ownership.reason,
+    });
+    await this.#postAlert(
+      `Client toolを安全に実行できませんでした。\n\`${record.namespace}/${record.tool}\`\nDesktopの実行確認が${Math.round(this.clientToolOwnerTimeoutMs / 60_000)}分以内に取れなかったため、Bridgeは副作用を実行していません。`,
+      'error',
+    ).catch(() => {});
+  }
+
+  #clientToolFailure(message) {
+    return {
+      success: false,
+      contentItems: [{ type: 'inputText', text: message }],
+    };
+  }
+
+  #setClientToolRequest(ledgerKey, patch) {
+    if (ledgerKey) this.stateStore.setClientToolRequest?.(ledgerKey, patch);
+  }
+
+  async #executeClientToolRequest(request, namespace, tool, threadId, binding, ledgerKey) {
+    this.#setClientToolRequest(ledgerKey, {
+      status: 'executing',
+      threadId,
+      namespace,
+      tool,
+    });
+    const pendingKey = String(request.id);
+    this.pendingClientToolRequests.set(pendingKey, {
+      request,
+      ledgerKey,
+      namespace,
+      tool,
+      threadId,
+      timer: null,
+      ownership: { state: 'absent', reason: 'bridge-fallback' },
+    });
+    try {
+      let response;
+      try {
+        const result = await this.clientToolRouter.execute(
+          namespace,
+          tool,
+          request.params?.arguments,
+          { threadId },
+        );
+        response = {
+          success: true,
+          contentItems: [{ type: 'inputText', text: JSON.stringify(result) }],
+        };
+        this.#setClientToolRequest(ledgerKey, { status: 'completed', response });
+        this.codex.respondToServerRequest(request.id, response);
+        this.#log('client-tool-completed', {
+          requestId: request.id,
+          threadId,
+          namespace,
+          tool,
+        });
+      } catch (error) {
+        response = this.#clientToolFailure(error.message);
+        this.#setClientToolRequest(ledgerKey, { status: 'failed', response });
+        this.codex.respondToServerRequest(request.id, response);
+        this.#log('client-tool-failed', {
+          requestId: request.id,
+          threadId,
+          namespace,
+          tool,
+          unavailable: error instanceof ClientToolUnavailableError,
+          error: error.message,
+        });
+        if (binding && error instanceof ClientToolUnavailableError) {
+          await this.#postTaskMessage(
+            binding,
+            `**Client tool unavailable through Discord**\n\`${namespace}/${tool}\`\n${error.message}`,
+          );
+        }
+      }
+    } finally {
+      if (this.pendingClientToolRequests.get(pendingKey)?.request === request) {
+        this.pendingClientToolRequests.delete(pendingKey);
+      }
     }
   }
 
@@ -5767,6 +6021,7 @@ export class DiscordController {
     if (state === this.lastConnectionState) return;
     const previous = this.lastConnectionState;
     this.lastConnectionState = state;
+    if (state === 'disconnected') this.#clearPendingClientToolRequests('app-server-disconnected');
     if (this.client.user) {
       this.client.user.setPresence({
         activities: [{ name: state === 'connected' ? `${this.stateStore.bindings().length} Codex task(s)` : 'app-server reconnecting' }],

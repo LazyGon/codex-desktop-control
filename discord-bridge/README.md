@@ -315,6 +315,16 @@ bindings are atomically persisted under `data/`. The latest accepted text-inbox
 message is stored under `data/transfer-text/`. None of these locations contains
 the Discord bot token.
 
+Effectful `codex_app` client-tool requests use Codex Desktop as the exclusive
+executor whenever the shared launcher confirms a live Desktop on the same
+app-server. The Bridge is a fallback only when Desktop is confirmed absent.
+Ambiguous ownership waits five minutes and then fails closed with an alert.
+App-server generation/request IDs and Bridge outcomes are persisted so a
+reconnect cannot repeat an effectful fallback. Read-only client tools are not
+delayed by this arbitration. A delegated request is closed locally when the
+app-server reports either explicit resolution or subsequent progress in its
+source turn.
+
 ## Verification
 
 ```powershell

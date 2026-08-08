@@ -13,6 +13,12 @@ const defaultSharedLauncherPath = path.join(
   'launcher',
   'CodexSharedLauncher.exe',
 );
+const defaultLauncherStatePath = path.join(
+  path.dirname(bridgeRoot),
+  'launcher',
+  'state',
+  'current.json',
+);
 const defaultCodexStateRoot = String(process.env.CODEX_HOME ?? '').trim()
   ? path.resolve(process.env.CODEX_HOME)
   : path.join(os.homedir(), '.codex');
@@ -52,6 +58,8 @@ const defaults = {
   fileShareArchiverPath: null,
   autoStartSharedDesktop: true,
   sharedLauncherPath: defaultSharedLauncherPath,
+  launcherStatePath: defaultLauncherStatePath,
+  clientToolOwnerTimeoutMs: 300_000,
   desktopGlobalStatePath: path.join(defaultCodexStateRoot, '.codex-global-state.json'),
   appServerUrl: null,
 };
@@ -120,6 +128,9 @@ export function loadConfig() {
   if (config.desktopGlobalStatePath && !path.isAbsolute(config.desktopGlobalStatePath)) {
     config.desktopGlobalStatePath = path.resolve(bridgeRoot, config.desktopGlobalStatePath);
   }
+  if (config.launcherStatePath && !path.isAbsolute(config.launcherStatePath)) {
+    config.launcherStatePath = path.resolve(bridgeRoot, config.launcherStatePath);
+  }
   const errors = [];
   if (!isSnowflake(config.applicationId)) errors.push('applicationId must be a Discord snowflake.');
   if (!isSnowflake(config.guildId)) errors.push('guildId must be a Discord snowflake.');
@@ -135,6 +146,14 @@ export function loadConfig() {
   }
   if (!config.desktopGlobalStatePath || !path.isAbsolute(config.desktopGlobalStatePath)) {
     errors.push('desktopGlobalStatePath must be an absolute path.');
+  }
+  if (!config.launcherStatePath || !path.isAbsolute(config.launcherStatePath)) {
+    errors.push('launcherStatePath must be an absolute path.');
+  }
+  if (!Number.isInteger(config.clientToolOwnerTimeoutMs)
+    || config.clientToolOwnerTimeoutMs < 300_000
+    || config.clientToolOwnerTimeoutMs > 900_000) {
+    errors.push('clientToolOwnerTimeoutMs must be an integer from 300000 to 900000.');
   }
   if (!Number.isInteger(config.taskSyncIntervalMs) || config.taskSyncIntervalMs < 10_000) {
     errors.push('taskSyncIntervalMs must be an integer of at least 10000.');
