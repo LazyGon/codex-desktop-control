@@ -1079,6 +1079,42 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   })));
   assert.ok(pastAssistant, diagnostic);
   assert.ok(liveAssistant, diagnostic);
+  for (const [itemId, parts] of [
+    ['reasoning-1', ['**Planning first fix**', 'Verifying first fix']],
+    ['reasoning-2', ['**Planning latest fix**', 'Verifying latest fix']],
+  ]) {
+    codex.emit('notification', {
+      method: 'item/started',
+      params: { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'reasoning', id: itemId, summary: [] } },
+    });
+    for (const [summaryIndex, delta] of parts.entries()) {
+      codex.emit('notification', {
+        method: 'item/reasoning/summaryPartAdded',
+        params: { threadId: 'thread-1', turnId: 'turn-1', itemId, summaryIndex },
+      });
+      codex.emit('notification', {
+        method: 'item/reasoning/summaryTextDelta',
+        params: { threadId: 'thread-1', turnId: 'turn-1', itemId, summaryIndex, delta },
+      });
+    }
+    codex.emit('notification', {
+      method: 'item/completed',
+      params: { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'reasoning', id: itemId, summary: parts } },
+    });
+  }
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const reasoning = liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value;
+    if (reasoning?.includes('Planning latest fix')) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(
+    liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value,
+    '- Planning latest fix\n- Verifying latest fix',
+  );
+  assert.doesNotMatch(
+    liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value ?? '',
+    /first fix/,
+  );
   assert.equal(pastAssistant.embeds[0].description, assistantText);
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');

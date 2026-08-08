@@ -20,6 +20,7 @@ import {
   completionTextFromSession,
   completionNoticeContent,
   finalTextFromTurn,
+  formatReasoningField,
   itemResultSummary,
   itemSummary,
   planDiscordTextDelivery,
@@ -4514,6 +4515,9 @@ export class DiscordController {
         ?? null
       : null;
     const activeMessageKey = activeAgentItem ? `${activeTurn.id}:${activeAgentItem.id}` : null;
+    const activeReasoningItem = [...(activeTurn?.items ?? [])]
+      .reverse()
+      .find((item) => item.type === 'reasoning') ?? null;
     const requiredByTurn = new Map();
     for (const key of requiredCommentaryKeys) {
       const value = commentaryByKey.get(key);
@@ -4564,7 +4568,11 @@ export class DiscordController {
         view.currentMessageId = activeAgentItem?.id ?? null;
         view.currentPhase = activeAgentItem?.phase ?? null;
         view.text = activeAgentItem?.text ?? '';
-        view.reasoning = activeAgentItem ? reasoningSummaryFromTurn(activeTurn) : '';
+        view.reasoningItemId = activeReasoningItem?.id ?? null;
+        view.reasoningPartIndex = null;
+        view.reasoning = activeAgentItem && activeReasoningItem
+          ? reasoningSummaryFromTurn({ items: [activeReasoningItem] })
+          : '';
         await this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages);
       } else {
         await this.#repostLiveTurnCardToLatest(binding, existingView);
@@ -4715,6 +4723,9 @@ export class DiscordController {
       }
       else if (message.method === 'turn/started') await this.#turnStarted(binding, message.params);
       else if (message.method === 'item/agentMessage/delta') this.#agentDelta(binding, message.params);
+      else if (message.method === 'item/reasoning/summaryPartAdded') {
+        this.#reasoningPartAdded(binding, message.params);
+      }
       else if (['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(message.method)) {
         this.#reasoningDelta(binding, message.params);
       }
@@ -4950,8 +4961,40 @@ export class DiscordController {
     this.#scheduleTurnRender(binding, view);
   }
 
+  #selectReasoningItem(view, itemId) {
+    if (!itemId || view.reasoningItemId === itemId) return false;
+    view.reasoningItemId = itemId;
+    view.reasoningPartIndex = null;
+    view.reasoning = '';
+    return true;
+  }
+
+  #reasoningPartAdded(binding, params) {
+    const view = this.#view(binding.threadId, params.turnId, binding.channelId);
+    this.#selectReasoningItem(view, params.itemId);
+    const partIndex = params.summaryIndex ?? params.partIndex ?? null;
+    if (view.reasoning
+      && (partIndex === null || view.reasoningPartIndex !== partIndex)
+      && !view.reasoning.endsWith('\n')) {
+      view.reasoning += '\n';
+    }
+    view.reasoningPartIndex = partIndex;
+    view.currentItem = 'reasoning';
+    this.#scheduleTurnRender(binding, view);
+  }
+
   #reasoningDelta(binding, params) {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
+    this.#selectReasoningItem(view, params.itemId);
+    const partIndex = params.summaryIndex ?? params.partIndex ?? null;
+    if (view.reasoning
+      && partIndex !== null
+      && view.reasoningPartIndex !== null
+      && view.reasoningPartIndex !== partIndex
+      && !view.reasoning.endsWith('\n')) {
+      view.reasoning += '\n';
+    }
+    if (partIndex !== null) view.reasoningPartIndex = partIndex;
     view.reasoning += params.delta ?? '';
     if (view.reasoning.length > 12_000) view.reasoning = view.reasoning.slice(-12_000);
     view.currentItem = 'reasoning';
@@ -4998,6 +5041,13 @@ export class DiscordController {
       }
     }
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
+    if (params.item?.type === 'reasoning') {
+      this.#selectReasoningItem(view, params.item.id);
+      if (completed && params.item.summary?.length) {
+        view.reasoning = params.item.summary.map((part) => String(part).trim()).filter(Boolean).join('\n');
+        view.reasoningPartIndex = params.item.summary.length - 1;
+      }
+    }
     if (params.item?.type === 'agentMessage'
       && (!completed || view.currentMessageId !== params.item.id)) {
       await this.#startAgentMessage(binding, params, view);
@@ -5212,6 +5262,8 @@ export class DiscordController {
         currentPhase: null,
         text: '',
         reasoning: '',
+        reasoningItemId: null,
+        reasoningPartIndex: null,
         currentItem: null,
         items: [],
         plan: [],
@@ -5295,6 +5347,8 @@ export class DiscordController {
     view.currentPhase = null;
     view.text = '';
     view.reasoning = '';
+    view.reasoningItemId = null;
+    view.reasoningPartIndex = null;
     this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
       cardMessageId: null,
       liveMessageId: null,
@@ -5347,7 +5401,7 @@ export class DiscordController {
         { name: 'Elapsed', value: `${elapsed}s`, inline: true },
       );
     if (view.reasoning) {
-      embed.addFields({ name: 'Reasoning', value: truncate(view.reasoning.slice(-900), 900) });
+      embed.addFields({ name: 'Reasoning', value: formatReasoningField(view.reasoning, 900, 4) });
     } else if (view.currentItem === 'reasoning') {
       embed.addFields({ name: 'Reasoning', value: '推論中...' });
     }

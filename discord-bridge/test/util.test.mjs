@@ -11,6 +11,7 @@ import {
   discordCodeBlock,
   fitsDiscordMessageContent,
   formatThreadSnapshot,
+  formatReasoningField,
   finalTextFromTurn,
   itemResultSummary,
   isPathWithinProject,
@@ -34,6 +35,21 @@ test('splitText preserves all text within the requested chunk size', () => {
   assert.ok(chunks.length > 2);
   assert.ok(chunks.every((chunk) => chunk.length <= 120));
   assert.equal(chunks.join(' ').replace(/\s+/g, ' ').trim(), source.replace(/\s+/g, ' ').trim());
+});
+
+test('reasoning fields show recent parts as bounded plain bullets', () => {
+  assert.equal(
+    formatReasoningField('**First step**\nSecond step\n**Third step**'),
+    '- First step\n- Second step\n- Third step',
+  );
+  assert.equal(
+    formatReasoningField('one\ntwo\nthree\nfour\nfive'),
+    '- two\n- three\n- four\n- five',
+  );
+  const long = formatReasoningField(`**${'word '.repeat(250)}**`, 120);
+  assert.ok(long.length <= 120);
+  assert.ok(long.startsWith('- word'));
+  assert.equal(long.includes('**'), false);
 });
 
 test('channel names and statuses are stable for Discord display', () => {

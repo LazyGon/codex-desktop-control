@@ -50,6 +50,20 @@ export function truncate(value, maximum, suffix = '...') {
   return `${text.slice(0, Math.max(0, maximum - suffix.length))}${suffix}`;
 }
 
+export function formatReasoningField(value, maximum = 900, maximumLines = 4) {
+  const limit = Math.max(1, Number(maximum) || 900);
+  const lines = String(value ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.replaceAll('**', '').trim())
+    .filter(Boolean)
+    .slice(-Math.max(1, Number(maximumLines) || 4));
+  while (lines.length > 1 && lines.map((line) => `- ${line}`).join('\n').length > limit) {
+    lines.shift();
+  }
+  if (lines.length === 0) return '';
+  return truncate(lines.map((line) => `- ${line}`).join('\n'), limit, '…');
+}
+
 export function splitText(value, maximum = 1900) {
   const text = String(value ?? '');
   if (!text) return [];
