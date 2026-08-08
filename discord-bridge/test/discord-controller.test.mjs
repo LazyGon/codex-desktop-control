@@ -80,6 +80,10 @@ test('controller shutdown clears polling and recovery timers before Discord clos
   controller.taskSyncTimer = setInterval(() => {}, 60_000);
   controller.taskSyncInitialTimer = setTimeout(() => {}, 60_000);
   controller.taskSyncDebounceTimer = setTimeout(() => {}, 60_000);
+  controller.turnViews.set('thread:turn', {
+    timer: setTimeout(() => {}, 60_000),
+    elapsedTimer: setTimeout(() => {}, 60_000),
+  });
   const recoveryTimer = setTimeout(() => {}, 60_000);
   controller.completionRecoveryJobs.set('thread:turn', { timer: recoveryTimer });
 
@@ -89,6 +93,8 @@ test('controller shutdown clears polling and recovery timers before Discord clos
   assert.equal(controller.taskSyncTimer, null);
   assert.equal(controller.taskSyncInitialTimer, null);
   assert.equal(controller.taskSyncDebounceTimer, null);
+  assert.equal(controller.turnViews.get('thread:turn').timer, null);
+  assert.equal(controller.turnViews.get('thread:turn').elapsedTimer, null);
   assert.equal(controller.completionRecoveryJobs.size, 0);
 });
 
@@ -359,6 +365,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
       authorizedUserIds: ['user-1', 'executor-user'],
       completionMentionUserIds: ['subscriber-user'],
       liveUpdateIntervalMs: 10,
+      elapsedUpdateIntervalMs: 100,
       completionRetryBaseMs: 5,
       completionRetryMaxMs: 10,
     },
@@ -456,7 +463,12 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     cwd: binding.cwd,
     path: null,
     status: { type: 'active' },
-    turns: [notification.params.turn, { id: 'turn-active', status: 'inProgress', items: [] }],
+    turns: [notification.params.turn, {
+      id: 'turn-active',
+      status: 'inProgress',
+      startedAt: Date.now() - 5_000,
+      items: [],
+    }],
   };
   binding.transcriptVersion = 11;
   codex.readThread = async () => ({ thread: restoredThread });
@@ -470,6 +482,21 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(sent.filter((message) => message.embeds[0]?.title === 'Codex message').length, 0);
+  const restoredRunning = sent.findLast((message) => message.embeds[0]?.title === 'Codex running');
+  const restoredElapsed = Number.parseInt(
+    restoredRunning.embeds[0].fields.find((field) => field.name === 'Elapsed').value,
+    10,
+  );
+  assert.ok(restoredElapsed >= 5);
+  assert.equal(binding.turnMessages['turn-active'].startedAt, restoredThread.turns[1].startedAt);
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  assert.ok(Number.parseInt(
+    restoredRunning.embeds[0].fields.find((field) => field.name === 'Elapsed').value,
+    10,
+  ) >= restoredElapsed + 1);
+  const restoredView = controller.turnViews.get(`${binding.threadId}:turn-active`);
+  if (restoredView?.elapsedTimer) clearTimeout(restoredView.elapsedTimer);
+  controller.turnViews.delete(`${binding.threadId}:turn-active`);
 
   completionMessages.clear();
   delete binding.turnMessages['turn-complete'].completionNoticeMessageId;

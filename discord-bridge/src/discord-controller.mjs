@@ -46,6 +46,8 @@ import {
   historicalAssistantItems,
   RECENT_HISTORY_DAY_OPTIONS,
   recentHistoryCutoffMs,
+  turnTimestampMs,
+  uuidV7TimestampMs,
 } from './recent-history.mjs';
 import {
   contentCardComponents,
@@ -309,7 +311,9 @@ export class DiscordController {
     this.taskSyncDebounceTimer = null;
     for (const view of this.turnViews.values()) {
       if (view.timer) clearTimeout(view.timer);
+      if (view.elapsedTimer) clearTimeout(view.elapsedTimer);
       view.timer = null;
+      view.elapsedTimer = null;
     }
     const recoveryJobs = [...this.completionRecoveryJobs.values()];
     for (const job of recoveryJobs) {
@@ -324,6 +328,7 @@ export class DiscordController {
       ...[...this.subscriptionSyncPromises].map(([key, promise]) => [`subscription:${key}`, promise]),
       ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
       ...[...this.liveCardMovePromises].map(([key, promise]) => [`live-card:${key}`, promise]),
+      ...[...this.turnViews].map(([key, view]) => [`turn-render:${key}`, view.renderPromise]),
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
@@ -4378,6 +4383,7 @@ export class DiscordController {
       cardMessageId: message.id,
       liveMessageId: message.id,
       status: 'inProgress',
+      startedAt: view.startedAt,
     };
     if (assistantEntryId) {
       const assistantEntries = { ...(latestRecord.assistantEntries ?? {}) };
@@ -4550,6 +4556,9 @@ export class DiscordController {
     }
 
     if (activeTurn) {
+      const restoredStartedAt = activeRecordBeforeSync.startedAt
+        ?? turnTimestampMs(activeTurn)
+        ?? Date.now();
       await this.#ensureTurnUserMessages(binding, activeTurn, channel, messages);
       const activeDetailItems = includeHistoricalDetails
         ? historicalAssistantItems(activeTurn)
@@ -4565,6 +4574,7 @@ export class DiscordController {
         const view = this.#view(threadId, activeTurn.id, binding.channelId);
         view.messageId = oldRecord?.cardMessageId ?? oldRecord?.liveMessageId ?? null;
         view.status = 'inProgress';
+        view.startedAt = restoredStartedAt;
         view.currentMessageId = activeAgentItem?.id ?? null;
         view.currentPhase = activeAgentItem?.phase ?? null;
         view.text = activeAgentItem?.text ?? '';
@@ -4575,8 +4585,10 @@ export class DiscordController {
           : '';
         await this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages);
       } else {
+        existingView.startedAt ??= restoredStartedAt;
         await this.#repostLiveTurnCardToLatest(binding, existingView);
       }
+      this.#startElapsedUpdates(binding, existingView ?? this.turnViews.get(`${threadId}:${activeTurn.id}`));
     }
 
     const protectedIds = new Set();
@@ -4904,10 +4916,11 @@ export class DiscordController {
     const turnId = params.turn?.id ?? params.turnId;
     const view = this.#view(binding.threadId, turnId, binding.channelId);
     view.status = 'inProgress';
-    view.startedAt = Date.now();
+    view.startedAt = turnTimestampMs(params.turn ?? { id: turnId }) ?? view.startedAt ?? Date.now();
     const channel = await this.client.channels.fetch(binding.channelId);
     const messages = await this.#fetchChannelHistory(channel, 100);
     await this.#ensureLiveTurnCard(binding, { id: turnId, status: 'inProgress' }, view, channel, messages);
+    this.#startElapsedUpdates(binding, view);
     this.#scheduleTaskSync('turn/started');
   }
 
@@ -5131,6 +5144,8 @@ export class DiscordController {
           this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
         }
         this.#clearCompletionRecovery(binding.threadId, turn.id);
+        const completedView = this.turnViews.get(`${binding.threadId}:${turn.id}`);
+        if (completedView?.elapsedTimer) clearTimeout(completedView.elapsedTimer);
         this.turnViews.delete(`${binding.threadId}:${turn.id}`);
         this.#scheduleTaskSync('turn/completed-idempotent');
         return completionMessage;
@@ -5139,6 +5154,10 @@ export class DiscordController {
     const view = this.#view(binding.threadId, turn.id, binding.channelId);
     view.status = turn.status;
     view.completedAt = Date.now();
+    if (view.elapsedTimer) {
+      clearTimeout(view.elapsedTimer);
+      view.elapsedTimer = null;
+    }
     if (view.timer) {
       clearTimeout(view.timer);
       view.timer = null;
@@ -5250,14 +5269,16 @@ export class DiscordController {
   #view(threadId, turnId, channelId) {
     const key = `${threadId}:${turnId}`;
     if (!this.turnViews.has(key)) {
+      const record = this.stateStore.turnRecord(threadId, turnId) ?? {};
       this.turnViews.set(key, {
         key,
         threadId,
         turnId,
         channelId,
-        messageId: this.stateStore.turnRecord(threadId, turnId)?.cardMessageId
-          ?? this.stateStore.turnRecord(threadId, turnId)?.liveMessageId
+        messageId: record.cardMessageId
+          ?? record.liveMessageId
           ?? null,
+        startedAt: record.startedAt ?? uuidV7TimestampMs(turnId) ?? Date.now(),
         currentMessageId: null,
         currentPhase: null,
         text: '',
@@ -5270,17 +5291,39 @@ export class DiscordController {
         tokenUsage: null,
         status: 'inProgress',
         timer: null,
+        elapsedTimer: null,
+        renderPromise: null,
       });
     }
     return this.turnViews.get(key);
   }
 
   #scheduleTurnRender(binding, view) {
-    if (view.timer) return;
+    if (this.stopping || view.status !== 'inProgress' || view.timer || view.renderPromise) return;
     view.timer = setTimeout(() => {
       view.timer = null;
-      this.#renderTurn(binding, view).catch((error) => this.#log('turn-render-failed', { error: error.message }));
+      const renderPromise = this.#renderTurn(binding, view);
+      view.renderPromise = renderPromise;
+      renderPromise
+        .catch((error) => this.#log('turn-render-failed', { error: error.message }))
+        .finally(() => {
+          if (view.renderPromise === renderPromise) view.renderPromise = null;
+        });
     }, this.config.liveUpdateIntervalMs);
+    view.timer.unref?.();
+  }
+
+  #startElapsedUpdates(binding, view) {
+    if (!view || this.stopping || view.status !== 'inProgress' || view.elapsedTimer) return;
+    const intervalMs = Math.max(100, this.config.elapsedUpdateIntervalMs ?? 10_000);
+    view.elapsedTimer = setTimeout(() => {
+      view.elapsedTimer = null;
+      if (this.stopping || view.status !== 'inProgress' || this.turnViews.get(view.key) !== view) return;
+      const currentBinding = this.stateStore.binding(view.threadId) ?? binding;
+      this.#scheduleTurnRender(currentBinding, view);
+      this.#startElapsedUpdates(currentBinding, view);
+    }, intervalMs);
+    view.elapsedTimer.unref?.();
   }
 
   async #renderTurn(binding, view) {
@@ -5310,6 +5353,7 @@ export class DiscordController {
       cardMessageId: message.id,
       liveMessageId: message.id,
       status: 'inProgress',
+      startedAt: view.startedAt,
     };
     if (view.currentPhase === 'commentary' && view.currentMessageId) {
       const assistantEntries = { ...(record.assistantEntries ?? {}) };
@@ -5389,7 +5433,8 @@ export class DiscordController {
   }
 
   #turnEmbed(view) {
-    const elapsed = Math.round(((view.completedAt ?? Date.now()) - (view.startedAt ?? Date.now())) / 1000);
+    const now = Date.now();
+    const elapsed = Math.max(0, Math.round(((view.completedAt ?? now) - (view.startedAt ?? now)) / 1000));
     const embed = new EmbedBuilder()
       .setTitle(view.status === 'inProgress' ? 'Codex running' : `Codex ${view.status}`)
       .setColor(view.status === 'inProgress' ? COLORS.active : COLORS.completed)

@@ -37,6 +37,7 @@ const defaults = {
   taskListLimit: 20,
   initialSnapshotMessages: 16,
   liveUpdateIntervalMs: 2500,
+  elapsedUpdateIntervalMs: 10_000,
   taskSyncIntervalMs: 30_000,
   discordRestTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
   discordConnectTimeoutMs: MIN_DISCORD_NETWORK_TIMEOUT_MS,
