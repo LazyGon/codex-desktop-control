@@ -10,8 +10,12 @@ import {
   ATTACHMENT_ONLY_PROMPT,
   completionRecoveryCandidate,
   DiscordController,
+  emptyDuplicateUserEntryIds,
   isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
+  orderedSessionCardItems,
+  runAfterTranscriptBarrier,
+  sessionOrderRepairMessageIds,
   subagentDiscordThreadName,
   subagentIdsFromThread,
   subagentMetadata,
@@ -20,6 +24,7 @@ import {
 import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
 import { StateStore } from '../src/state-store.mjs';
+import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
 
 test('managed project category cleanup removes empty overflow categories but preserves occupied ones', () => {
   const category = (id, children) => ({
@@ -45,6 +50,118 @@ test('managed project category cleanup removes empty overflow categories but pre
   assert.deepEqual(
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
+  );
+});
+
+test('session card ordering keeps steer messages inside the active instruction sequence', () => {
+  const initial = { id: 'user-initial', text: 'start' };
+  const steer = { id: 'user-steer', text: 'adjust' };
+  const beforeSteer = { id: 'assistant-before', phase: 'commentary', text: 'working' };
+  const afterSteer = { id: 'assistant-after', phase: 'commentary', text: 'adjusted' };
+  const turn = {
+    items: [
+      { type: 'userMessage', id: initial.id },
+      { type: 'agentMessage', ...beforeSteer },
+      { type: 'userMessage', id: steer.id },
+      { type: 'agentMessage', ...afterSteer },
+      { type: 'agentMessage', id: 'final', phase: 'final_answer', text: 'done' },
+    ],
+  };
+
+  assert.deepEqual(
+    orderedSessionCardItems(turn, [initial, steer], [beforeSteer, afterSteer], [
+      { kind: 'user', id: initial.id },
+      { kind: 'detail', id: beforeSteer.id },
+      { kind: 'user', id: steer.id },
+      { kind: 'detail', id: afterSteer.id },
+    ])
+      .map(({ kind, item }) => `${kind}:${item.id}`),
+    [
+      'user:user-initial',
+      'detail:assistant-before',
+      'user:user-steer',
+      'detail:assistant-after',
+    ],
+  );
+});
+
+test('session JSONL restores synthetic user item IDs around steer chronology', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-session-order-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const sessionPath = path.join(directory, 'rollout.jsonl');
+  const entries = [
+    { type: 'turn_context', payload: { turn_id: 'turn-1' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', id: 'raw-user-1', content: [{ type: 'input_text', text: 'start' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'assistant-before', content: [{ type: 'output_text', text: 'working' }] } },
+    { type: 'response_item', payload: { type: 'reasoning', id: 'reasoning-before', summary: [] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', id: 'raw-user-2', content: [{ type: 'input_text', text: 'adjust' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'assistant-after', content: [{ type: 'output_text', text: 'adjusted' }] } },
+    { type: 'turn_context', payload: { turn_id: 'turn-2' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'outside-turn', content: [] } },
+  ];
+  fs.writeFileSync(sessionPath, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
+
+  assert.deepEqual(
+    await readSessionTurnCardOrder(sessionPath, 'turn-1', [
+      { id: 'item-1', text: 'start' },
+      { id: 'item-2', text: 'adjust' },
+    ]),
+    [
+      { kind: 'user', id: 'item-1' },
+      { kind: 'detail', id: 'assistant-before' },
+      { kind: 'detail', id: 'reasoning-before' },
+      { kind: 'user', id: 'item-2' },
+      { kind: 'detail', id: 'assistant-after' },
+    ],
+  );
+});
+
+test('session-order repair targets only bot cards for explicitly marked turns', () => {
+  const message = (id, authorId, turnId) => ({
+    id,
+    author: { id: authorId },
+    embeds: turnId ? [{ fields: [{ name: 'Turn', value: `\`${turnId}\`` }] }] : [],
+  });
+  const messages = new Map([
+    ['repair-user', message('repair-user', 'bot', 'turn-repair')],
+    ['repair-detail', message('repair-detail', 'bot', 'turn-repair')],
+    ['keep-turn', message('keep-turn', 'bot', 'turn-keep')],
+    ['keep-human', message('keep-human', 'human', 'turn-repair')],
+    ['keep-panel', message('keep-panel', 'bot', null)],
+  ]);
+
+  assert.deepEqual(
+    sessionOrderRepairMessageIds(messages, ['turn-repair'], 'bot'),
+    ['repair-user', 'repair-detail'],
+  );
+});
+
+test('live notifications wait behind the transcript repair for the same task', async () => {
+  let releaseRepair;
+  const repair = new Promise((resolve) => { releaseRepair = resolve; });
+  const events = [];
+  const pending = runAfterTranscriptBarrier(
+    new Map([['thread-1', repair]]),
+    'thread-1',
+    () => events.push('notification'),
+  );
+  await Promise.resolve();
+  assert.deepEqual(events, []);
+  releaseRepair();
+  await pending;
+  assert.deepEqual(events, ['notification']);
+});
+
+test('stable user cards retire empty provisional entries for the same steer text', () => {
+  const entries = {
+    'provisional-steer': { text: 'adjust', messageIds: [], source: 'Discord' },
+    'item-steer': { text: 'adjust', messageIds: ['card-1'], source: null },
+    'provisional-other': { text: 'other', messageIds: [], source: 'Discord' },
+    'posted-duplicate': { text: 'adjust', messageIds: ['card-2'], source: 'Discord' },
+  };
+  assert.deepEqual(
+    emptyDuplicateUserEntryIds(entries, { id: 'item-steer', text: 'adjust' }),
+    ['provisional-steer'],
   );
 });
 

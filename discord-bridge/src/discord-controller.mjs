@@ -50,6 +50,7 @@ import {
   turnTimestampMs,
   uuidV7TimestampMs,
 } from './recent-history.mjs';
+import { readSessionTurnCardOrder } from './session-message-order.mjs';
 import {
   contentCardComponents,
   fileBrowserPayload,
@@ -232,6 +233,58 @@ export function completionRecoveryCandidate(binding) {
     return lastCompletedTurnId;
   }
   return null;
+}
+
+export function orderedSessionCardItems(turn, userItems, detailItems, recordedOrder = []) {
+  const users = new Map((userItems ?? []).map((item) => [item.id, item]));
+  const details = new Map((detailItems ?? []).map((item) => [item.id, item]));
+  const ordered = [];
+  for (const entry of recordedOrder ?? []) {
+    const source = entry.kind === 'user' ? users : details;
+    const item = source.get(entry.id);
+    if (item && source.delete(entry.id)) ordered.push({ kind: entry.kind, item });
+  }
+  let userIndex = 0;
+  for (const item of turn?.items ?? []) {
+    if (item.type === 'userMessage') {
+      const fallback = (userItems ?? [])[userIndex];
+      const user = users.get(item.id) ?? fallback;
+      userIndex += 1;
+      if (user && users.delete(user.id)) ordered.push({ kind: 'user', item: user });
+      continue;
+    }
+    const detail = details.get(item.id);
+    if (detail && details.delete(detail.id)) ordered.push({ kind: 'detail', item: detail });
+  }
+  for (const item of users.values()) ordered.push({ kind: 'user', item });
+  for (const item of details.values()) ordered.push({ kind: 'detail', item });
+  return ordered;
+}
+
+export function sessionOrderRepairMessageIds(messages, turnIds, botUserId) {
+  const targets = new Set(turnIds ?? []);
+  return [...(messages?.values?.() ?? [])]
+    .filter((message) => message.author?.id === botUserId)
+    .filter((message) => message.embeds?.some((embed) => embed.fields?.some(
+      (field) => field.name === 'Turn'
+        && targets.has(String(field.value ?? '').replaceAll('`', '').trim()),
+    )))
+    .map((message) => message.id);
+}
+
+export async function runAfterTranscriptBarrier(transcriptSyncPromises, threadId, operation) {
+  const barrier = transcriptSyncPromises.get(threadId);
+  if (barrier) await barrier.catch(() => {});
+  return operation();
+}
+
+export function emptyDuplicateUserEntryIds(userEntries, userItem) {
+  const text = String(userItem?.text ?? '').trim();
+  return Object.entries(userEntries ?? {})
+    .filter(([entryId, entry]) => entryId !== userItem?.id
+      && !(entry.messageIds ?? []).length
+      && String(entry.text ?? '').trim() === text)
+    .map(([entryId]) => entryId);
 }
 
 function projectArchiveVolumeText(config) {
@@ -4517,8 +4570,10 @@ export class DiscordController {
     return { options, expectsAttachment: files.length > 0 || existingAttachments.length > 0 };
   }
 
-  async #ensureTurnUserMessages(binding, turn, channel, messages) {
-    const userItems = this.#turnUserItems(turn);
+  async #ensureTurnUserMessages(binding, turn, channel, messages, requestedItemIds = null) {
+    const requested = requestedItemIds ? new Set(requestedItemIds) : null;
+    const userItems = this.#turnUserItems(turn)
+      .filter((item) => !requested || requested.has(item.id));
     const allIds = [];
     const latestBinding = this.stateStore.binding(binding.threadId) ?? binding;
     const globallyClaimedIds = new Set(Object.entries(latestBinding.turnMessages ?? {})
@@ -4610,8 +4665,14 @@ export class DiscordController {
 
       const source = userEntries[userItem.id]?.source
         ?? (migratedEntryId ? userEntries[migratedEntryId]?.source : null)
+        ?? emptyDuplicateUserEntryIds(userEntries, userItem)
+          .map((entryId) => userEntries[entryId]?.source)
+          .find(Boolean)
         ?? null;
       if (migratedEntryId) delete userEntries[migratedEntryId];
+      for (const entryId of emptyDuplicateUserEntryIds(userEntries, userItem)) {
+        delete userEntries[entryId];
+      }
       userEntries[userItem.id] = {
         text: userItem.text,
         messageIds: [message.id],
@@ -4887,6 +4948,30 @@ export class DiscordController {
       this.stateStore.retainSubagentTurnRecords(threadId, ownTurnIds);
     }
     const messages = await this.#fetchChannelHistory(channel);
+    const sessionOrderRepairTurnIds = recentSinceMs === null
+      ? Object.entries(binding.turnMessages ?? {})
+        .filter(([, record]) => record?.sessionOrderRepairRequestedAt)
+        .map(([turnId]) => turnId)
+      : [];
+    const sessionOrderRepairIds = sessionOrderRepairMessageIds(
+      messages,
+      sessionOrderRepairTurnIds,
+      this.client.user.id,
+    );
+    for (const messageId of sessionOrderRepairIds) {
+      const message = messages.get(messageId);
+      await message?.delete().catch((error) => {
+        if (error.code !== 10008) throw error;
+      });
+      messages.delete(messageId);
+    }
+    if (sessionOrderRepairIds.length) {
+      this.#log('session-order-repair-cleared-cards', {
+        threadId,
+        turnIds: sessionOrderRepairTurnIds,
+        messageCount: sessionOrderRepairIds.length,
+      });
+    }
     if (binding.isSubagent) {
       await this.#cleanupInheritedSubagentMessages(binding, channel, messages, ownTurnIds);
     }
@@ -4947,11 +5032,17 @@ export class DiscordController {
     if (!activeOnly) {
       for (const turn of completedTurns) {
         if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
-        await this.#ensureTurnUserMessages(binding, turn, channel, messages);
         const detailItems = includeHistoricalDetails ? historicalAssistantItems(turn) : [];
-        for (const item of detailItems) {
+        const userItems = this.#turnUserItems(turn);
+        const recordedOrder = await readSessionTurnCardOrder(thread.path, turn.id, userItems);
+        const sessionItems = orderedSessionCardItems(turn, userItems, detailItems, recordedOrder);
+        for (const { kind, item } of sessionItems) {
           if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
-          await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
+          if (kind === 'user') {
+            await this.#ensureTurnUserMessages(binding, turn, channel, messages, [item.id]);
+          } else {
+            await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
+          }
         }
         const finalText = finalTextFromTurn(
           turn,
@@ -4970,14 +5061,28 @@ export class DiscordController {
       const restoredStartedAt = activeRecordBeforeSync.startedAt
         ?? turnTimestampMs(activeTurn)
         ?? Date.now();
-      await this.#ensureTurnUserMessages(binding, activeTurn, channel, messages);
       const activeDetailItems = includeHistoricalDetails
         ? historicalAssistantItems(activeTurn)
         : requiredByTurn.get(activeTurn.id) ?? [];
-      for (const item of activeDetailItems) {
+      const activeUserItems = this.#turnUserItems(activeTurn);
+      const activeRecordedOrder = await readSessionTurnCardOrder(
+        thread.path,
+        activeTurn.id,
+        activeUserItems,
+      );
+      const activeSessionItems = orderedSessionCardItems(
+        activeTurn,
+        activeUserItems,
+        activeDetailItems,
+        activeRecordedOrder,
+      );
+      for (const { kind, item } of activeSessionItems) {
         if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
-        if (`${activeTurn.id}:${item.id}` === activeMessageKey) continue;
-        await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
+        if (kind === 'user') {
+          await this.#ensureTurnUserMessages(binding, activeTurn, channel, messages, [item.id]);
+        } else if (`${activeTurn.id}:${item.id}` !== activeMessageKey) {
+          await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
+        }
       }
       const existingView = this.turnViews.get(`${threadId}:${activeTurn.id}`);
       if (!existingView) {
@@ -5025,6 +5130,9 @@ export class DiscordController {
         restoredCommentary: detailItems.filter((item) => item.phase === 'commentary').length,
         restoredReasoning: detailItems.filter((item) => item.phase === 'reasoning').length,
       };
+    }
+    for (const turnId of sessionOrderRepairTurnIds) {
+      this.stateStore.setTurnRecord(threadId, turnId, { sessionOrderRepairRequestedAt: null });
     }
     const latestUsers = latestCompleted ? this.#userMessagesFromThread({ turns: [latestCompleted] }) : [];
     this.stateStore.setBinding(threadId, {
@@ -5274,7 +5382,11 @@ export class DiscordController {
     if (this.stopping) return;
     const threadId = message.params?.threadId ?? message.params?.thread?.id ?? '__global__';
     const previous = this.notificationQueues.get(threadId) ?? Promise.resolve();
-    const queued = previous.then(() => this.#handleCodexNotification(message, eventSequence));
+    const queued = previous.then(() => runAfterTranscriptBarrier(
+      this.transcriptSyncPromises,
+      threadId,
+      () => this.#handleCodexNotification(message, eventSequence),
+    ));
     this.notificationQueues.set(threadId, queued);
     queued.finally(() => {
       if (this.notificationQueues.get(threadId) === queued) this.notificationQueues.delete(threadId);
