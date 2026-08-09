@@ -80,6 +80,7 @@ import {
   splitArchiveManifest,
 } from './split-archive.mjs';
 import { LatestUpdateQueue } from './latest-update-queue.mjs';
+import { codexRetryStatusText } from './communication-error.mjs';
 import {
   accountUsageEmbed,
   goalPayload,
@@ -5167,7 +5168,11 @@ export class DiscordController {
       else if (message.method === 'thread/tokenUsage/updated') this.#tokenUsageChanged(binding, message.params);
       else if (message.method === 'turn/completed') await this.#turnCompleted(binding, message.params);
       else if (message.method === 'error' || message.method === 'warning' || message.method === 'guardianWarning') {
-        await this.#postTaskMessage(binding, `**${message.method}**\n${truncate(message.params?.message ?? JSON.stringify(message.params), 1800)}`);
+        const retryStatus = message.method === 'error' ? codexRetryStatusText(message.params) : null;
+        await this.#postTaskMessage(
+          binding,
+          retryStatus ?? `**${message.method}**\n${truncate(message.params?.message ?? JSON.stringify(message.params), 1800)}`,
+        );
       }
     } catch (error) {
       this.#log('notification-handler-error', { method: message.method, error: error.stack ?? error.message });

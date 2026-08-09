@@ -66,3 +66,11 @@ export function isTransientCommunicationError(error) {
     return TRANSIENT_MESSAGES.some((pattern) => pattern.test(message));
   });
 }
+
+export function codexRetryStatusText(params) {
+  if (params?.willRetry !== true) return null;
+  const message = String(params.error?.message ?? params.message ?? '');
+  const progress = message.match(/(?:reconnecting|retrying)\D*(\d+)\s*\/\s*(\d+)/i);
+  if (!progress) return '通信エラーです。再試行中です。';
+  return `通信エラーです。再試行中（${progress[1]}/${progress[2]}）`;
+}

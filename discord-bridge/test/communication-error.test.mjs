@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isTransientCommunicationError } from '../src/communication-error.mjs';
+import { codexRetryStatusText, isTransientCommunicationError } from '../src/communication-error.mjs';
 
 test('classifies transient failures across every Bridge communication transport', () => {
   const gatewayHandshake = new Error('Opening handshake has timed out');
@@ -39,4 +39,21 @@ test('does not hide authentication, certificate, configuration, or programming e
   for (const error of [invalidToken, certificate, programmingError, invalidUrl]) {
     assert.equal(isTransientCommunicationError(error), false, error.message);
   }
+});
+
+test('formats Codex retry notifications without exposing raw error details', () => {
+  const params = {
+    error: {
+      message: 'Reconnecting... 3/5',
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: 'request ID must not be rendered',
+    },
+    willRetry: true,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+  };
+
+  assert.equal(codexRetryStatusText(params), '通信エラーです。再試行中（3/5）');
+  assert.equal(codexRetryStatusText({ error: { message: 'temporary failure' }, willRetry: true }), '通信エラーです。再試行中です。');
+  assert.equal(codexRetryStatusText({ error: { message: 'permanent failure' }, willRetry: false }), null);
 });
