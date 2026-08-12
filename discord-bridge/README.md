@@ -8,6 +8,14 @@ outbound connection to Discord.
 
 - Creates a private `Codex Control` category with `codex-remote`, alert, and
   completion channels.
+- Creates `chatgpt-remote` in the control category and a separate private
+  `ChatGPT` category for ordinary ChatGPT conversations. Only URLs explicitly
+  registered with `/chatgpt link` are listed; the Bridge does not discover,
+  auto-link, create, rename, or archive ChatGPT-side conversations. Each linked
+  conversation has one status-prefixed Discord channel and a pinned green
+  control panel. Normal messages are serialized through the sibling
+  `reviewer-accessor` checkout, while a durable Discord-message ledger prevents
+  gateway replay from submitting the same ChatGPT turn twice.
 - Creates one private category per project and continuously synchronizes every
   top-level Codex task into its project category. Tasks without a folder selected
   in Codex Desktop share one private `Codex - No Project` category, even when the
@@ -120,6 +128,13 @@ outbound connection to Discord.
   up to 300 seconds; a network timeout reaching the process error boundary is
   logged without terminating the Bridge. Authentication, certificate,
   configuration, and programming errors remain fatal.
+- Uses `reviewer-accessor`'s explicit conversation URL, response-performance,
+  cross-process turn lock, Chrome-for-Testing bootstrap, and DPAPI credential
+  cache for ordinary ChatGPT. The Bridge never copies tokens into its config,
+  state, command line, or logs. Supported outgoing attachments follow the
+  reviewer contract: ordinary documents, source files, and archives are
+  accepted; image input is rejected before submission. A post-submission
+  failure is marked uncertain and is never automatically retried.
 - When completion reporting is enabled for the task, mentions the configured
   user with `タスクが完了しました。` on the first line in `codex-completions`,
   posts a one-line final-answer summary on the second line, and uses the bare
@@ -172,6 +187,9 @@ outbound connection to Discord.
 | `/codex review` | Start inline or detached review for a selected target |
 | `/codex terminals` | List or confirm termination of task background terminals |
 | `/codex-files` | Browse and download files from a selected task's project root |
+| `/chatgpt link` | Explicitly link one existing ordinary ChatGPT conversation URL |
+| `/chatgpt list` | List only explicitly linked ChatGPT channels |
+| `/chatgpt status` | Inspect reviewer-accessor and linked-conversation session state |
 
 Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct
@@ -196,7 +214,8 @@ The state schema is the durable lookup table:
 - project ID -> one or more Discord category IDs;
 - Codex task ID -> Discord task channel ID;
 - Codex subagent thread ID -> its parent task ID and Discord thread ID;
-- Codex turn ID -> user, live commentary, final, and completion-notice message IDs.
+- Codex turn ID -> user, live commentary, final, and completion-notice message IDs;
+- explicit ChatGPT conversation ID -> Discord channel and Discord input/output message IDs.
 
 Before sending during recovery, the bridge checks both that ledger and visible
 message identity markers. A restart after Discord accepted a post but before
@@ -397,6 +416,10 @@ time is deferred before execution.
   Message Content Intent. Bot and webhook messages are ignored in task channels.
   Existing category permission overwrites remain owned by Discord administrators;
   newly created managed categories copy the current control or parent category.
+- Ordinary-message input in an explicitly linked ChatGPT channel uses the same
+  effective `ViewChannel` plus `SendMessages` rule. Only `authorizedUserIds` may
+  run `/chatgpt link` or confirm unlinking. A linked channel never grants access
+  to other ChatGPT conversations and never changes the ChatGPT-side lifecycle.
 - Incoming attachments are downloaded only from Discord's attachment URL after
   the guild and user checks pass. The Bridge does not execute them. Files are
   stored under `data/incoming-files/<task-id>/<Discord-message-id>/`, remain

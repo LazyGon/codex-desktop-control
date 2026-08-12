@@ -720,6 +720,7 @@ export class DiscordController {
 
   async #handleInteraction(interaction) {
     try {
+      if (interaction.commandName === 'chatgpt' || String(interaction.customId ?? '').startsWith('cg:')) return;
       if (interaction.isAutocomplete()) {
         await this.#handleAutocomplete(interaction);
         return;

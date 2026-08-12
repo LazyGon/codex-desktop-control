@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { commandPayload } from '../src/commands.mjs';
 
 test('guild command payload contains the full remote operation surface', () => {
-  assert.equal(commandPayload.length, 2);
+  assert.equal(commandPayload.length, 3);
   const subcommands = commandPayload[0].options.map((option) => option.name);
   for (const expected of [
     'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
@@ -20,6 +20,13 @@ test('guild command payload contains the full remote operation surface', () => {
   assert.equal(commandPayload[1].default_member_permissions, '8');
   assert.equal(commandPayload[1].options[0].name, 'task');
   assert.equal(commandPayload[1].options[0].autocomplete, true);
+  assert.equal(commandPayload[2].name, 'chatgpt');
+  assert.equal(commandPayload[2].default_member_permissions, '8');
+  assert.deepEqual(commandPayload[2].options.map((option) => option.name), ['link', 'list', 'status']);
+  assert.equal(
+    commandPayload[2].options.find((option) => option.name === 'link').options.find((option) => option.name === 'url').required,
+    true,
+  );
   for (const name of ['deliver', 'send']) {
     const subcommand = commandPayload[0].options.find((option) => option.name === name);
     const attachment = subcommand.options.find((option) => option.name === 'attachment');

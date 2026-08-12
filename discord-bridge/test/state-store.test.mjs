@@ -31,6 +31,21 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
     assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
     assert.equal(second.binding('thread-1').completionReportsEnabled, true);
+    second.setChatgptConversation('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+      channelId: 'chat-channel-1',
+      name: 'Explicit chat',
+      conversationUrl: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      responsePerformance: 'high',
+    });
+    second.setChatgptMessageRecord('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'discord-message-1', {
+      state: 'dispatching',
+    });
+    const chatReload = new StateStore(directory, '123456789012345');
+    assert.equal(chatReload.chatgptConversationByChannel('chat-channel-1').name, 'Explicit chat');
+    assert.equal(
+      chatReload.chatgptMessageRecord('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'discord-message-1').state,
+      'dispatching',
+    );
     second.setClientToolRequest('server|request:1', {
       status: 'completed',
       response: { success: true },
@@ -106,10 +121,12 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
       autoCatchupProjects: { legacy: { path: 'C:\\work' } },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 6);
+    assert.equal(state.schemaVersion, 7);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
+    assert.equal(state.infrastructure.chatgptCategoryId, null);
+    assert.deepEqual(state.chatgptConversations, {});
     assert.equal(state.bindings['thread-1'].channelId, 'channel-1');
     assert.equal(state.bindings['thread-1'].completionReportsEnabled, true);
     assert.equal(state.autoCatchupProjects, undefined);
@@ -137,7 +154,7 @@ test('StateStore migrates v2 project and completed-turn identities into the curr
       },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 6);
+    assert.equal(state.schemaVersion, 7);
     assert.equal(state.projectCategories['c:\\git\\example'].projectId, 'prj_35574e3c6147');
     assert.deepEqual(state.bindings['thread-1'].turnMessages['turn-1'].finalMessageIds, ['message-final']);
     assert.equal(state.bindings['thread-1'].turnMessages['turn-1'].cardMessageId, 'message-final');
@@ -159,9 +176,30 @@ test('StateStore migrates v5 state with an isolated subagent ledger', () => {
       clientToolRequests: {},
     }));
     const store = new StateStore(directory, '123456789012345');
-    assert.equal(store.snapshot().schemaVersion, 6);
+    assert.equal(store.snapshot().schemaVersion, 7);
     assert.deepEqual(store.snapshot().subagentThreads, {});
     assert.equal(store.binding('thread-1').channelId, 'channel-1');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('StateStore migrates v6 state and preserves explicit ChatGPT links only', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-v6-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'state.json'), JSON.stringify({
+      schemaVersion: 6,
+      guildId: '123456789012345',
+      infrastructure: { controlCategoryId: 'control-category' },
+      projectCategories: {},
+      bindings: {},
+      subagentThreads: {},
+      clientToolRequests: {},
+    }));
+    const store = new StateStore(directory, '123456789012345');
+    assert.equal(store.snapshot().schemaVersion, 7);
+    assert.deepEqual(store.chatgptConversations(), []);
+    assert.equal(store.snapshot().infrastructure.chatgptControlChannelId, null);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

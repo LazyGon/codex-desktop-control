@@ -12,6 +12,13 @@
   "completionsChannelName": "codex-completions",
   "transferCategoryName": "Others",
   "transferTextChannelName": "transfer-text",
+  "chatgptEnabled": true,
+  "chatgptCategoryName": "ChatGPT",
+  "chatgptControlChannelName": "chatgpt-remote",
+  "reviewerAccessorRoot": "C:\\git\\other\\reviewer-accessor",
+  "reviewerAccessorProfile": "dev",
+  "reviewerAccessorPort": 9222,
+  "reviewerAccessorResponsePerformance": "fastest",
   "textTransferEnabled": true,
   "completionMentionUserIds": [
     "DISCORD_USER_ID"

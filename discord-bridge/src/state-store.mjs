@@ -8,7 +8,7 @@ import {
 
 function initialState(guildId) {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     guildId,
     infrastructure: {
       controlCategoryId: null,
@@ -18,11 +18,15 @@ function initialState(guildId) {
       transferCategoryId: null,
       transferTextChannelId: null,
       archiveCategoryIds: [],
+      chatgptCategoryId: null,
+      chatgptControlChannelId: null,
+      chatgptControlPanelMessageId: null,
     },
     projectCategories: {},
     bindings: {},
     subagentThreads: {},
     clientToolRequests: {},
+    chatgptConversations: {},
     lastReadyAt: null,
   };
 }
@@ -67,7 +71,14 @@ export class StateStore {
       this.value.subagentThreads ??= {};
       this.value.schemaVersion = 6;
     }
-    if (this.value.schemaVersion !== 6) this.value = initialState(guildId);
+    if (this.value.schemaVersion === 6) {
+      this.value.chatgptConversations ??= {};
+      this.value.infrastructure.chatgptCategoryId ??= null;
+      this.value.infrastructure.chatgptControlChannelId ??= null;
+      this.value.infrastructure.chatgptControlPanelMessageId ??= null;
+      this.value.schemaVersion = 7;
+    }
+    if (this.value.schemaVersion !== 7) this.value = initialState(guildId);
     delete this.value.bindings?.undefined;
     delete this.value.subagentThreads?.undefined;
     for (const binding of Object.values(this.value.bindings ?? {})) {
@@ -81,6 +92,9 @@ export class StateStore {
     this.value.infrastructure.controlPanelMessageId ??= null;
     this.value.infrastructure.transferCategoryId ??= null;
     this.value.infrastructure.transferTextChannelId ??= null;
+    this.value.infrastructure.chatgptCategoryId ??= null;
+    this.value.infrastructure.chatgptControlChannelId ??= null;
+    this.value.infrastructure.chatgptControlPanelMessageId ??= null;
     this.value.projectCategories ??= {};
     this.value.subagentThreads ??= {};
     for (const subagent of Object.values(this.value.subagentThreads)) {
@@ -88,6 +102,12 @@ export class StateStore {
       subagent.discordArchived ??= false;
     }
     this.value.clientToolRequests ??= {};
+    this.value.chatgptConversations ??= {};
+    for (const conversation of Object.values(this.value.chatgptConversations)) {
+      conversation.messageRecords ??= {};
+      conversation.controlPanelMessageId ??= null;
+      conversation.activeMessageId ??= null;
+    }
     delete this.value.autoCatchupProjects;
     this.#write();
   }
@@ -213,6 +233,74 @@ export class StateStore {
           .sort(([, left], [, right]) => String(left.updatedAt).localeCompare(String(right.updatedAt)))
           .slice(0, entries.length - 2_000)
           .forEach(([oldKey]) => delete state.clientToolRequests[oldKey]);
+      }
+    });
+  }
+
+  chatgptConversation(conversationId) {
+    const value = this.value.chatgptConversations[conversationId];
+    return value ? { conversationId, ...deepClone(value) } : null;
+  }
+
+  chatgptConversationByChannel(channelId) {
+    const entry = Object.entries(this.value.chatgptConversations)
+      .find(([, value]) => value.channelId === channelId);
+    return entry ? { conversationId: entry[0], ...deepClone(entry[1]) } : null;
+  }
+
+  chatgptConversations() {
+    return Object.entries(this.value.chatgptConversations)
+      .map(([conversationId, value]) => ({ conversationId, ...deepClone(value) }))
+      .sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  }
+
+  setChatgptConversation(conversationId, patch) {
+    if (typeof conversationId !== 'string' || !conversationId || conversationId === 'undefined') {
+      throw new Error('A valid ChatGPT conversationId is required.');
+    }
+    return this.update((state) => {
+      const previous = state.chatgptConversations[conversationId] ?? {};
+      state.chatgptConversations[conversationId] = {
+        ...previous,
+        ...patch,
+        messageRecords: patch.messageRecords ?? previous.messageRecords ?? {},
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
+  removeChatgptConversation(conversationId) {
+    return this.update((state) => {
+      delete state.chatgptConversations[conversationId];
+    });
+  }
+
+  chatgptMessageRecord(conversationId, discordMessageId) {
+    const value = this.value.chatgptConversations[conversationId]?.messageRecords?.[discordMessageId];
+    return value ? deepClone(value) : null;
+  }
+
+  setChatgptMessageRecord(conversationId, discordMessageId, patch) {
+    if (!this.value.chatgptConversations[conversationId]) {
+      throw new Error(`Unknown ChatGPT conversation: ${conversationId}`);
+    }
+    if (typeof discordMessageId !== 'string' || !discordMessageId) {
+      throw new Error('A Discord message id is required for the ChatGPT delivery ledger.');
+    }
+    return this.update((state) => {
+      const conversation = state.chatgptConversations[conversationId];
+      conversation.messageRecords ??= {};
+      conversation.messageRecords[discordMessageId] = {
+        ...conversation.messageRecords[discordMessageId],
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      const entries = Object.entries(conversation.messageRecords);
+      if (entries.length > 2_000) {
+        entries
+          .sort(([, left], [, right]) => String(left.updatedAt).localeCompare(String(right.updatedAt)))
+          .slice(0, entries.length - 2_000)
+          .forEach(([oldId]) => delete conversation.messageRecords[oldId]);
       }
     });
   }

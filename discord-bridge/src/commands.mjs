@@ -225,4 +225,41 @@ export const codexFilesCommand = addTaskOption(new SlashCommandBuilder()
   .setDescription('Codexタスクのプロジェクトファイルを参照・取得します')
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator));
 
-export const commandPayload = [codexCommand.toJSON(), codexFilesCommand.toJSON()];
+export const chatgptCommand = new SlashCommandBuilder()
+  .setName('chatgpt')
+  .setDescription('既存の通常ChatGPT会話をDiscordへ明示的に連携します')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  .addSubcommand((command) => command
+    .setName('link')
+    .setDescription('指定した既存ChatGPT会話だけを専用カテゴリへ追加します')
+    .addStringOption((option) => option
+      .setName('url')
+      .setDescription('https://chatgpt.com/.../c/<conversation UUID>')
+      .setRequired(true)
+      .setMaxLength(500))
+    .addStringOption((option) => option
+      .setName('name')
+      .setDescription('Discordに表示する会話名')
+      .setMaxLength(100))
+    .addStringOption((option) => option
+      .setName('performance')
+      .setDescription('ChatGPTの応答性能')
+      .addChoices(
+        { name: 'Fastest', value: 'fastest' },
+        { name: 'Medium', value: 'medium' },
+        { name: 'High', value: 'high' },
+        { name: 'Very high', value: 'very-high' },
+        { name: 'Pro', value: 'pro' },
+      )))
+  .addSubcommand((command) => command
+    .setName('list')
+    .setDescription('明示的に連携したChatGPT会話を一覧表示します'))
+  .addSubcommand((command) => command
+    .setName('status')
+    .setDescription('reviewer-accessorと現在の会話の状態を表示します'));
+
+export const commandPayload = [
+  codexCommand.toJSON(),
+  codexFilesCommand.toJSON(),
+  chatgptCommand.toJSON(),
+];

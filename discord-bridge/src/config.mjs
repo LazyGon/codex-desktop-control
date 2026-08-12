@@ -22,6 +22,10 @@ const defaultLauncherStatePath = path.join(
 const defaultCodexStateRoot = String(process.env.CODEX_HOME ?? '').trim()
   ? path.resolve(process.env.CODEX_HOME)
   : path.join(os.homedir(), '.codex');
+const defaultReviewerAccessorRoot = path.join(
+  path.dirname(path.dirname(bridgeRoot)),
+  'reviewer-accessor',
+);
 
 export const MIN_DISCORD_NETWORK_TIMEOUT_MS = 300_000;
 
@@ -34,6 +38,14 @@ const defaults = {
   completionsChannelName: 'codex-completions',
   transferCategoryName: 'Others',
   transferTextChannelName: 'transfer-text',
+  chatgptEnabled: true,
+  chatgptCategoryName: 'ChatGPT',
+  chatgptControlChannelName: 'chatgpt-remote',
+  reviewerAccessorRoot: defaultReviewerAccessorRoot,
+  reviewerAccessorProfile: 'dev',
+  reviewerAccessorPort: 9222,
+  reviewerAccessorResponsePerformance: 'fastest',
+  chatgptLiveUpdateIntervalMs: 2500,
   textTransferEnabled: true,
   authorizedUserIds: null,
   authorizedUserId: null,
@@ -131,6 +143,9 @@ export function loadConfig() {
   if (config.launcherStatePath && !path.isAbsolute(config.launcherStatePath)) {
     config.launcherStatePath = path.resolve(bridgeRoot, config.launcherStatePath);
   }
+  if (config.reviewerAccessorRoot && !path.isAbsolute(config.reviewerAccessorRoot)) {
+    config.reviewerAccessorRoot = path.resolve(bridgeRoot, config.reviewerAccessorRoot);
+  }
   const errors = [];
   if (!isSnowflake(config.applicationId)) errors.push('applicationId must be a Discord snowflake.');
   if (!isSnowflake(config.guildId)) errors.push('guildId must be a Discord snowflake.');
@@ -193,6 +208,35 @@ export function loadConfig() {
   }
   if (typeof config.textTransferEnabled !== 'boolean') {
     errors.push('textTransferEnabled must be boolean.');
+  }
+  if (typeof config.chatgptEnabled !== 'boolean') {
+    errors.push('chatgptEnabled must be boolean.');
+  }
+  if (typeof config.chatgptCategoryName !== 'string' || !config.chatgptCategoryName.trim()) {
+    errors.push('chatgptCategoryName must be a non-empty string.');
+  }
+  if (typeof config.chatgptControlChannelName !== 'string' || !config.chatgptControlChannelName.trim()) {
+    errors.push('chatgptControlChannelName must be a non-empty string.');
+  }
+  if (!config.reviewerAccessorRoot || !path.isAbsolute(config.reviewerAccessorRoot)) {
+    errors.push('reviewerAccessorRoot must be an absolute path.');
+  }
+  if (typeof config.reviewerAccessorProfile !== 'string'
+    || !/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(config.reviewerAccessorProfile)) {
+    errors.push('reviewerAccessorProfile must be a safe profile name.');
+  }
+  if (!Number.isInteger(config.reviewerAccessorPort)
+    || config.reviewerAccessorPort < 1
+    || config.reviewerAccessorPort > 65535) {
+    errors.push('reviewerAccessorPort must be an integer from 1 to 65535.');
+  }
+  if (!['fastest', 'medium', 'high', 'very-high', 'pro'].includes(config.reviewerAccessorResponsePerformance)) {
+    errors.push('reviewerAccessorResponsePerformance must be fastest, medium, high, very-high, or pro.');
+  }
+  if (!Number.isInteger(config.chatgptLiveUpdateIntervalMs)
+    || config.chatgptLiveUpdateIntervalMs < 1_000
+    || config.chatgptLiveUpdateIntervalMs > 30_000) {
+    errors.push('chatgptLiveUpdateIntervalMs must be an integer from 1000 to 30000.');
   }
   if (typeof config.transferCategoryName !== 'string' || !config.transferCategoryName.trim()) {
     errors.push('transferCategoryName must be a non-empty string.');

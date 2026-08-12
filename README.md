@@ -14,7 +14,8 @@ Codex Desktop, local controller commands, and a private Discord remote UI.
   tasks on the shared app-server.
 - `discord-bridge/`: persistent private Discord UI for task display, control,
   approvals, Desktop message mirroring, archive synchronization, reconnect
-  recovery, and phone operation.
+  recovery, phone operation, and explicitly linked ordinary ChatGPT
+  conversations through the sibling `reviewer-accessor` checkout.
   Transient failures across Discord gateway/REST, the Codex app-server,
   attachment fetches, DNS, TCP, and TLS recover without terminating the
   Bridge; authentication, certificate, configuration, and programming errors
@@ -38,7 +39,7 @@ to a LAN or the internet.
 
 Enable **Message Content Intent** on the Discord application's **Bot** page.
 It is required for the `Others` / `transfer-text` inbox and for optional
-ordinary task-channel instructions.
+ordinary task-channel instructions, including linked ChatGPT channels.
 
 ## Install
 

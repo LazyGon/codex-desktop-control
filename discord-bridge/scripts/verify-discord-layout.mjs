@@ -11,6 +11,11 @@ import { dataDir, loadConfig } from '../src/config.mjs';
 import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
 import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
 import {
+  CHATGPT_COLOR,
+  CHATGPT_CONTROL_PANEL_MARKER,
+  chatgptConversationPanelMarker,
+} from '../src/chatgpt-panels.mjs';
+import {
   projectDescriptorForThread,
   readDesktopProjectSnapshot,
 } from '../src/desktop-project-state.mjs';
@@ -47,6 +52,17 @@ try {
     || category.name.startsWith(`${config.archiveCategoryName} (`));
   const projectCategories = categories.filter((category) => category.name.startsWith(config.projectCategoryPrefix));
   const controlChannel = textChannels.find((channel) => channel.name === config.controlChannelName);
+  const chatgptCategory = config.chatgptEnabled
+    ? categories.find((category) => category.name === config.chatgptCategoryName)
+    : null;
+  const chatgptControlChannel = config.chatgptEnabled
+    ? textChannels.find((channel) => channel.name === config.chatgptControlChannelName
+      && channel.parentId === controlCategory?.id)
+    : null;
+  const chatgptChannels = config.chatgptEnabled && chatgptCategory
+    ? textChannels.filter((channel) => channel.parentId === chatgptCategory.id
+      && channel.topic?.startsWith('ChatGPT conversation: '))
+    : new Map();
   const transferCategory = config.textTransferEnabled
     ? categories.find((category) => category.name === config.transferCategoryName)
     : null;
@@ -73,6 +89,7 @@ try {
   const noProjectRecord = state.projectCategories?.__no_project__ ?? null;
   const command = commands.find((candidate) => candidate.name === 'codex');
   const filesCommand = commands.find((candidate) => candidate.name === 'codex-files');
+  const chatgptCommand = commands.find((candidate) => candidate.name === 'chatgpt');
   const commandNames = command?.options.map((option) => option.name) ?? [];
   const requiredCommands = [
     'status', 'tasks', 'open', 'deliver', 'send', 'steer', 'compose', 'interrupt', 'watch', 'pending', 'sync', 'refresh',
@@ -89,11 +106,12 @@ try {
     ...archiveCategories.values(),
     ...projectCategories.values(),
     ...(transferCategory ? [transferCategory] : []),
+    ...(chatgptCategory ? [chatgptCategory] : []),
   ];
 
   const customIds = (message) => message.components
     .flatMap((row) => row.components.map((component) => component.customId).filter(Boolean));
-  const verifyPanel = async (channel, messageId, marker, requiredIds) => {
+  const verifyPanel = async (channel, messageId, marker, requiredIds, color = CONTROL_PANEL_COLOR) => {
     if (!messageId) {
       errors.push(`${channel?.name ?? '(unknown channel)'}: control panel message ID is missing.`);
       return null;
@@ -104,7 +122,7 @@ try {
       return null;
     }
     if (!message.pinned) errors.push(`${channel.name}: control panel ${messageId} is not pinned.`);
-    if (message.embeds[0]?.color !== CONTROL_PANEL_COLOR) {
+    if (message.embeds[0]?.color !== color) {
       errors.push(`${channel.name}: control panel ${messageId} does not use the dedicated control color.`);
     }
     if (!message.embeds.some((embed) => embed.footer?.text === marker)) {
@@ -125,6 +143,19 @@ try {
   }
   if (config.textTransferEnabled && !transferTextChannel) {
     errors.push(`Missing transfer channel: ${config.transferTextChannelName}`);
+  }
+  if (config.chatgptEnabled && !chatgptCategory) {
+    errors.push(`Missing ChatGPT category: ${config.chatgptCategoryName}`);
+  }
+  if (config.chatgptEnabled && !chatgptControlChannel) {
+    errors.push(`Missing ChatGPT control channel: ${config.chatgptControlChannelName}`);
+  }
+  if (chatgptCategory && state.infrastructure.chatgptCategoryId !== chatgptCategory.id) {
+    errors.push('ChatGPT category ID does not match persisted state.');
+  }
+  if (chatgptControlChannel
+    && state.infrastructure.chatgptControlChannelId !== chatgptControlChannel.id) {
+    errors.push('ChatGPT control channel ID does not match persisted state.');
   }
   if (transferCategory && state.infrastructure.transferCategoryId !== transferCategory.id) {
     errors.push('Transfer category ID does not match persisted state.');
@@ -168,6 +199,13 @@ try {
   }
   if (removedCommands.length) errors.push(`Removed commands remain registered: ${removedCommands.join(', ')}`);
   if (!filesCommand) errors.push('Required command is missing: codex-files');
+  if (config.chatgptEnabled && !chatgptCommand) errors.push('Required command is missing: chatgpt');
+  const chatgptCommandNames = chatgptCommand?.options.map((option) => option.name) ?? [];
+  for (const name of ['link', 'list', 'status']) {
+    if (config.chatgptEnabled && !chatgptCommandNames.includes(name)) {
+      errors.push(`Required ChatGPT command is missing: chatgpt ${name}`);
+    }
+  }
   const missingCommands = requiredCommands.filter((name) => !commandNames.includes(name));
   if (missingCommands.length) errors.push(`Required commands are missing: ${missingCommands.join(', ')}`);
   for (const attachmentCommand of attachmentCommands) {
@@ -180,6 +218,10 @@ try {
   }
   if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
     errors.push(`Task channel count ${taskChannels.size} does not match state bindings ${Object.keys(state.bindings ?? {}).length}.`);
+  }
+  if (config.chatgptEnabled
+    && chatgptChannels.size !== Object.keys(state.chatgptConversations ?? {}).length) {
+    errors.push(`ChatGPT channel count ${chatgptChannels.size} does not match explicit links ${Object.keys(state.chatgptConversations ?? {}).length}.`);
   }
   if (controlChannel) {
     await verifyPanel(
@@ -195,6 +237,19 @@ try {
         'cx:ui:control:resources',
         ...(Object.keys(state.bindings ?? {}).length ? ['cx:ui:control:open'] : []),
       ],
+    );
+  }
+  if (chatgptControlChannel) {
+    await verifyPanel(
+      chatgptControlChannel,
+      state.infrastructure.chatgptControlPanelMessageId,
+      CHATGPT_CONTROL_PANEL_MARKER,
+      [
+        'cg:list',
+        'cg:status',
+        ...(Object.keys(state.chatgptConversations ?? {}).length ? ['cg:open'] : []),
+      ],
+      CHATGPT_COLOR,
     );
   }
   for (const category of privateCategories) {
@@ -239,6 +294,27 @@ try {
     );
     if (panel) taskPanels += 1;
   }
+  for (const [conversationId, conversation] of Object.entries(state.chatgptConversations ?? {})) {
+    const channel = textChannels.get(conversation.channelId);
+    if (!channel) {
+      errors.push(`Explicit ChatGPT conversation ${conversationId} has no Discord channel.`);
+      continue;
+    }
+    if (channel.parentId !== chatgptCategory?.id) {
+      errors.push(`Explicit ChatGPT conversation ${conversationId} is outside the ChatGPT category.`);
+    }
+    await verifyPanel(
+      channel,
+      conversation.controlPanelMessageId,
+      chatgptConversationPanelMarker(conversationId),
+      [
+        `cg:performance:${conversationId}`,
+        `cg:conversation-status:${conversationId}`,
+        `cg:unlink:${conversationId}`,
+      ],
+      CHATGPT_COLOR,
+    );
+  }
 
   process.stdout.write(`${JSON.stringify({
     ok: errors.length === 0,
@@ -247,6 +323,13 @@ try {
       enabled: config.textTransferEnabled,
       category: transferCategory?.name ?? null,
       channel: transferTextChannel?.name ?? null,
+    },
+    chatgpt: {
+      enabled: config.chatgptEnabled,
+      category: chatgptCategory?.name ?? null,
+      controlChannel: chatgptControlChannel?.name ?? null,
+      explicitLinks: Object.keys(state.chatgptConversations ?? {}).length,
+      channels: chatgptChannels.size,
     },
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     projectless: {
@@ -262,7 +345,11 @@ try {
       privateCategories: privateCategories.length,
     },
     panels: { control: Boolean(state.infrastructure.controlPanelMessageId), tasks: taskPanels },
-    commands: [...commandNames.map((name) => `codex ${name}`), ...(filesCommand ? ['codex-files'] : [])],
+    commands: [
+      ...commandNames.map((name) => `codex ${name}`),
+      ...(filesCommand ? ['codex-files'] : []),
+      ...chatgptCommandNames.map((name) => `chatgpt ${name}`),
+    ],
     errors,
   }, null, 2)}\n`);
   if (errors.length) process.exitCode = 1;

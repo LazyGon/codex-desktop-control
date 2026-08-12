@@ -12,6 +12,8 @@ import {
   requireBotToken,
 } from './config.mjs';
 import { CodexService } from './codex-service.mjs';
+import { ChatgptService } from './chatgpt-service.mjs';
+import { ChatgptController } from './chatgpt-controller.mjs';
 import { isTransientCommunicationError } from './communication-error.mjs';
 import { DiscordController } from './discord-controller.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
@@ -61,7 +63,7 @@ acquireLock();
 if (fs.existsSync(stopRequestPath)) fs.unlinkSync(stopRequestPath);
 
 const gatewayIntents = [GatewayIntentBits.Guilds];
-if (config.plainMessageInputEnabled || config.textTransferEnabled) {
+if (config.plainMessageInputEnabled || config.textTransferEnabled || config.chatgptEnabled) {
   gatewayIntents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
 }
 
@@ -74,7 +76,23 @@ const client = new Client({
 });
 const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
 const controller = new DiscordController({ client, codex, stateStore, config, logDir });
+const chatgptService = new ChatgptService({
+  config,
+  onStatus: (scope, message, identity = null) => appendJsonLine(processLog, 'chatgpt-transport-status', {
+    scope,
+    message,
+    conversationId: identity?.conversationId ?? null,
+  }),
+});
+const chatgptController = new ChatgptController({
+  client,
+  service: chatgptService,
+  stateStore,
+  config,
+  logDir,
+});
 controller.attach();
+chatgptController.attach();
 
 let shuttingDown = false;
 let runtimeTimer = null;
@@ -91,6 +109,7 @@ function writeRuntime(phase, extra = {}) {
     discordReady: client.isReady(),
     discordUser: client.user?.tag ?? null,
     codex: codex.status(),
+    chatgpt: chatgptController.status(),
     ...extra,
   });
 }
@@ -127,10 +146,16 @@ async function shutdown(reason, exitCode = 0) {
   clearInterval(runtimeTimer);
   clearInterval(stopTimer);
   const controllerStop = controller.stop();
+  const chatgptControllerStop = chatgptController.stop();
   await codex.stop().catch((error) => appendJsonLine(processLog, 'codex-stop-error', { error: error.message }));
   await controllerStop.catch((error) => appendJsonLine(
     processLog,
     'controller-stop-error',
+    { error: error.message },
+  ));
+  await chatgptControllerStop.catch((error) => appendJsonLine(
+    processLog,
+    'chatgpt-controller-stop-error',
     { error: error.message },
   ));
   client.destroy();
@@ -155,6 +180,7 @@ client.once('clientReady', () => {
     while (!shuttingDown) {
       try {
         await controller.ready();
+        await chatgptController.ready();
         codex.start().catch((error) => appendJsonLine(processLog, 'codex-loop-failed', { error: error.stack ?? error.message }));
         writeRuntime('running');
         return;

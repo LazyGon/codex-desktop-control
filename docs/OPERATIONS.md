@@ -117,6 +117,14 @@ automatically, and archived tasks move to `Codex Archived`. Installation,
 commands, approval routing, reconnection behavior, and credential rotation are
 documented in `discord-bridge\README.md` and `discord-bridge\docs-operations.md`.
 
+Ordinary ChatGPT conversations are a separate explicit surface. Run
+`/chatgpt link` with an existing `https://chatgpt.com/.../c/<UUID>` URL; the
+Bridge then creates one channel under the private `ChatGPT` category. It never
+discovers or links the default reviewer conversation automatically. Messages in
+that channel use `reviewer-accessor` and its DPAPI-protected current-user
+session, not the Codex app-server. `/chatgpt list` and the pinned
+`chatgpt-remote` panel enumerate only explicitly linked conversations.
+
 To create a Codex task from a phone, create a text channel inside the target
 project category and send its first ordinary message. The Bridge uses the
 category's stored project path for `thread/start`, derives the task name from

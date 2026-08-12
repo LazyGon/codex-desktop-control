@@ -67,6 +67,31 @@ discovery or status reconciliation for other channels.
    and confirm `Archiveを作成`. To retrieve only Git metadata, tap
    `🗃️ Download .git` and confirm `.gitを作成`.
 
+## Ordinary ChatGPT workflow
+
+1. Copy the URL of an existing ordinary ChatGPT conversation. It must contain
+   `/c/<conversation UUID>` on `https://chatgpt.com`; creating a new ChatGPT
+   conversation is outside this Bridge.
+2. In Discord, run `/chatgpt link`, enter the URL, and optionally choose a
+   display name and response performance. Only a configured authorized user can
+   add or remove links.
+3. Open the resulting channel under the private `ChatGPT` category and post a
+   normal message. Anyone with Discord `ViewChannel` and `SendMessages` on that
+   channel may execute it. The pinned green panel changes response performance;
+   `🟢` means a response is running and `⚫` means ready.
+4. Use `/chatgpt list`, `/chatgpt status`, or the pinned panel in
+   `chatgpt-remote` to inspect the explicitly linked set. No configured default
+   conversation is linked automatically.
+
+The first send may open reviewer-accessor's Chrome for Testing bootstrap when
+its DPAPI session is absent or stale. Text streams into one green response card;
+long output is capped at five posts with a complete UTF-8 attachment. Documents,
+source files, and archives accepted by reviewer-accessor may be attached to the
+Discord input. Its current direct transport does not accept image input.
+If Bridge state becomes uncertain after ChatGPT submission, the message is
+marked uncertain and is not retried automatically; manually inspect the
+ChatGPT conversation before deciding whether to send again.
+
 The `Linked files` picker also provides `Download all as ZIP`. It archives all
 downloadable links, preserves a project-relative path when one is available,
 and posts a SHA-256 manifest with the ZIP or numbered ZIP volumes.
