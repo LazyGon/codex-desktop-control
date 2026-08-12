@@ -94,6 +94,11 @@ validates its state, listener PID, executable, supervisor, package version, and
 Desktop on that existing connection. A server owned by another checkout or an
 inconsistent state file is never adopted.
 
+The launcher caches the package's `codex.exe` and
+`codex-code-mode-host.exe` together in a version-specific directory. Current
+app-server builds start the companion Code Mode host beside `codex.exe`; both
+hashes must match the installed Desktop package before the runtime is reused.
+
 Before each Desktop start, the launcher reads the Bridge's managed project
 paths and the app-server's active and archived task lists. While Desktop is
 still stopped, it creates any missing local-project records and assigns tasks
@@ -218,13 +223,14 @@ Desktop exits normally.
 
 The root `.gitignore` excludes bot credentials, generated configuration,
 message ledgers, runtime state, logs, dependencies, generated launcher binaries,
-the cached Codex executable, and experiment artifacts. Do not force-add those
+the cached Codex runtime executables, and experiment artifacts. Do not force-add those
 paths, even in a private repository.
 
 ## Verification
 
 ```powershell
 node --test .\launcher\sync-desktop-projects.test.mjs
+node --test .\launcher\runtime-cache.test.mjs
 node --check .\launcher\read-thread-status.mjs
 npm --prefix .\discord-bridge run check
 npm --prefix .\discord-bridge test

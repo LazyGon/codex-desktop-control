@@ -5,7 +5,9 @@
 1. Quit any normally started Codex Desktop.
 2. Start **Codex Shared Server** from the Start menu or taskbar.
 3. The launcher either starts the shared app-server or validates and reuses the
-   healthy app-server already owned by this checkout. It reconciles managed
+   healthy app-server already owned by this checkout. The package's app-server
+   and Code Mode host are cached together by package version and hash-checked
+   before startup or reuse. It reconciles managed
    project paths and task assignments while Desktop is still stopped, and then
    starts Desktop.
 4. Wait for two ascending tones. They mean the Desktop connection to the

@@ -17,9 +17,14 @@ $launcherRoot = Split-Path -Parent $PSCommandPath
 $logRoot = Join-Path $launcherRoot 'logs'
 $stateRoot = Join-Path $launcherRoot 'state'
 $cacheRoot = Join-Path $launcherRoot 'cache'
+$runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
+    throw "Codex runtime cache helper was not found: $runtimeCacheScript"
+}
+. $runtimeCacheScript
 
 $runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $modeName = if ($SelfTest) { 'selftest' } else { 'desktop' }
@@ -98,37 +103,22 @@ function Get-CodexPackageInfo {
 
     $desktopExecutable = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
     $bundledServerExecutable = Join-Path $package.InstallLocation 'app\resources\codex.exe'
+    $bundledCodeModeHostExecutable = Join-Path $package.InstallLocation 'app\resources\codex-code-mode-host.exe'
     if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
         throw "Desktop executable was not found: $desktopExecutable"
     }
     if (-not (Test-Path -LiteralPath $bundledServerExecutable -PathType Leaf)) {
         throw "Bundled app-server executable was not found: $bundledServerExecutable"
     }
-
-    $sourceHash = (Get-FileHash -LiteralPath $bundledServerExecutable -Algorithm SHA256).Hash
-    $cachedServerExecutable = Join-Path $cacheRoot ("codex-{0}.exe" -f $package.Version.ToString())
-    $cacheIsCurrent = $false
-    if (Test-Path -LiteralPath $cachedServerExecutable -PathType Leaf) {
-        $cachedHash = (Get-FileHash -LiteralPath $cachedServerExecutable -Algorithm SHA256).Hash
-        $cacheIsCurrent = $cachedHash -eq $sourceHash
+    if (-not (Test-Path -LiteralPath $bundledCodeModeHostExecutable -PathType Leaf)) {
+        throw "Bundled Code Mode host executable was not found: $bundledCodeModeHostExecutable"
     }
 
-    if (-not $cacheIsCurrent) {
-        $temporaryCachePath = "$cachedServerExecutable.$PID.tmp"
-        try {
-            Copy-Item -LiteralPath $bundledServerExecutable -Destination $temporaryCachePath -Force
-            $temporaryHash = (Get-FileHash -LiteralPath $temporaryCachePath -Algorithm SHA256).Hash
-            if ($temporaryHash -ne $sourceHash) {
-                throw 'The cached app-server hash does not match the Desktop package.'
-            }
-            Move-Item -LiteralPath $temporaryCachePath -Destination $cachedServerExecutable -Force
-        }
-        finally {
-            if (Test-Path -LiteralPath $temporaryCachePath) {
-                Remove-Item -LiteralPath $temporaryCachePath -Force
-            }
-        }
-    }
+    $runtimeCache = Initialize-CodexRuntimeCache `
+        -BundledServerExecutable $bundledServerExecutable `
+        -BundledCodeModeHostExecutable $bundledCodeModeHostExecutable `
+        -CacheRoot $cacheRoot `
+        -PackageVersion $package.Version.ToString()
 
     [pscustomobject]@{
         Version = $package.Version.ToString()
@@ -137,8 +127,11 @@ function Get-CodexPackageInfo {
         InstallLocation = $package.InstallLocation
         DesktopExecutable = [IO.Path]::GetFullPath($desktopExecutable)
         BundledServerExecutable = [IO.Path]::GetFullPath($bundledServerExecutable)
-        ServerExecutable = [IO.Path]::GetFullPath($cachedServerExecutable)
-        ServerSha256 = $sourceHash
+        BundledCodeModeHostExecutable = [IO.Path]::GetFullPath($bundledCodeModeHostExecutable)
+        ServerExecutable = $runtimeCache.ServerExecutable
+        ServerSha256 = $runtimeCache.ServerSha256
+        CodeModeHostExecutable = $runtimeCache.CodeModeHostExecutable
+        CodeModeHostSha256 = $runtimeCache.CodeModeHostSha256
     }
 }
 
@@ -392,7 +385,9 @@ function Get-ReusableRuntimeState {
         if (
             $state.packageVersion -ne $PackageInfo.Version -or
             $state.desktopExecutable -ne $PackageInfo.DesktopExecutable -or
-            $state.serverExecutable -ne $PackageInfo.ServerExecutable
+            $state.serverExecutable -ne $PackageInfo.ServerExecutable -or
+            $state.codeModeHostExecutable -ne $PackageInfo.CodeModeHostExecutable -or
+            $state.codeModeHostSha256 -ne $PackageInfo.CodeModeHostSha256
         ) {
             throw 'The recorded runtime does not match the installed Codex package and this launcher cache.'
         }
@@ -727,7 +722,7 @@ try {
         Write-LauncherLog "app-server ready. url=ws://127.0.0.1:$Port"
 
         $runtimeState = [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             mode = $modeName
             websocketUrl = "ws://127.0.0.1:$Port"
             readyUrl = "http://127.0.0.1:$Port/readyz"
@@ -739,8 +734,11 @@ try {
             packageVersion = $packageInfo.Version
             desktopExecutable = $packageInfo.DesktopExecutable
             bundledServerExecutable = $packageInfo.BundledServerExecutable
+            bundledCodeModeHostExecutable = $packageInfo.BundledCodeModeHostExecutable
             serverExecutable = $packageInfo.ServerExecutable
             serverSha256 = $packageInfo.ServerSha256
+            codeModeHostExecutable = $packageInfo.CodeModeHostExecutable
+            codeModeHostSha256 = $packageInfo.CodeModeHostSha256
             startedAt = (Get-Date).ToString('o')
             logPath = $logPath
         }
