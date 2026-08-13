@@ -32,7 +32,8 @@ to a LAN or the internet.
 ## Prerequisites
 
 - Windows 10 or 11 with Codex Desktop installed for the current user.
-- Windows PowerShell 5.1 and the .NET Framework C# compiler.
+- PowerShell 7 or newer is preferred; Windows PowerShell 5.1 remains the
+  supported fallback. The .NET Framework C# compiler is also required.
 - Node.js 22 or newer with `npm` available on `PATH`.
 - 7-Zip for file transfers larger than one Discord attachment.
 - A private Discord server and a Discord application with a bot.
@@ -88,6 +89,12 @@ Start Desktop from **Codex Shared Server**, not the standard Codex shortcut.
 Two ascending tones mean the Desktop connection to the shared app-server was
 verified. The Bridge starts at logon and can also start the shared launcher when
 the app-server is absent.
+
+The shared launcher resolves PowerShell in the same order as Codex on Windows.
+It honors `pwsh.exe` on `PATH` as an explicit operator selection, then tries the
+standard PowerShell 7 installation, `powershell.exe` on `PATH`, and finally
+Windows PowerShell 5.1. It never supplies an execution-policy override and does
+not propagate a parent process-level override.
 
 If this checkout's healthy app-server is already listening, the launcher
 validates its state, listener PID, executable, supervisor, package version, and
@@ -232,6 +239,7 @@ paths, even in a private repository.
 ```powershell
 node --test .\launcher\sync-desktop-projects.test.mjs
 node --test .\launcher\runtime-cache.test.mjs
+node --test .\launcher\shared-launcher.test.mjs
 node --check .\launcher\read-thread-status.mjs
 npm --prefix .\discord-bridge run check
 npm --prefix .\discord-bridge test

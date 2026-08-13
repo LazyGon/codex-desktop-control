@@ -18,6 +18,40 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex').toUpperCase();
 }
 
+function findOnPath(fileName) {
+  for (const rawDirectory of (process.env.PATH ?? '').split(path.delimiter)) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, '');
+    if (!directory) continue;
+    const candidate = path.join(directory, fileName);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolvePowerShellExecutable() {
+  const windowsRoot = process.env.WINDIR ?? String.raw`C:\Windows`;
+  const programFiles = process.env.ProgramFiles ?? String.raw`C:\Program Files`;
+  const candidates = [
+    findOnPath('pwsh.exe'),
+    path.join(programFiles, 'PowerShell', '7', 'pwsh.exe'),
+    findOnPath('powershell.exe'),
+    path.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  ];
+  const executable = candidates.find(candidate => candidate && fs.existsSync(candidate));
+  assert.ok(executable, 'PowerShell 7 or Windows PowerShell 5.1 must be available.');
+  return executable;
+}
+
+function cleanPowerShellEnvironment() {
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) {
+    if (/^(PSModulePath|PSExecutionPolicyPreference)$/i.test(key)) {
+      delete environment[key];
+    }
+  }
+  return environment;
+}
+
 function initializeCache({ server, host, cache, version }) {
   const command = [
     `$ErrorActionPreference = 'Stop'`,
@@ -25,15 +59,13 @@ function initializeCache({ server, host, cache, version }) {
     `$result = Initialize-CodexRuntimeCache -BundledServerExecutable ${psLiteral(server)} -BundledCodeModeHostExecutable ${psLiteral(host)} -CacheRoot ${psLiteral(cache)} -PackageVersion ${psLiteral(version)}`,
     `$result | ConvertTo-Json -Compress`,
   ].join('\n');
-  return JSON.parse(execFileSync('powershell.exe', [
+  return JSON.parse(execFileSync(resolvePowerShellExecutable(), [
     '-NoLogo',
     '-NoProfile',
     '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
     '-Command',
     command,
-  ], { encoding: 'utf8' }));
+  ], { encoding: 'utf8', env: cleanPowerShellEnvironment() }));
 }
 
 test('runtime cache keeps app-server and Code Mode host together per package version', (context) => {
