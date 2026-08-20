@@ -5,6 +5,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
+import { routeCodexArguments } from './codex-routing.mjs';
+
 const controlDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.dirname(controlDir);
 export const sharedStatePath = path.join(rootDir, 'launcher', 'state', 'current.json');
@@ -166,6 +168,12 @@ export async function validateSharedRuntime({
 }
 
 export function buildRemoteArguments(values) {
+  const route = routeCodexArguments(values);
+  if (route.subcommand) {
+    throw new Error(
+      `codex-shared is an interactive TUI entry point; subcommand ${route.subcommand} is not allowed.`,
+    );
+  }
   for (const value of values) {
     if (
       value === '--remote'

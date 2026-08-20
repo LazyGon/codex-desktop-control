@@ -40,6 +40,7 @@ $root = $PSScriptRoot
 $launcherRoot = Join-Path $root 'launcher'
 $bridgeRoot = Join-Path $root 'discord-bridge'
 $launcherInstaller = Join-Path $launcherRoot 'Install-CodexSharedLauncher.ps1'
+$cliRedirectInstaller = Join-Path $root 'control\Install-CodexCliRedirect.ps1'
 $launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 $launcherStatePath = Join-Path $launcherRoot 'state\current.json'
 $bridgeInstaller = Join-Path $bridgeRoot 'Install-DiscordBridge.ps1'
@@ -49,8 +50,15 @@ $bridgeLockPath = Join-Path $bridgeRoot 'data\bridge.lock'
 $bridgeRuntimePath = Join-Path $bridgeRoot 'data\runtime.json'
 $expectedWebSocketUrl = "ws://127.0.0.1:$Port"
 $taskName = 'Codex Discord Remote'
+$codexCliRedirectInstalled = $false
 
-foreach ($requiredPath in @($launcherInstaller, $bridgeInstaller, $bridgeStartScript, $bridgeStopScript)) {
+foreach ($requiredPath in @(
+    $launcherInstaller,
+    $cliRedirectInstaller,
+    $bridgeInstaller,
+    $bridgeStartScript,
+    $bridgeStopScript
+)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required installer component was not found: $requiredPath"
     }
@@ -160,6 +168,17 @@ if ($bridgeWasRunning) {
 
 try {
     & $launcherInstaller -Port $Port | Out-Host
+    $originalCodexJavaScript = Join-Path $env:APPDATA 'npm\node_modules\@openai\codex\bin\codex.js'
+    if (Test-Path -LiteralPath $originalCodexJavaScript -PathType Leaf) {
+        & $cliRedirectInstaller -OriginalCodexJavaScript $originalCodexJavaScript | Out-Host
+        $codexCliRedirectInstalled = $true
+    }
+    else {
+        Write-Warning (
+            'Codex CLI is not installed through npm; skipping the user PATH redirect. ' +
+            'The Desktop and Discord shared app-server installation will continue.'
+        )
+    }
 
     $bridgeParameters = @{
         NoStart = $true
@@ -212,6 +231,9 @@ catch {
     Installed = $true
     Root = $root
     SharedLauncher = $launcherExecutable
+    CodexCliRedirect = if ($codexCliRedirectInstalled) {
+        Join-Path $env:LOCALAPPDATA 'CodexDesktopControl\bin\codex.cmd'
+    } else { $null }
     SharedWebSocketUrl = $expectedWebSocketUrl
     DesktopUiSynchronized = if ($NoStart) { $false } else { Test-SharedDesktopReady }
     DiscordBridgeReady = if ($NoStart) { $false } else { Test-BridgeReady }

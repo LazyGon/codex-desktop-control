@@ -1,7 +1,17 @@
 # Shared Codex CLI
 
-The interactive Codex CLI can attach to the same loopback app-server as Codex
-Desktop and the Discord Bridge. Start **Codex Shared Server** first, then run:
+The integrated installer places a user-scoped `codex` shim before the npm CLI
+on `PATH`. After opening a new terminal process, an ordinary interactive Codex
+invocation attaches to the same loopback app-server as Codex Desktop and the
+Discord Bridge:
+
+```powershell
+codex
+codex "continue this task"
+```
+
+Start **Codex Shared Server** first. The repository-local explicit entry point
+remains available:
 
 ```powershell
 .\control\codex-shared.cmd
@@ -26,8 +36,11 @@ executable SHA-256, and `/readyz`, and then starts the exact same `codex.exe`
 version with `--remote`. Remote endpoint overrides are rejected.
 
 This command is only for the interactive TUI. Existing `codex exec`, `codex
-review`, and other non-interactive or administrative subcommands remain normal
-standalone CLI commands.
+review`, `codex resume`, and `codex fork` cannot use the upstream remote TUI
+transport, so the installed shim rejects them instead of silently creating an
+isolated run. Administrative commands such as `codex login`, `codex update`,
+and `codex doctor` pass through to the original npm CLI. Use `codex-original`
+only when an isolated task run is explicitly intended.
 
 `codex.exe app-server --listen stdio://` processes below a shared
 `node_repl.exe` are internal Code Mode helpers, not independent CLI terminal

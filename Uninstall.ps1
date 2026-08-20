@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $bridgeUninstaller = Join-Path $root 'discord-bridge\Uninstall-DiscordBridge.ps1'
 $launcherInstaller = Join-Path $root 'launcher\Install-CodexSharedLauncher.ps1'
+$cliRedirectInstaller = Join-Path $root 'control\Install-CodexCliRedirect.ps1'
 
 if (-not (Test-Path -LiteralPath $bridgeUninstaller -PathType Leaf)) {
     throw "Discord Bridge uninstaller was not found: $bridgeUninstaller"
@@ -19,9 +20,13 @@ if (-not (Test-Path -LiteralPath $bridgeUninstaller -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $launcherInstaller -PathType Leaf)) {
     throw "Shared launcher installer was not found: $launcherInstaller"
 }
+if (-not (Test-Path -LiteralPath $cliRedirectInstaller -PathType Leaf)) {
+    throw "Codex CLI redirect installer was not found: $cliRedirectInstaller"
+}
 
 & $bridgeUninstaller -RemoveConfiguration:$RemoveConfiguration | Out-Host
 & $launcherInstaller -Uninstall -Port $Port | Out-Host
+& $cliRedirectInstaller -Uninstall | Out-Host
 
 [pscustomobject]@{
     Uninstalled = $true
