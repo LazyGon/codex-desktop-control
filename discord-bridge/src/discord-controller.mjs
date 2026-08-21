@@ -265,6 +265,9 @@ export function sessionOrderRepairMessageIds(messages, turnIds, botUserId) {
   const targets = new Set(turnIds ?? []);
   return [...(messages?.values?.() ?? [])]
     .filter((message) => message.author?.id === botUserId)
+    .filter((message) => !message.embeds?.some(
+      (embed) => embed.title === 'Codex context compacted',
+    ))
     .filter((message) => message.embeds?.some((embed) => embed.fields?.some(
       (field) => field.name === 'Turn'
         && targets.has(String(field.value ?? '').replaceAll('`', '').trim()),
@@ -4376,6 +4379,16 @@ export class DiscordController {
     return null;
   }
 
+  #embedContextCompactionItemId(message) {
+    for (const embed of message.embeds) {
+      if (embed.title !== 'Codex context compacted') continue;
+      const field = embed.fields?.find((candidate) => candidate.name === 'Item');
+      const match = field?.value?.match(/`([^`]+)`/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
   #isAssistantTurnCard(message, turnId) {
     return message.author.id === this.client.user.id
       && this.#embedTurnId(message) === turnId
@@ -5114,6 +5127,9 @@ export class DiscordController {
       for (const id of record?.userMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.assistantMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.finalMessageIds ?? []) protectedIds.add(id);
+      for (const entry of Object.values(record?.compactionEntries ?? {})) {
+        if (entry?.messageId) protectedIds.add(entry.messageId);
+      }
       if (record?.cardMessageId) protectedIds.add(record.cardMessageId);
       if (record?.liveMessageId) protectedIds.add(record.liveMessageId);
     }
@@ -5229,10 +5245,13 @@ export class DiscordController {
       }
       const turnId = message.params?.turnId ?? message.params?.turn?.id ?? null;
       const turnRecord = turnId ? this.stateStore.turnRecord(threadId, turnId) : null;
+      const contextCompactionCompleted = message.method === 'item/completed'
+        && message.params?.item?.type === 'contextCompaction';
       const finalizedTurnUpdate = turnRecord?.status !== 'inProgress'
         && turnRecord?.finalizedAt
         && turnRecord?.finalMessageIds?.length > 0
         && message.method !== 'turn/completed'
+        && !contextCompactionCompleted
         && (message.method === 'turn/started'
           || message.method.startsWith('item/')
           || message.method === 'turn/plan/updated'
@@ -5272,6 +5291,16 @@ export class DiscordController {
         this.#reasoningDelta(binding, message.params);
       }
       else if (message.method === 'item/started') await this.#itemChanged(binding, message.params, false);
+      else if (contextCompactionCompleted) {
+        const result = await this.#contextCompactionCompleted(binding, message.params);
+        if (result.message && !turnRecord?.finalizedAt) {
+          await this.#itemChanged(binding, message.params, true);
+          const view = this.turnViews.get(`${binding.threadId}:${turnId}`);
+          if (result.created && view?.status === 'inProgress') {
+            await this.#repostLiveTurnCardToLatest(binding, view);
+          }
+        }
+      }
       else if (message.method === 'item/completed') await this.#itemChanged(binding, message.params, true);
       else if (message.method === 'turn/plan/updated') this.#planChanged(binding, message.params);
       else if (message.method === 'thread/tokenUsage/updated') this.#tokenUsageChanged(binding, message.params);
@@ -5617,6 +5646,63 @@ export class DiscordController {
       await this.#renderTurn(binding, view);
     } else if (userMessageChanged) await this.#moveLiveTurnCardToLatest(binding, view);
     else if (binding.watchLevel !== 'quiet') this.#scheduleTurnRender(binding, view);
+  }
+
+  async #contextCompactionCompleted(binding, params) {
+    const turnId = params.turnId ?? params.turn?.id ?? null;
+    const itemId = params.item?.id ?? null;
+    if (!turnId || !itemId) {
+      this.#log('context-compaction-identity-missing', {
+        threadId: binding.threadId,
+        turnId,
+        itemId,
+      });
+      return { message: null, created: false };
+    }
+
+    const channel = await this.client.channels.fetch(binding.channelId);
+    const record = this.stateStore.turnRecord(binding.threadId, turnId) ?? {};
+    const recorded = record.compactionEntries?.[itemId] ?? null;
+    let message = recorded?.messageId
+      ? await channel.messages.fetch(recorded.messageId).catch(() => null)
+      : null;
+    if (!message) {
+      const messages = await this.#fetchChannelHistory(channel, 100);
+      message = [...messages.values()].find((candidate) => candidate.author.id === this.client.user.id
+        && this.#embedTaskId(candidate) === binding.threadId
+        && this.#embedTurnId(candidate) === turnId
+        && this.#embedContextCompactionItemId(candidate) === itemId) ?? null;
+    }
+
+    const completedAt = recorded?.completedAt ?? new Date().toISOString();
+    let created = false;
+    if (!message) {
+      const embed = new EmbedBuilder()
+        .setTitle('Codex context compacted')
+        .setColor(COLORS.neutral)
+        .setDescription('会話履歴のコンテキストがコンパクト化されました。')
+        .addFields(
+          { name: 'Task', value: `\`${binding.threadId}\`` },
+          { name: 'Turn', value: `\`${turnId}\``, inline: true },
+          { name: 'Item', value: `\`${itemId}\``, inline: true },
+        )
+        .setTimestamp(new Date(completedAt));
+      message = await channel.send({
+        content: '',
+        embeds: [embed],
+        allowedMentions: { parse: [] },
+      });
+      created = true;
+    }
+
+    const latestRecord = this.stateStore.turnRecord(binding.threadId, turnId) ?? {};
+    const compactionEntries = { ...(latestRecord.compactionEntries ?? {}) };
+    compactionEntries[itemId] = {
+      messageId: message.id,
+      completedAt,
+    };
+    this.stateStore.setTurnRecord(binding.threadId, turnId, { compactionEntries });
+    return { message, created };
   }
 
   #planChanged(binding, params) {

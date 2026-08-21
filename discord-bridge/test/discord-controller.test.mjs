@@ -116,15 +116,21 @@ test('session JSONL restores synthetic user item IDs around steer chronology', a
   );
 });
 
-test('session-order repair targets only bot cards for explicitly marked turns', () => {
-  const message = (id, authorId, turnId) => ({
+test('session-order repair targets only bot transcript cards for explicitly marked turns', () => {
+  const message = (id, authorId, turnId, title = null) => ({
     id,
     author: { id: authorId },
-    embeds: turnId ? [{ fields: [{ name: 'Turn', value: `\`${turnId}\`` }] }] : [],
+    embeds: turnId ? [{ title, fields: [{ name: 'Turn', value: `\`${turnId}\`` }] }] : [],
   });
   const messages = new Map([
     ['repair-user', message('repair-user', 'bot', 'turn-repair')],
     ['repair-detail', message('repair-detail', 'bot', 'turn-repair')],
+    ['keep-compaction', message(
+      'keep-compaction',
+      'bot',
+      'turn-repair',
+      'Codex context compacted',
+    )],
     ['keep-turn', message('keep-turn', 'bot', 'turn-keep')],
     ['keep-human', message('keep-human', 'human', 'turn-repair')],
     ['keep-panel', message('keep-panel', 'bot', null)],
@@ -134,6 +140,133 @@ test('session-order repair targets only bot cards for explicitly marked turns', 
     sessionOrderRepairMessageIds(messages, ['turn-repair'], 'bot'),
     ['repair-user', 'repair-detail'],
   );
+});
+
+test('completed context compaction posts one durable card and keeps the live card latest', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-context-compaction-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setBinding('thread-1', {
+    channelId: 'channel-1',
+    name: 'Compaction task',
+    cwd: 'C:\\work',
+    watchLevel: 'normal',
+    archived: false,
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const messages = new Map();
+  const sent = [];
+  let nextMessageId = 1;
+  const collection = () => Object.assign(new Map(messages), {
+    last: () => [...messages.values()].at(-1) ?? null,
+    find: (predicate) => [...messages.values()].find(predicate),
+  });
+  const makeMessage = (options) => {
+    const message = {
+      id: `message-${nextMessageId++}`,
+      author: { id: 'bot-user', bot: true },
+      content: options.content ?? '',
+      embeds: (options.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
+      components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
+      attachments: new Map(),
+      edit: async (next) => {
+        message.content = next.content ?? message.content;
+        if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+        if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
+        return message;
+      },
+      delete: async () => { messages.delete(message.id); },
+    };
+    messages.set(message.id, message);
+    sent.push(message);
+    return message;
+  };
+  const channel = {
+    id: 'channel-1',
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? messages.get(value) ?? null
+        : collection()),
+    },
+    send: async (options) => makeMessage(options),
+  };
+  client.channels = { fetch: async () => channel };
+
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      authorizedUserIds: ['user-1'],
+      liveUpdateIntervalMs: 1_000,
+      elapsedUpdateIntervalMs: 60_000,
+    },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const waitForNotifications = async () => {
+    for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(controller.notificationQueues.size, 0);
+  };
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: {
+      threadId: 'thread-1',
+      turn: { id: 'turn-1', status: 'inProgress', startedAt: Date.now() },
+    },
+  });
+  await waitForNotifications();
+
+  const notification = {
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'contextCompaction', id: 'compaction-1' },
+    },
+  };
+  codex.emit('notification', notification);
+  await waitForNotifications();
+
+  const visibleTitles = [...messages.values()].map((message) => message.embeds[0]?.title);
+  assert.deepEqual(visibleTitles, ['Codex context compacted', 'Codex running']);
+  const compaction = [...messages.values()].find(
+    (message) => message.embeds[0]?.title === 'Codex context compacted',
+  );
+  assert.equal(compaction.embeds[0].description, '会話履歴のコンテキストがコンパクト化されました。');
+  assert.deepEqual(
+    compaction.embeds[0].fields.map((field) => [field.name, field.value]),
+    [
+      ['Task', '`thread-1`'],
+      ['Turn', '`turn-1`'],
+      ['Item', '`compaction-1`'],
+    ],
+  );
+  const firstRecord = stateStore.turnRecord('thread-1', 'turn-1');
+  assert.equal(firstRecord.compactionEntries['compaction-1'].messageId, compaction.id);
+  assert.match(firstRecord.compactionEntries['compaction-1'].completedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  const sentCount = sent.length;
+  codex.emit('notification', notification);
+  await waitForNotifications();
+  assert.equal(sent.length, sentCount);
+  assert.equal(
+    [...messages.values()].filter(
+      (message) => message.embeds[0]?.title === 'Codex context compacted',
+    ).length,
+    1,
+  );
+  assert.equal(
+    stateStore.turnRecord('thread-1', 'turn-1').compactionEntries['compaction-1'].messageId,
+    compaction.id,
+  );
+  await controller.stop();
 });
 
 test('live notifications wait behind the transcript repair for the same task', async () => {

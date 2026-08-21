@@ -51,6 +51,8 @@ discovery or status reconciliation for other channels.
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,
    then reposts the pinned task control panel directly below it.
+   When app-server completes context compaction, the task channel also retains
+   a separate `Codex context compacted` card with task, turn, and item identity.
    Subagents appear as read-only Discord threads under this task channel. Their
    header records nickname, agent path, depth, child ID, and parent ID. Open a
    child thread to follow its own commentary, App Server reasoning summaries,

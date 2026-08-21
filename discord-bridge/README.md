@@ -76,6 +76,9 @@ outbound connection to Discord.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
   only on the latest card. A past commentary card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
+- Persists every completed app-server `contextCompaction` item as its own task
+  card with task, turn, and item identity. The item-to-Discord-message mapping
+  prevents reconnect or duplicate live notifications from posting it twice.
 - Adds a `Linked files` button to assistant cards that contain Markdown links
   to absolute local Windows files. A linked regular file may be anywhere on the
   local machine except a Windows-protected system directory, and the selected
@@ -215,6 +218,7 @@ The state schema is the durable lookup table:
 - Codex task ID -> Discord task channel ID;
 - Codex subagent thread ID -> its parent task ID and Discord thread ID;
 - Codex turn ID -> user, live commentary, final, and completion-notice message IDs;
+- context-compaction item ID -> its durable Discord task-card message ID;
 - explicit ChatGPT conversation ID -> Discord channel and Discord input/output message IDs.
 
 Before sending during recovery, the bridge checks both that ledger and visible

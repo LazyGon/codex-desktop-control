@@ -41,6 +41,7 @@ const stats = {
   turnCards: 0,
   liveCards: 0,
   reasoningCards: 0,
+  compactionCards: 0,
   turnRecords: 0,
   subagentThreads: 0,
   unloadedTaskThreads: 0,
@@ -63,6 +64,17 @@ function userEmbedIdentity(message) {
     const task = embed.fields?.find((field) => field.name === 'Task')?.value?.match(/`([^`]+)`/)?.[1];
     const turn = embed.fields?.find((field) => field.name === 'Turn')?.value?.match(/`([^`]+)`/)?.[1];
     const item = embed.fields?.find((field) => field.name === 'Message')?.value?.match(/`([^`]+)`/)?.[1];
+    if (task && turn && item) return { task, turn, item, embed };
+  }
+  return null;
+}
+
+function compactionEmbedIdentity(message) {
+  for (const embed of message.embeds) {
+    if (embed.title !== 'Codex context compacted') continue;
+    const task = embed.fields?.find((field) => field.name === 'Task')?.value?.match(/`([^`]+)`/)?.[1];
+    const turn = embed.fields?.find((field) => field.name === 'Turn')?.value?.match(/`([^`]+)`/)?.[1];
+    const item = embed.fields?.find((field) => field.name === 'Item')?.value?.match(/`([^`]+)`/)?.[1];
     if (task && turn && item) return { task, turn, item, embed };
   }
   return null;
@@ -107,7 +119,7 @@ try {
   await client.login(token);
   if (!client.isReady()) await new Promise((resolve) => client.once('clientReady', resolve));
   await codex.connect();
-  if (state.schemaVersion !== 6) errors.push(`State schema is ${state.schemaVersion}; expected 6.`);
+  if (state.schemaVersion !== 7) errors.push(`State schema is ${state.schemaVersion}; expected 7.`);
 
   const guild = await client.guilds.fetch(config.guildId);
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
@@ -155,9 +167,11 @@ try {
     const cardIds = new Set();
     const assistantCardIds = new Set();
     const userCardIds = new Set();
+    const compactionCardIds = new Set();
     const finalIdentities = new Map();
     const assistantIdentities = new Map();
     const userIdentities = new Map();
+    const compactionIdentities = new Map();
     let channelLiveCards = 0;
     for (const [turnId, record] of Object.entries(binding.turnMessages ?? {})) {
       stats.turnRecords += 1;
@@ -214,6 +228,23 @@ try {
       for (const id of record.userMessageIds ?? []) {
         stats.userMessages += 1;
         if (!messages.has(id)) errors.push(`${threadId}/${turnId}: user message ${id} is missing.`);
+      }
+      for (const [itemId, entry] of Object.entries(record.compactionEntries ?? {})) {
+        const messageId = entry?.messageId;
+        if (!messageId) {
+          errors.push(`${threadId}/${turnId}/${itemId}: context compaction message ID is missing.`);
+          continue;
+        }
+        compactionCardIds.add(messageId);
+        const card = messages.get(messageId);
+        if (!card) {
+          errors.push(`${threadId}/${turnId}/${itemId}: context compaction card ${messageId} is missing.`);
+          continue;
+        }
+        const identity = compactionEmbedIdentity(card);
+        if (!identity || identity.task !== threadId || identity.turn !== turnId || identity.item !== itemId) {
+          errors.push(`${threadId}/${turnId}/${itemId}: context compaction card identity is invalid.`);
+        }
       }
       const commentaryById = new Map((turn?.items ?? [])
         .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text)
@@ -364,6 +395,40 @@ try {
         }
         if (userIdentity.embed.timestamp || userIdentity.embed.footer || userIdentity.embed.author) {
           errors.push(`${threadId}/${key}: user card has extra timestamp/footer/author metadata.`);
+        }
+        continue;
+      }
+      const compactionIdentity = compactionEmbedIdentity(message);
+      if (!compactionIdentity
+        && message.embeds.some((embed) => embed.title === 'Codex context compacted')) {
+        errors.push(`${threadId}: context compaction card ${message.id} has incomplete identity.`);
+        continue;
+      }
+      if (compactionIdentity) {
+        stats.compactionCards += 1;
+        const key = `${compactionIdentity.turn}:${compactionIdentity.item}`;
+        if (compactionIdentity.task !== threadId) {
+          errors.push(`${threadId}: context compaction card ${message.id} names task ${compactionIdentity.task}.`);
+        }
+        if (compactionIdentities.has(key)) {
+          errors.push(`${threadId}: duplicate context compaction cards for ${key}: ${compactionIdentities.get(key)}, ${message.id}.`);
+        }
+        compactionIdentities.set(key, message.id);
+        if (!compactionCardIds.has(message.id)) {
+          errors.push(`${threadId}: context compaction card ${message.id} is absent from the turn ledger.`);
+        }
+        const fieldNames = compactionIdentity.embed.fields.map((field) => field.name);
+        if (JSON.stringify(fieldNames) !== JSON.stringify(['Task', 'Turn', 'Item'])) {
+          errors.push(`${threadId}/${key}: context compaction card fields are invalid: ${fieldNames.join(', ')}.`);
+        }
+        if (compactionIdentity.embed.color !== 0x5865f2) {
+          errors.push(`${threadId}/${key}: context compaction card color is ${compactionIdentity.embed.color}; expected 0x5865f2.`);
+        }
+        if (compactionIdentity.embed.description !== '会話履歴のコンテキストがコンパクト化されました。') {
+          errors.push(`${threadId}/${key}: context compaction card text is invalid.`);
+        }
+        if (!compactionIdentity.embed.timestamp || compactionIdentity.embed.footer || compactionIdentity.embed.author) {
+          errors.push(`${threadId}/${key}: context compaction card timestamp/footer/author metadata is invalid.`);
         }
         continue;
       }
