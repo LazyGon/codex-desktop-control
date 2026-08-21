@@ -18,13 +18,20 @@ $logRoot = Join-Path $launcherRoot 'logs'
 $stateRoot = Join-Path $launcherRoot 'state'
 $cacheRoot = Join-Path $launcherRoot 'cache'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
+$processEnvironmentScript = Join-Path $launcherRoot 'CodexProcessEnvironment.ps1'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
 if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
     throw "Codex runtime cache helper was not found: $runtimeCacheScript"
 }
+if (-not (Test-Path -LiteralPath $processEnvironmentScript -PathType Leaf)) {
+    throw "Codex process environment helper was not found: $processEnvironmentScript"
+}
 . $runtimeCacheScript
+. $processEnvironmentScript
+
+$cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
 
 $runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $modeName = if ($SelfTest) { 'selftest' } else { 'desktop' }
@@ -42,6 +49,8 @@ function Write-LauncherLog {
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss.fffK'), $Message
     Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
 }
+
+Write-LauncherLog "CLI redirect enabled for child processes: $cliRedirectEnabledForChildProcesses"
 
 function Show-LauncherMessage {
     param(

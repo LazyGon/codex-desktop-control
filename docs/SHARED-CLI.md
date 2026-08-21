@@ -10,6 +10,11 @@ codex
 codex "continue this task"
 ```
 
+When the shared launcher starts app-server, it also prepends the installed shim
+to the child-process `PATH`. This prevents integrated task terminals from
+inheriting a launcher environment that predates the CLI redirect. Terminals that
+were already open when the redirect was installed still need to be reopened.
+
 Start **Codex Shared Server** first. The repository-local explicit entry point
 remains available:
 
