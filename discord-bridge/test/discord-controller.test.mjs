@@ -11,6 +11,7 @@ import {
   completionRecoveryCandidate,
   DiscordController,
   emptyDuplicateUserEntryIds,
+  isActiveSubagentThread,
   isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
   managedProjectCategoryNames,
@@ -19,6 +20,7 @@ import {
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
+  shouldPeriodicallySyncSubagent,
   subagentDiscordThreadName,
   subagentIdsFromThread,
   subagentMetadata,
@@ -405,6 +407,8 @@ test('subagent descriptors preserve stable parent identity and flatten a readabl
     },
   };
   assert.equal(isSubagentCodexThread(child), true);
+  assert.equal(isActiveSubagentThread(child), true);
+  assert.equal(isActiveSubagentThread({ ...child, status: { type: 'idle' } }), false);
   assert.equal(isSubagentCodexThread({ ...child, ephemeral: true }), false);
   assert.deepEqual(subagentMetadata(child), {
     parentThreadId: 'parent-thread',
@@ -433,6 +437,15 @@ test('subagent descriptors preserve stable parent identity and flatten a readabl
     '019fe224-dc15-7f81-adbe-1060f31756bc',
     '019fe225-0000-7000-8000-000000000000',
   ]);
+});
+
+test('periodic subagent sync excludes completed and unloaded bindings', () => {
+  assert.equal(shouldPeriodicallySyncSubagent(null), true);
+  assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'active', discordArchived: false }), true);
+  assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'idle', discordArchived: false }), false);
+  assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'notLoaded', discordArchived: false }), false);
+  assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'unknown', discordArchived: false }), true);
+  assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'unknown', discordArchived: true }), false);
 });
 
 test('an unknown live subagent notification creates an isolated Discord thread mirror', async (context) => {

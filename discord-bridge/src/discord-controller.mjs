@@ -172,6 +172,17 @@ export function isSubagentCodexThread(thread) {
   return Boolean(thread?.id && !thread.ephemeral && subagentMetadata(thread).parentThreadId);
 }
 
+export function shouldPeriodicallySyncSubagent(binding) {
+  if (!binding) return true;
+  if (binding.taskStatus === 'active') return true;
+  if (!binding.taskStatus || binding.taskStatus === 'unknown') return !binding.discordArchived;
+  return false;
+}
+
+export function isActiveSubagentThread(thread) {
+  return thread?.status?.type === 'active';
+}
+
 export function subagentIdsFromThread(thread) {
   const ids = [];
   for (const turn of thread?.turns ?? []) {
@@ -4454,9 +4465,14 @@ export class DiscordController {
     if (typeof this.stateStore.subagentThreads !== 'function') {
       return { created: 0, existing: 0, failed: 0 };
     }
-    const childIds = new Set(this.stateStore.subagentThreads()
-      .filter((binding) => binding.taskStatus === 'active' || !binding.discordArchived)
-      .map((binding) => binding.threadId));
+    const childIds = new Set();
+    const addChildId = (childId) => {
+      if (!childId) return;
+      if (shouldPeriodicallySyncSubagent(this.stateStore.subagentThread(childId))) {
+        childIds.add(childId);
+      }
+    };
+    for (const binding of this.stateStore.subagentThreads()) addChildId(binding.threadId);
 
     for (const parent of parentThreads) {
       const binding = this.stateStore.binding(parent.id);
@@ -4465,13 +4481,13 @@ export class DiscordController {
       if (binding.subagentScanVersion === 1
         && binding.subagentScanUpdatedAt === sourceUpdatedAt
         && Array.isArray(binding.subagentThreadIds)) {
-        for (const childId of binding.subagentThreadIds) childIds.add(childId);
+        for (const childId of binding.subagentThreadIds) addChildId(childId);
         continue;
       }
       try {
         const hydrated = (await this.codex.readThread(parent.id)).thread;
         const discoveredIds = subagentIdsFromThread(hydrated);
-        for (const childId of discoveredIds) childIds.add(childId);
+        for (const childId of discoveredIds) addChildId(childId);
         this.stateStore.setBinding(parent.id, {
           subagentScanVersion: 1,
           subagentScanUpdatedAt: sourceUpdatedAt,
@@ -4494,7 +4510,7 @@ export class DiscordController {
         nextIndex += 1;
         const existed = Boolean(this.stateStore.subagentThread(childId)?.channelId);
         try {
-          const binding = await this.#ensureSubagentBinding(childId, { force: true });
+          const binding = await this.#ensureSubagentBinding(childId, { force: true, activeOnly: true });
           if (!binding) continue;
           if (existed) result.existing += 1;
           else result.created += 1;
@@ -4511,8 +4527,32 @@ export class DiscordController {
     return result;
   }
 
-  async #ensureSubagentBinding(threadId, { force = false } = {}) {
+  #rememberUnsyncedSubagent(thread) {
+    const existing = this.stateStore.subagentThread(thread.id);
+    const metadata = subagentMetadata(thread);
+    this.stateStore.setSubagentThread(thread.id, {
+      channelId: existing?.channelId ?? null,
+      parentChannelId: existing?.parentChannelId ?? null,
+      parentThreadId: metadata.parentThreadId,
+      topLevelParentThreadId: existing?.topLevelParentThreadId ?? null,
+      agentPath: metadata.agentPath,
+      nickname: metadata.nickname,
+      role: metadata.role,
+      depth: metadata.depth,
+      cwd: thread.cwd ?? existing?.cwd ?? null,
+      sessionPath: thread.path ?? existing?.sessionPath ?? null,
+      name: thread.name ?? metadata.nickname ?? metadata.agentPath ?? 'subagent',
+      taskStatus: thread.status?.type ?? 'unknown',
+      watchLevel: 'normal',
+      completionReportsEnabled: false,
+      discordArchived: existing?.discordArchived ?? true,
+      snapshotInitialized: existing?.snapshotInitialized ?? false,
+    });
+  }
+
+  async #ensureSubagentBinding(threadId, { force = false, activeOnly = false } = {}) {
     const existing = this.stateStore.binding(threadId);
+    if (activeOnly && existing?.isSubagent && !shouldPeriodicallySyncSubagent(existing)) return null;
     if (!force && existing?.isSubagent && existing.channelId) return existing;
     const rejectedAt = this.nonSubagentThreadIds.get(threadId);
     if (!force && rejectedAt && Date.now() - rejectedAt < 300_000) return null;
@@ -4525,11 +4565,19 @@ export class DiscordController {
           this.nonSubagentThreadIds.set(threadId, Date.now());
           return null;
         }
+        if (activeOnly && !isActiveSubagentThread(metadata)) {
+          this.#rememberUnsyncedSubagent(metadata);
+          return null;
+        }
       }
       const result = await this.codex.readThread(threadId);
       const thread = result?.thread;
       if (!isSubagentCodexThread(thread)) {
         this.nonSubagentThreadIds.set(threadId, Date.now());
+        return null;
+      }
+      if (activeOnly && !isActiveSubagentThread(thread)) {
+        this.#rememberUnsyncedSubagent(thread);
         return null;
       }
       this.nonSubagentThreadIds.delete(threadId);

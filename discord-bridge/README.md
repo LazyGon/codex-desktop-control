@@ -22,6 +22,10 @@ outbound connection to Discord.
   top-level Codex task into its project category. Tasks without a folder selected
   in Codex Desktop share one private `Codex - No Project` category, even when the
   App Server assigns them separate generated working directories.
+- Periodic full-task reconciliation refreshes only active Codex subagents.
+  Completed, idle, and unloaded subagents already known to the Bridge remain in
+  their existing Discord threads without being re-read on every cycle; live
+  completion handling still finalizes a subagent that was observed while active.
 - Treats the first ordinary message in an unbound text channel inside a managed
   project category as a new task request. It starts the task in that project's
   working directory, derives its title from the channel name, binds the same

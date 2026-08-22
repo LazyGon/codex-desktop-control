@@ -138,6 +138,9 @@ Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
 requests, task navigation, `プロジェクト表示`, and a `履歴復元` button.
 Automatic task-sync summaries are posted to the sibling `codex-sync` channel,
 not to `codex-remote`; explicit sync controls continue to reply ephemerally.
+Periodic reconciliation revisits active subagents only. Completed, idle, and
+unloaded subagents remain in Discord and are not re-read during every
+full sync; a subagent observed live still receives its normal completion update.
 `プロジェクト表示` is a paged selector for hiding or restoring a complete
 project mirror. Hiding requires confirmation and deletes that project's
 Discord categories and all child channels (including task channels and
