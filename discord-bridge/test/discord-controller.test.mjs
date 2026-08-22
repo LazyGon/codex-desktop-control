@@ -430,7 +430,7 @@ test('Codex notification floods coalesce content deltas and yield to Discord wor
   assert.deepEqual(view.plan, [{ step: 'after deltas', status: 'in_progress' }]);
 });
 
-test('completed context compaction posts one durable card and keeps the live card latest', async (context) => {
+test('live turn mutations remove duplicate cards and finish an in-flight render before completion', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-context-compaction-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const stateStore = new StateStore(directory, 'guild-1');
@@ -438,7 +438,9 @@ test('completed context compaction posts one durable card and keeps the live car
     channelId: 'channel-1',
     name: 'Compaction task',
     cwd: 'C:\\work',
+    sessionPath: path.join(directory, 'missing-session.jsonl'),
     watchLevel: 'normal',
+    completionReportsEnabled: false,
     archived: false,
   });
 
@@ -448,6 +450,11 @@ test('completed context compaction posts one durable card and keeps the live car
   const messages = new Map();
   const sent = [];
   let nextMessageId = 1;
+  let blockNextRunningEdit = false;
+  let resolveRunningEditStarted;
+  let releaseRunningEdit;
+  const runningEditStarted = new Promise((resolve) => { resolveRunningEditStarted = resolve; });
+  const runningEditRelease = new Promise((resolve) => { releaseRunningEdit = resolve; });
   const collection = () => Object.assign(new Map(messages), {
     last: () => [...messages.values()].at(-1) ?? null,
     find: (predicate) => [...messages.values()].find(predicate),
@@ -460,7 +467,14 @@ test('completed context compaction posts one durable card and keeps the live car
       embeds: (options.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
       components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
       attachments: new Map(),
+      pinned: false,
       edit: async (next) => {
+        if (blockNextRunningEdit
+          && (next.embeds?.[0]?.toJSON?.() ?? next.embeds?.[0])?.title === 'Codex running') {
+          blockNextRunningEdit = false;
+          resolveRunningEditStarted();
+          await runningEditRelease;
+        }
         message.content = next.content ?? message.content;
         if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
         if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
@@ -483,13 +497,25 @@ test('completed context compaction posts one durable card and keeps the live car
   };
   client.channels = { fetch: async () => channel };
 
+  for (let index = 0; index < 2; index += 1) {
+    makeMessage({
+      embeds: [{
+        title: 'Codex running',
+        fields: [
+          { name: 'Task', value: '`thread-1`' },
+          { name: 'Turn', value: '`turn-1`' },
+        ],
+      }],
+    });
+  }
+
   const controller = new DiscordController({
     client,
     codex,
     stateStore,
     config: {
       authorizedUserIds: ['user-1'],
-      liveUpdateIntervalMs: 1_000,
+      liveUpdateIntervalMs: 5,
       elapsedUpdateIntervalMs: 60_000,
     },
     logDir: directory,
@@ -553,6 +579,128 @@ test('completed context compaction posts one durable card and keeps the live car
   assert.equal(
     stateStore.turnRecord('thread-1', 'turn-1').compactionEntries['compaction-1'].messageId,
     compaction.id,
+  );
+
+  codex.emit('notification', {
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'agentMessage', id: 'assistant-1', phase: 'commentary', text: '' },
+    },
+  });
+  await waitForNotifications();
+
+  blockNextRunningEdit = true;
+  codex.emit('notification', {
+    method: 'item/agentMessage/delta',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'assistant-1',
+      delta: 'Working while completion arrives.',
+    },
+  });
+  await Promise.race([
+    runningEditStarted,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('live render did not start')), 1_000)),
+  ]);
+
+  codex.emit('notification', {
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-1',
+      turn: {
+        id: 'turn-1',
+        status: 'completed',
+        items: [
+          {
+            type: 'agentMessage',
+            id: 'assistant-1',
+            phase: 'commentary',
+            text: 'Working while completion arrives.',
+          },
+          { type: 'agentMessage', id: 'final-1', phase: 'final_answer', text: 'Finished.' },
+        ],
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(stateStore.binding('thread-1').lastCompletedTurnId ?? null, null);
+  releaseRunningEdit();
+  for (let attempt = 0; attempt < 200
+    && stateStore.binding('thread-1').lastCompletedTurnId !== 'turn-1'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(stateStore.binding('thread-1').lastCompletedTurnId, 'turn-1');
+  assert.equal(
+    [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length,
+    0,
+  );
+  assert.equal(
+    [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex turn completed').length,
+    1,
+  );
+  assert.equal(stateStore.turnRecord('thread-1', 'turn-1').status, 'completed');
+
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: {
+      threadId: 'thread-1',
+      turn: { id: 'turn-2', status: 'inProgress', startedAt: Date.now() },
+    },
+  });
+  await waitForNotifications();
+  codex.emit('notification', {
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-1',
+      turn: {
+        id: 'turn-2',
+        status: 'completed',
+        items: [
+          { type: 'agentMessage', id: 'unseen-commentary', phase: 'commentary', text: 'Recovered before final.' },
+          { type: 'agentMessage', id: 'final-2', phase: 'final_answer', text: 'Second finish.' },
+        ],
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 200
+    && stateStore.binding('thread-1').lastCompletedTurnId !== 'turn-2'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  const orderedTurnTwoCards = [...messages.values()]
+    .filter((message) => message.embeds[0]?.fields?.some(
+      (field) => field.name === 'Turn' && field.value === '`turn-2`',
+    ));
+  assert.deepEqual(
+    orderedTurnTwoCards.map((message) => message.embeds[0].title),
+    ['Codex message', 'Codex turn completed'],
+  );
+
+  const staleActiveThread = {
+    id: 'thread-1',
+    name: 'Compaction task',
+    cwd: 'C:\\work',
+    path: null,
+    status: { type: 'active' },
+    turns: [{ id: 'turn-2', status: 'inProgress', items: [] }],
+  };
+  codex.readThread = async () => ({ thread: staleActiveThread });
+  codex.emit('subscriptionRestored', {
+    binding: stateStore.binding('thread-1'),
+    thread: staleActiveThread,
+    runtime: {},
+    missedCompletion: null,
+  });
+  for (let attempt = 0; attempt < 200 && controller.subscriptionSyncPromises.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(
+    [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length,
+    0,
   );
   await controller.stop();
 });

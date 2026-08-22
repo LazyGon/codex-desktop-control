@@ -545,7 +545,7 @@ export class DiscordController {
       ...[...this.subscriptionSyncPromises].map(([key, promise]) => [`subscription:${key}`, promise]),
       ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
       ...[...this.liveCardMovePromises].map(([key, promise]) => [`live-card:${key}`, promise]),
-      ...[...this.turnViews].map(([key, view]) => [`turn-render:${key}`, view.renderPromise]),
+      ...[...this.turnViews].map(([key, view]) => [`turn-mutation:${key}`, view.mutationPromise]),
       ...[...this.transcriptSyncPromises].map(([key, promise]) => [`transcript:${key}`, promise]),
       ...[...this.panelSyncPromises].map(([key, promise]) => [`panel:${key}`, promise]),
       ...[...this.projectCategoryPromises].map(([key, promise]) => [`category:${key}`, promise]),
@@ -5337,11 +5337,14 @@ export class DiscordController {
 
   async #ensureTurnFinalMessages(binding, turn, finalText, channel, messages, liveMessageId = null) {
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
-    let message = await this.#resolveChannelMessage(channel, messages, record.cardMessageId);
-    if (!message) message = await this.#resolveChannelMessage(channel, messages, liveMessageId ?? record.liveMessageId);
-    if (!message) message = await this.#resolveChannelMessage(channel, messages, record.finalMessageIds?.[0]);
+    let message = await this.#resolveChannelMessage(channel, messages, record.finalMessageIds?.[0]);
+    if (message && !message.embeds.some((embed) => /^Codex turn /.test(embed.title ?? ''))) {
+      message = null;
+    }
     if (!message) {
-      message = [...messages.values()].find((candidate) => this.#isAssistantTurnCard(candidate, turn.id));
+      message = [...messages.values()].find((candidate) => candidate.author.id === this.client.user.id
+        && this.#embedTurnId(candidate) === turn.id
+        && candidate.embeds.some((embed) => /^Codex turn /.test(embed.title ?? '')));
     }
     if (!message) {
       message = [...messages.values()].find((candidate) => this.#normalizedTurnMessage(
@@ -5458,6 +5461,7 @@ export class DiscordController {
       message = await channel.send({ embeds: [this.#turnEmbed(view)], components, allowedMentions: { parse: [] } });
     }
     messages.set(message.id, message);
+    await this.#deleteDuplicateLiveTurnCards(binding, turn.id, messages, message.id);
     view.messageId = message.id;
     const latestRecord = this.stateStore.turnRecord(binding.threadId, turn.id) ?? record;
     const patch = {
@@ -5627,9 +5631,19 @@ export class DiscordController {
       ? (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress')
       : completedTurnsSince(thread.turns, recentSinceMs);
     const rawActiveTurn = [...(thread.turns ?? [])].reverse().find((turn) => turn.status === 'inProgress') ?? null;
+    const rawActiveRecord = rawActiveTurn
+      ? this.stateStore.turnRecord(threadId, rawActiveTurn.id) ?? {}
+      : {};
+    const finalizedActiveSnapshot = Boolean(
+      rawActiveRecord.finalizedAt
+      && rawActiveRecord.status !== 'inProgress'
+      && rawActiveRecord.finalMessageIds?.length,
+    );
     // The current active turn remains represented by its single live card.
     // A bounded historical restore only adds completed-turn cards.
-    const activeTurn = recentSinceMs === null ? rawActiveTurn : null;
+    // A stale thread/read response must not recreate a live card after the
+    // corresponding turn/completed notification has already been finalized.
+    const activeTurn = recentSinceMs === null && !finalizedActiveSnapshot ? rawActiveTurn : null;
     const turnsById = new Map((thread.turns ?? []).map((turn) => [turn.id, turn]));
     const commentaryByKey = new Map();
     for (const turn of thread.turns ?? []) {
@@ -5747,7 +5761,10 @@ export class DiscordController {
         view.reasoning = activeAgentItem && activeReasoningItem
           ? reasoningSummaryFromTurn({ items: [activeReasoningItem] })
           : '';
-        await this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages);
+        await this.#queueTurnViewMutation(
+          view,
+          () => this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages),
+        );
       } else {
         existingView.startedAt ??= restoredStartedAt;
         await this.#repostLiveTurnCardToLatest(binding, existingView);
@@ -6196,7 +6213,16 @@ export class DiscordController {
     view.startedAt = turnTimestampMs(params.turn ?? { id: turnId }) ?? view.startedAt ?? Date.now();
     const channel = await this.client.channels.fetch(binding.channelId);
     const messages = await this.#fetchChannelHistory(channel, 100);
-    await this.#ensureLiveTurnCard(binding, { id: turnId, status: 'inProgress' }, view, channel, messages);
+    await this.#queueTurnViewMutation(
+      view,
+      () => this.#ensureLiveTurnCard(
+        binding,
+        { id: turnId, status: 'inProgress' },
+        view,
+        channel,
+        messages,
+      ),
+    );
     this.#startElapsedUpdates(binding, view);
     this.#scheduleTaskSync('turn/started');
   }
@@ -6226,20 +6252,23 @@ export class DiscordController {
   async #startAgentMessage(binding, params, view) {
     const item = params.item;
     if (!item?.id || view.currentMessageId === item.id) return;
-    const channel = await this.client.channels.fetch(binding.channelId);
-    const messages = await this.#fetchChannelHistory(channel, 100);
-    await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
-    view.currentMessageId = item.id;
-    view.currentPhase = item.phase ?? 'commentary';
-    view.text = item.text ?? '';
-    view.currentItem = itemSummary(item);
-    await this.#ensureLiveTurnCard(
-      binding,
-      { id: params.turnId, status: 'inProgress' },
-      view,
-      channel,
-      messages,
-    );
+    await this.#queueTurnViewMutation(view, async () => {
+      if (!this.#isCurrentLiveTurnView(view)) return;
+      const channel = await this.client.channels.fetch(binding.channelId);
+      const messages = await this.#fetchChannelHistory(channel, 100);
+      await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
+      view.currentMessageId = item.id;
+      view.currentPhase = item.phase ?? 'commentary';
+      view.text = item.text ?? '';
+      view.currentItem = itemSummary(item);
+      await this.#ensureLiveTurnCard(
+        binding,
+        { id: params.turnId, status: 'inProgress' },
+        view,
+        channel,
+        messages,
+      );
+    });
   }
 
   #agentDelta(binding, params) {
@@ -6352,7 +6381,7 @@ export class DiscordController {
       view.currentMessageId = params.item.id ?? view.currentMessageId;
       view.currentPhase = params.item.phase ?? view.currentPhase;
       view.text = params.item.text ?? view.text;
-      await this.#renderTurn(binding, view);
+      await this.#queueTurnViewMutation(view, () => this.#renderTurn(binding, view));
     } else if (userMessageChanged) await this.#moveLiveTurnCardToLatest(binding, view);
     else if (binding.watchLevel !== 'quiet') this.#scheduleTurnRender(binding, view);
   }
@@ -6480,7 +6509,19 @@ export class DiscordController {
         if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, turn.status ?? 'idle');
         this.#clearCompletionRecovery(binding.threadId, turn.id);
         const completedView = this.turnViews.get(`${binding.threadId}:${turn.id}`);
-        if (completedView?.elapsedTimer) clearTimeout(completedView.elapsedTimer);
+        if (completedView) {
+          completedView.status = turn.status ?? 'completed';
+          if (completedView.timer) clearTimeout(completedView.timer);
+          if (completedView.elapsedTimer) clearTimeout(completedView.elapsedTimer);
+          await completedView.mutationPromise?.catch((error) => this.#log(
+            'turn-mutation-before-idempotent-completion-failed',
+            {
+              threadId: binding.threadId,
+              turnId: turn.id,
+              error: error.stack ?? error.message,
+            },
+          ));
+        }
         this.turnViews.delete(`${binding.threadId}:${turn.id}`);
         this.#scheduleTaskSync('turn/completed-idempotent');
         return completionMessage;
@@ -6496,6 +6537,13 @@ export class DiscordController {
     if (view.timer) {
       clearTimeout(view.timer);
       view.timer = null;
+    }
+    if (view.mutationPromise) {
+      await view.mutationPromise.catch((error) => this.#log('turn-mutation-before-completion-failed', {
+        threadId: binding.threadId,
+        turnId: turn.id,
+        error: error.stack ?? error.message,
+      }));
     }
     const channel = await this.client.channels.fetch(binding.channelId);
     const messages = await this.#fetchChannelHistory(channel, 100);
@@ -6630,6 +6678,7 @@ export class DiscordController {
         timer: null,
         elapsedTimer: null,
         renderPromise: null,
+        mutationPromise: null,
       });
     }
     return this.turnViews.get(key);
@@ -6639,7 +6688,10 @@ export class DiscordController {
     if (this.stopping || view.status !== 'inProgress' || view.timer || view.renderPromise) return;
     view.timer = setTimeout(() => {
       view.timer = null;
-      const renderPromise = this.#renderTurn(binding, view);
+      const renderPromise = this.#queueTurnViewMutation(
+        view,
+        () => this.#renderTurn(binding, view),
+      );
       view.renderPromise = renderPromise;
       renderPromise
         .catch((error) => this.#log('turn-render-failed', { error: error.message }))
@@ -6664,6 +6716,7 @@ export class DiscordController {
   }
 
   async #renderTurn(binding, view) {
+    if (!this.#isCurrentLiveTurnView(view)) return null;
     const channel = await this.client.channels.fetch(binding.channelId);
     let message = null;
     const components = contentCardComponents(extractLocalFileReferences(view.text).length);
@@ -6707,10 +6760,18 @@ export class DiscordController {
   }
 
   async #moveLiveTurnCardToLatest(binding, view) {
-    return this.#queueLiveCardMove(binding, view, () => this.#moveLiveTurnCardToLatestOnce(binding, view));
+    return this.#queueLiveCardMove(
+      binding,
+      view,
+      () => this.#queueTurnViewMutation(
+        view,
+        () => this.#moveLiveTurnCardToLatestOnce(binding, view),
+      ),
+    );
   }
 
   async #moveLiveTurnCardToLatestOnce(binding, view) {
+    if (!this.#isCurrentLiveTurnView(view)) return null;
     if (view.timer) {
       clearTimeout(view.timer);
       view.timer = null;
@@ -6723,6 +6784,7 @@ export class DiscordController {
       const message = await channel.messages.fetch(view.messageId).catch(() => null);
       if (message?.author.id === this.client.user.id) await message.delete().catch(() => {});
     }
+    await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
     view.messageId = null;
     view.currentMessageId = null;
     view.currentPhase = null;
@@ -6739,22 +6801,70 @@ export class DiscordController {
 
   async #repostLiveTurnCardToLatest(binding, view) {
     return this.#queueLiveCardMove(binding, view, async () => {
-      if (view.timer) {
-        clearTimeout(view.timer);
-        view.timer = null;
-      }
-      const channel = await this.client.channels.fetch(binding.channelId);
-      if (view.messageId) {
-        const message = await channel.messages.fetch(view.messageId).catch(() => null);
-        if (message?.author.id === this.client.user.id) await message.delete().catch(() => {});
-      }
-      view.messageId = null;
-      this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
-        cardMessageId: null,
-        liveMessageId: null,
+      await this.#queueTurnViewMutation(view, async () => {
+        if (!this.#isCurrentLiveTurnView(view)) return;
+        if (view.timer) {
+          clearTimeout(view.timer);
+          view.timer = null;
+        }
+        const channel = await this.client.channels.fetch(binding.channelId);
+        const messages = await this.#fetchChannelHistory(channel, 100);
+        await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
+        view.messageId = null;
+        this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
+          cardMessageId: null,
+          liveMessageId: null,
+        });
+        await this.#renderTurn(binding, view);
       });
-      await this.#renderTurn(binding, view);
     });
+  }
+
+  #isCurrentLiveTurnView(view) {
+    return !this.stopping
+      && view?.status === 'inProgress'
+      && this.turnViews.get(view.key) === view;
+  }
+
+  #queueTurnViewMutation(view, operation) {
+    const previous = view.mutationPromise ?? Promise.resolve();
+    const queued = previous.catch(() => {}).then(operation);
+    view.mutationPromise = queued;
+    const clear = () => {
+      if (view.mutationPromise === queued) view.mutationPromise = null;
+    };
+    queued.then(clear, clear);
+    return queued;
+  }
+
+  async #deleteDuplicateLiveTurnCards(binding, turnId, messages, keepMessageId = null) {
+    const deletedIds = new Set();
+    for (const message of [...messages.values()]) {
+      if (message.id === keepMessageId || message.author.id !== this.client.user.id) continue;
+      if (this.#embedTaskId(message) !== binding.threadId || this.#embedTurnId(message) !== turnId) continue;
+      if (!message.embeds.some((embed) => embed.title === 'Codex running')) continue;
+      await message.delete().catch((error) => {
+        if (error.code !== 10008) throw error;
+      });
+      messages.delete(message.id);
+      deletedIds.add(message.id);
+    }
+    if (deletedIds.size > 0) {
+      const record = this.stateStore.turnRecord(binding.threadId, turnId) ?? {};
+      const assistantEntries = { ...(record.assistantEntries ?? {}) };
+      for (const [itemId, entry] of Object.entries(assistantEntries)) {
+        const messageIds = (entry.messageIds ?? []).filter((id) => !deletedIds.has(id));
+        if (messageIds.length === 0 && !String(entry.text ?? '').trim()) delete assistantEntries[itemId];
+        else assistantEntries[itemId] = { ...entry, messageIds };
+      }
+      this.stateStore.setTurnRecord(binding.threadId, turnId, {
+        assistantEntries,
+        assistantMessageIds: [...new Set(Object.values(assistantEntries)
+          .flatMap((entry) => entry.messageIds ?? []))],
+        ...(deletedIds.has(record.cardMessageId) ? { cardMessageId: null } : {}),
+        ...(deletedIds.has(record.liveMessageId) ? { liveMessageId: null } : {}),
+      });
+    }
   }
 
   async #queueLiveCardMove(binding, view, operation) {
