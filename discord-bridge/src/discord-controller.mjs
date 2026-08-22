@@ -217,6 +217,18 @@ export function managedProjectCategoryCleanupPlan(categories, active) {
   };
 }
 
+export function managedProjectCategoryNames(descriptor, projectCategories = [], count = 1) {
+  const collision = projectCategories
+    .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
+  const baseName = collision
+    ? truncate(`${descriptor.name} - ${Buffer.from(descriptor.key, 'utf8').toString('base64url').slice(-6).toLowerCase()}`, 100, '')
+    : descriptor.name;
+  const total = Math.max(0, Math.trunc(Number(count) || 0));
+  return Array.from({ length: total }, (_, index) => (
+    index === 0 ? baseName : truncate(`${baseName} (${index + 1})`, 100, '')
+  ));
+}
+
 export function projectVisibilityCatalog({
   projectCategories = [],
   hiddenProjects = [],
@@ -3992,12 +4004,8 @@ export class DiscordController {
     }
   }
 
-  #projectCategoryName(descriptor) {
-    const collision = this.stateStore.projectCategories()
-      .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
-    if (!collision) return descriptor.name;
-    const suffix = Buffer.from(descriptor.key, 'utf8').toString('base64url').slice(-6).toLowerCase();
-    return truncate(`${descriptor.name} - ${suffix}`, 100, '');
+  #projectCategoryNames(descriptor, count = 1) {
+    return managedProjectCategoryNames(descriptor, this.stateStore.projectCategories(), count);
   }
 
   async #projectCategories(thread, context) {
@@ -4021,6 +4029,7 @@ export class DiscordController {
 
   async #ensureProjectCategories(descriptor, context) {
     const stored = this.stateStore.projectCategory(descriptor.key);
+    const desiredBaseName = this.#projectCategoryNames(descriptor)[0];
     const categories = [];
     for (const categoryId of stored?.categoryIds ?? []) {
       const category = context.channels.get(categoryId)
@@ -4030,7 +4039,7 @@ export class DiscordController {
       categories.push(category);
     }
     if (categories.length === 0) {
-      const name = stored?.name ?? this.#projectCategoryName(descriptor);
+      const name = desiredBaseName;
       let category = context.channels.find((channel) => channel?.type === ChannelType.GuildCategory
         && channel.name === name);
       let categoryCreated = false;
@@ -4043,6 +4052,15 @@ export class DiscordController {
         await this.#copyCategoryPermissions(context.controlCategory, category, context.guild);
       }
       categories.push(category);
+    }
+    const desiredNames = this.#projectCategoryNames(descriptor, categories.length);
+    for (let index = 0; index < categories.length; index += 1) {
+      const category = categories[index];
+      const desiredName = desiredNames[index];
+      if (category.name === desiredName) continue;
+      const renamed = await category.setName(desiredName, 'Refresh Codex project category name');
+      categories[index] = renamed ?? category;
+      context.channels.set(categories[index].id, categories[index]);
     }
     this.stateStore.setProjectCategory(descriptor.key, {
       projectId: descriptor.id,

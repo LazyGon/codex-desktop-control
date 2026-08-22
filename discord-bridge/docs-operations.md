@@ -208,7 +208,10 @@ project-category identity. `thread-project-assignments.projectId` takes
 precedence; unassigned tasks resolve from the most specific saved local-project
 root that contains their cwd. Multiple roots and scratch cwds belonging to one
 local project therefore share one category. Empty superseded project categories
-are removed after migration.
+are removed after migration. Project category names are refreshed from the
+Desktop project name on every synchronization. A deterministic suffix is kept
+only while another managed project category has the same name; it is removed
+automatically once that collision is gone.
 Moving a task channel into `Codex Archived` archives the matching Codex task.
 Moving an archived channel back to its own project category unarchives it.
 Moving it to any unrelated category is rejected and immediately rolled back to

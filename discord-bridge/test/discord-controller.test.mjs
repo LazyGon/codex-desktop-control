@@ -13,6 +13,7 @@ import {
   emptyDuplicateUserEntryIds,
   isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
+  managedProjectCategoryNames,
   orderedSessionCardItems,
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
@@ -52,6 +53,26 @@ test('managed project category cleanup removes empty overflow categories but pre
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
   );
+});
+
+test('managed project category names drop stale collision suffixes once the Desktop name is unique', () => {
+  const descriptor = {
+    key: 'local-project-1',
+    name: 'Codex - Example',
+  };
+  assert.deepEqual(managedProjectCategoryNames(descriptor, [{
+    projectKey: descriptor.key,
+    name: 'Codex - Example - stale1',
+  }], 2), [
+    'Codex - Example',
+    'Codex - Example (2)',
+  ]);
+
+  const suffix = Buffer.from(descriptor.key, 'utf8').toString('base64url').slice(-6).toLowerCase();
+  assert.deepEqual(managedProjectCategoryNames(descriptor, [{
+    projectKey: 'local-project-2',
+    name: descriptor.name,
+  }], 1), [`Codex - Example - ${suffix}`]);
 });
 
 test('project visibility catalog merges active and hidden projects without losing task counts', () => {
