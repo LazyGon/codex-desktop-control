@@ -121,7 +121,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
       autoCatchupProjects: { legacy: { path: 'C:\\work' } },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 7);
+    assert.equal(state.schemaVersion, 8);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
@@ -154,7 +154,7 @@ test('StateStore migrates v2 project and completed-turn identities into the curr
       },
     }));
     const state = new StateStore(directory, '123456789012345').snapshot();
-    assert.equal(state.schemaVersion, 7);
+    assert.equal(state.schemaVersion, 8);
     assert.equal(state.projectCategories['c:\\git\\example'].projectId, 'prj_35574e3c6147');
     assert.deepEqual(state.bindings['thread-1'].turnMessages['turn-1'].finalMessageIds, ['message-final']);
     assert.equal(state.bindings['thread-1'].turnMessages['turn-1'].cardMessageId, 'message-final');
@@ -176,7 +176,7 @@ test('StateStore migrates v5 state with an isolated subagent ledger', () => {
       clientToolRequests: {},
     }));
     const store = new StateStore(directory, '123456789012345');
-    assert.equal(store.snapshot().schemaVersion, 7);
+    assert.equal(store.snapshot().schemaVersion, 8);
     assert.deepEqual(store.snapshot().subagentThreads, {});
     assert.equal(store.binding('thread-1').channelId, 'channel-1');
   } finally {
@@ -197,9 +197,46 @@ test('StateStore migrates v6 state and preserves explicit ChatGPT links only', (
       clientToolRequests: {},
     }));
     const store = new StateStore(directory, '123456789012345');
-    assert.equal(store.snapshot().schemaVersion, 7);
+    assert.equal(store.snapshot().schemaVersion, 8);
     assert.deepEqual(store.chatgptConversations(), []);
     assert.equal(store.snapshot().infrastructure.chatgptControlChannelId, null);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('StateStore persists hidden projects while excluding their Discord mirror bindings by default', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-hidden-project-'));
+  try {
+    const store = new StateStore(directory, '123456789012345');
+    store.setHiddenProject('c:\\git\\hidden', {
+      projectId: 'prj_hidden',
+      path: 'C:\\git\\hidden',
+      name: 'Codex - hidden',
+      hiddenBy: 'user-1',
+    });
+    store.setBinding('thread-hidden', {
+      projectKey: 'c:\\git\\hidden',
+      channelId: 'channel-hidden',
+      turnMessages: { 'turn-1': { finalMessageIds: ['message-1'] } },
+    });
+    store.hideBinding('thread-hidden', { cwd: 'C:\\git\\hidden' });
+
+    assert.equal(store.isProjectHidden('c:\\git\\hidden'), true);
+    assert.equal(store.hiddenProject('c:\\git\\hidden').projectId, 'prj_hidden');
+    assert.equal(store.bindings().length, 0);
+    assert.equal(store.bindings({ includeHidden: true })[0].hidden, true);
+    assert.equal(store.binding('thread-hidden').channelId, null);
+    assert.equal(store.bindingByChannel(null), null);
+    assert.equal(store.bindingByChannel(''), null);
+    assert.deepEqual(store.binding('thread-hidden').turnMessages, {});
+
+    const reloaded = new StateStore(directory, '123456789012345');
+    assert.equal(reloaded.hiddenProjects().length, 1);
+    assert.equal(reloaded.bindings().length, 0);
+    reloaded.removeHiddenProject('c:\\git\\hidden');
+    reloaded.setBinding('thread-hidden', { hidden: false, channelId: 'channel-restored' });
+    assert.equal(reloaded.bindings()[0].channelId, 'channel-restored');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

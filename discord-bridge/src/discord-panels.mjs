@@ -20,7 +20,13 @@ export const CONTROL_PANEL_MARKER = 'Codex Remote UI / control-panel';
 export const taskPanelMarker = (threadId) => `Codex Remote UI / task-panel / ${threadId}`;
 export const CONTROL_PANEL_COLOR = 0x7048e8;
 
-export function controlPanelPayload({ bindings, connected, pendingCount, projectCount }) {
+export function controlPanelPayload({
+  bindings,
+  connected,
+  pendingCount,
+  projectCount,
+  hiddenProjectCount = 0,
+}) {
   const active = bindings.filter((binding) => !binding.archived);
   const archived = bindings.filter((binding) => binding.archived);
   const embed = new EmbedBuilder()
@@ -30,7 +36,9 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
       { name: 'app-server', value: connected ? 'Connected' : 'Reconnecting', inline: true },
       { name: 'Active', value: String(active.length), inline: true },
       { name: 'Archived', value: String(archived.length), inline: true },
-      { name: 'Projects', value: String(projectCount), inline: true },
+      { name: 'Projects', value: hiddenProjectCount > 0
+        ? `表示 ${projectCount} / 非表示 ${hiddenProjectCount}`
+        : String(projectCount), inline: true },
       { name: 'Pending', value: String(pendingCount), inline: true },
     )
     .setFooter({ text: CONTROL_PANEL_MARKER });
@@ -42,6 +50,12 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
     new ButtonBuilder().setCustomId('cx:ui:control:pending').setLabel('Pending').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('cx:ui:control:recent-history').setLabel('履歴復元').setStyle(ButtonStyle.Secondary),
   )];
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('cx:ui:control:projects')
+      .setLabel('プロジェクト表示')
+      .setStyle(ButtonStyle.Secondary),
+  ));
   components.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('cx:ui:control:resources')
@@ -69,6 +83,61 @@ export function controlPanelPayload({ bindings, connected, pendingCount, project
           .setValue(binding.threadId))),
     ));
   }
+  return { embeds: [embed], components, allowedMentions: { parse: [] } };
+}
+
+export function projectVisibilityPayload({ projects, key, page = 0 }) {
+  const pageSize = 25;
+  const pageCount = Math.max(1, Math.ceil(projects.length / pageSize));
+  const currentPage = Math.min(Math.max(0, page), pageCount - 1);
+  const start = currentPage * pageSize;
+  const entries = projects.slice(start, start + pageSize);
+  const hiddenCount = projects.filter((project) => project.hidden).length;
+  const embed = new EmbedBuilder()
+    .setTitle('プロジェクトのDiscord表示')
+    .setColor(CONTROL_PANEL_COLOR)
+    .setDescription([
+      '選択したプロジェクトをDiscordから非表示、または再表示します。',
+      '非表示ではDiscord側のカテゴリとその配下チャンネル（タスクチャンネルやサブエージェントスレッドを含む）、関連する完了通知を削除します。Codexのtask/threadとローカルファイルは削除しません。',
+      '再表示すると、Codexに残る履歴からDiscordミラーを作り直します。Discordだけに存在した途中カードや添付は復元できません。',
+    ].join('\n'))
+    .addFields(
+      { name: '表示', value: String(projects.length - hiddenCount), inline: true },
+      { name: '非表示', value: String(hiddenCount), inline: true },
+      { name: 'Page', value: `${currentPage + 1}/${pageCount}`, inline: true },
+    );
+  const components = [];
+  if (entries.length > 0) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`cx:projects:${key}:select`)
+        .setPlaceholder('非表示・再表示するプロジェクトを選択')
+        .addOptions(entries.map((project, index) => new StringSelectMenuOptionBuilder()
+          .setLabel(truncate(`${project.hidden ? '👁️ 再表示' : '🚫 非表示'}: ${project.name}`, 100, ''))
+          .setDescription(truncate(project.path ?? '(no project)', 100, ''))
+          .setValue(String(start + index)))),
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cx:projects:${key}:prev`)
+      .setLabel('Previous')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage === 0),
+    new ButtonBuilder()
+      .setCustomId(`cx:projects:${key}:next`)
+      .setLabel('Next')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage >= pageCount - 1),
+    new ButtonBuilder()
+      .setCustomId(`cx:projects:${key}:refresh`)
+      .setLabel('Refresh')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`cx:projects:${key}:close`)
+      .setLabel('Close')
+      .setStyle(ButtonStyle.Secondary),
+  ));
   return { embeds: [embed], components, allowedMentions: { parse: [] } };
 }
 

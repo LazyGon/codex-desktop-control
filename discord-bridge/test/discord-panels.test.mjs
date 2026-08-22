@@ -4,6 +4,7 @@ import {
   CONTROL_PANEL_COLOR,
   CONTROL_PANEL_MARKER,
   controlPanelPayload,
+  projectVisibilityPayload,
   recentHistoryPayload,
   taskPanelMarker,
   taskPanelPayload,
@@ -21,6 +22,7 @@ test('control panel exposes status, usage, resources, sync, recent history, pend
     connected: true,
     pendingCount: 2,
     projectCount: 1,
+    hiddenProjectCount: 1,
     bindings: [
       { threadId: 'thread-active', name: 'Active task', cwd: 'C:\\work', taskStatus: 'active', archived: false },
       { threadId: 'thread-archived', name: 'Archived task', cwd: 'C:\\work', taskStatus: 'idle', archived: true },
@@ -35,15 +37,41 @@ test('control panel exposes status, usage, resources, sync, recent history, pend
     'cx:ui:control:pending',
     'cx:ui:control:recent-history',
   ]);
-  assert.equal(payload.components[1].components[0].custom_id, 'cx:ui:control:resources');
-  assert.deepEqual(payload.components[1].components[0].options.map((option) => option.value), [
+  assert.equal(payload.embeds[0].fields.find((field) => field.name === 'Projects').value, '表示 1 / 非表示 1');
+  assert.equal(payload.components[1].components[0].custom_id, 'cx:ui:control:projects');
+  assert.equal(payload.components[2].components[0].custom_id, 'cx:ui:control:resources');
+  assert.deepEqual(payload.components[2].components[0].options.map((option) => option.value), [
     'mcp', 'skills', 'plugins', 'hooks', 'features',
   ]);
-  assert.equal(payload.components[2].components[0].custom_id, 'cx:ui:control:open');
-  assert.deepEqual(payload.components[2].components[0].options.map((option) => option.value), [
+  assert.equal(payload.components[3].components[0].custom_id, 'cx:ui:control:open');
+  assert.deepEqual(payload.components[3].components[0].options.map((option) => option.value), [
     'thread-active',
     'thread-archived',
   ]);
+});
+
+test('project visibility UI uses a paged select and explains destructive Discord-only removal', () => {
+  const projects = Array.from({ length: 27 }, (_, index) => ({
+    projectKey: `project-${index}`,
+    projectId: `prj_${index}`,
+    name: `Codex - Project ${index}`,
+    path: `C:\\git\\project-${index}`,
+    hidden: index === 26,
+    taskCount: index + 1,
+  }));
+  const first = json(projectVisibilityPayload({ projects, key: 'screen-1', page: 0 }));
+  assert.match(first.embeds[0].description, /Discord側のカテゴリとその配下チャンネル/);
+  assert.match(first.embeds[0].description, /Codexのtask\/threadとローカルファイルは削除しません/);
+  assert.equal(first.components[0].components[0].custom_id, 'cx:projects:screen-1:select');
+  assert.equal(first.components[0].components[0].options.length, 25);
+  assert.equal(first.components[1].components[0].disabled, true);
+  assert.equal(first.components[1].components[1].disabled, false);
+
+  const second = json(projectVisibilityPayload({ projects, key: 'screen-1', page: 1 }));
+  assert.equal(second.components[0].components[0].options.length, 2);
+  assert.match(second.components[0].components[0].options[1].label, /再表示/);
+  assert.equal(second.components[1].components[0].disabled, false);
+  assert.equal(second.components[1].components[1].disabled, true);
 });
 
 test('recent history UI offers only one, three, and seven day restore windows', () => {

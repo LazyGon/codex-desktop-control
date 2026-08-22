@@ -8,7 +8,7 @@ import {
 
 function initialState(guildId) {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     guildId,
     infrastructure: {
       controlCategoryId: null,
@@ -23,6 +23,7 @@ function initialState(guildId) {
       chatgptControlPanelMessageId: null,
     },
     projectCategories: {},
+    hiddenProjects: {},
     bindings: {},
     subagentThreads: {},
     clientToolRequests: {},
@@ -78,15 +79,21 @@ export class StateStore {
       this.value.infrastructure.chatgptControlPanelMessageId ??= null;
       this.value.schemaVersion = 7;
     }
-    if (this.value.schemaVersion !== 7) this.value = initialState(guildId);
+    if (this.value.schemaVersion === 7) {
+      this.value.hiddenProjects ??= {};
+      this.value.schemaVersion = 8;
+    }
+    if (this.value.schemaVersion !== 8) this.value = initialState(guildId);
     delete this.value.bindings?.undefined;
     delete this.value.subagentThreads?.undefined;
+    this.value.hiddenProjects ??= {};
     for (const binding of Object.values(this.value.bindings ?? {})) {
       binding.snapshotInitialized ??= true;
       binding.turnMessages ??= {};
       binding.controlPanelMessageId ??= null;
       binding.lastPanelCompletionTurnId ??= null;
       binding.completionReportsEnabled ??= true;
+      binding.hidden ??= Boolean(binding.projectKey && this.value.hiddenProjects[binding.projectKey]);
     }
     this.value.infrastructure.archiveCategoryIds ??= [];
     this.value.infrastructure.controlPanelMessageId ??= null;
@@ -133,12 +140,17 @@ export class StateStore {
   }
 
   bindingByChannel(channelId) {
-    const entry = Object.entries(this.value.bindings).find(([, binding]) => binding.channelId === channelId);
+    if (typeof channelId !== 'string' || !channelId) return null;
+    const entry = Object.entries(this.value.bindings)
+      .find(([, binding]) => binding.channelId && binding.channelId === channelId);
     return entry ? { threadId: entry[0], ...deepClone(entry[1]) } : null;
   }
 
-  bindings() {
-    return Object.entries(this.value.bindings).map(([threadId, binding]) => ({ threadId, ...deepClone(binding) }));
+  bindings({ includeHidden = false } = {}) {
+    return Object.entries(this.value.bindings)
+      .filter(([, binding]) => includeHidden
+        || (!binding.hidden && !this.value.hiddenProjects[binding.projectKey]))
+      .map(([threadId, binding]) => ({ threadId, ...deepClone(binding) }));
   }
 
   subagentThread(threadId) {
@@ -329,6 +341,63 @@ export class StateStore {
   removeProjectCategory(projectKey) {
     return this.update((state) => {
       delete state.projectCategories[projectKey];
+    });
+  }
+
+  hiddenProject(projectKey) {
+    const value = this.value.hiddenProjects[projectKey];
+    return value ? deepClone(value) : null;
+  }
+
+  hiddenProjects() {
+    return Object.entries(this.value.hiddenProjects)
+      .map(([projectKey, value]) => ({ projectKey, ...deepClone(value) }))
+      .sort((left, right) => String(left.path).localeCompare(String(right.path)));
+  }
+
+  isProjectHidden(projectKey) {
+    return Boolean(projectKey && this.value.hiddenProjects[projectKey]);
+  }
+
+  setHiddenProject(projectKey, value) {
+    if (typeof projectKey !== 'string' || !projectKey) throw new Error('A project key is required.');
+    return this.update((state) => {
+      state.hiddenProjects[projectKey] = {
+        ...state.hiddenProjects[projectKey],
+        ...value,
+        hiddenAt: state.hiddenProjects[projectKey]?.hiddenAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
+  removeHiddenProject(projectKey) {
+    return this.update((state) => {
+      delete state.hiddenProjects[projectKey];
+    });
+  }
+
+  hideBinding(threadId, patch = {}) {
+    if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
+      throw new Error('A valid threadId is required for a hidden Discord binding.');
+    }
+    return this.update((state) => {
+      const existing = state.bindings[threadId] ?? {};
+      state.bindings[threadId] = {
+        ...existing,
+        ...patch,
+        channelId: null,
+        categoryId: null,
+        controlPanelMessageId: null,
+        lastCompletionMessageId: null,
+        lastPanelCompletionTurnId: null,
+        lastMirroredUserItemId: null,
+        snapshotInitialized: false,
+        transcriptVersion: 0,
+        turnMessages: {},
+        hidden: true,
+        updatedAt: new Date().toISOString(),
+      };
     });
   }
 

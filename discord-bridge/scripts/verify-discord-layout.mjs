@@ -75,9 +75,13 @@ try {
   const archivedTasks = taskChannels.filter((channel) => channel.topic?.includes('\nState: archived'));
   const archiveCategoryIds = new Set(archiveCategories.map((category) => category.id));
   const projectCategoryIds = new Set(projectCategories.map((category) => category.id));
-  const referencedProjectCategoryIds = new Set(Object.values(state.projectCategories ?? {})
+  const visibleBindings = Object.entries(state.bindings ?? {})
+    .filter(([, binding]) => !binding.hidden && !state.hiddenProjects?.[binding.projectKey]);
+  const referencedProjectCategoryIds = new Set(Object.entries(state.projectCategories ?? {})
+    .filter(([projectKey]) => !state.hiddenProjects?.[projectKey])
+    .map(([, project]) => project)
     .flatMap((project) => project.categoryIds ?? []));
-  const activeBindings = Object.entries(state.bindings ?? {})
+  const activeBindings = visibleBindings
     .filter(([, binding]) => !binding.archived);
   const expectedProjectlessBindings = activeBindings.filter(([threadId, binding]) => (
     projectDescriptorForThread(
@@ -216,8 +220,8 @@ try {
       errors.push(`codex ${attachmentCommand.name} still advertises the legacy image/text-only attachment limit.`);
     }
   }
-  if (taskChannels.size !== Object.keys(state.bindings ?? {}).length) {
-    errors.push(`Task channel count ${taskChannels.size} does not match state bindings ${Object.keys(state.bindings ?? {}).length}.`);
+  if (taskChannels.size !== visibleBindings.length) {
+    errors.push(`Task channel count ${taskChannels.size} does not match visible state bindings ${visibleBindings.length}.`);
   }
   if (config.chatgptEnabled
     && chatgptChannels.size !== Object.keys(state.chatgptConversations ?? {}).length) {
@@ -234,8 +238,9 @@ try {
         'cx:ui:control:sync',
         'cx:ui:control:pending',
         'cx:ui:control:recent-history',
+        'cx:ui:control:projects',
         'cx:ui:control:resources',
-        ...(Object.keys(state.bindings ?? {}).length ? ['cx:ui:control:open'] : []),
+        ...(visibleBindings.length ? ['cx:ui:control:open'] : []),
       ],
     );
   }
@@ -271,7 +276,7 @@ try {
       }
     }
   }
-  for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
+  for (const [threadId, binding] of visibleBindings) {
     const channel = textChannels.get(binding.channelId);
     if (!channel) continue;
     const panel = await verifyPanel(

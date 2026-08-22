@@ -14,6 +14,7 @@ import {
   isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
   orderedSessionCardItems,
+  projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
   subagentDiscordThreadName,
@@ -51,6 +52,37 @@ test('managed project category cleanup removes empty overflow categories but pre
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
   );
+});
+
+test('project visibility catalog merges active and hidden projects without losing task counts', () => {
+  const projects = projectVisibilityCatalog({
+    categoryPrefix: 'Codex - ',
+    projectCategories: [{
+      projectKey: 'c:\\git\\visible',
+      projectId: 'prj_visible',
+      path: 'C:\\git\\visible',
+      name: 'Codex - visible',
+    }],
+    hiddenProjects: [{
+      projectKey: 'c:\\git\\hidden',
+      projectId: 'prj_hidden',
+      path: 'C:\\git\\hidden',
+      name: 'Codex - hidden',
+    }],
+    bindings: [
+      { projectKey: 'c:\\git\\visible', cwd: 'C:\\git\\visible' },
+      { projectKey: 'c:\\git\\visible', cwd: 'C:\\git\\visible' },
+      { projectKey: 'c:\\git\\hidden', cwd: 'C:\\git\\hidden', hidden: true },
+    ],
+  });
+  assert.deepEqual(projects.map((project) => ({
+    key: project.projectKey,
+    hidden: project.hidden,
+    tasks: project.taskCount,
+  })), [
+    { key: 'c:\\git\\visible', hidden: false, tasks: 2 },
+    { key: 'c:\\git\\hidden', hidden: true, tasks: 1 },
+  ]);
 });
 
 test('session card ordering keeps steer messages inside the active instruction sequence', () => {
@@ -678,6 +710,262 @@ test('control panel recent history button opens a maximum seven-day selector and
   assert.match(confirmation.content, /過去 \*\*7日\*\*/);
   assert.match(confirmation.content, /推論要約/);
   assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
+});
+
+test('control panel project selector requires confirmation before deleting a Discord mirror', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-project-visibility-ui-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({ controlChannelId: 'control-channel' });
+  stateStore.setProjectCategory('c:\\git\\visible', {
+    projectId: 'prj_visible',
+    path: 'C:\\git\\visible',
+    name: 'Codex - visible',
+    categoryIds: ['project-category'],
+  });
+  stateStore.setBinding('thread-1', {
+    channelId: 'task-channel',
+    projectKey: 'c:\\git\\visible',
+    projectId: 'prj_visible',
+    cwd: 'C:\\git\\visible',
+    archived: false,
+  });
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1', authorizedUserIds: ['user-1'], projectCategoryPrefix: 'Codex - ' },
+    logDir: directory,
+  });
+  controller.attach();
+
+  const interaction = (customId, select = false, values = []) => ({
+    guildId: 'guild-1',
+    channelId: 'control-channel',
+    user: { id: 'user-1' },
+    customId,
+    values,
+    deferred: false,
+    replied: false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => select,
+    isButton: () => !select,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferUpdate: async function deferUpdate() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+    reply: async function reply(payload) { this.replied = true; this.lastReply = payload; return payload; },
+  });
+  const emit = async (value) => {
+    client.emit('interactionCreate', value);
+    for (let attempt = 0; attempt < 100 && !value.lastReply; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(value.lastReply);
+    return value.lastReply;
+  };
+
+  const opened = await emit(interaction('cx:ui:control:projects'));
+  assert.equal(opened.ephemeral, true);
+  const select = opened.components[0].toJSON().components[0];
+  assert.match(select.custom_id, /^cx:projects:[^:]+:select$/);
+  assert.match(select.options[0].label, /非表示/);
+
+  const confirmation = await emit(interaction(select.custom_id, true, ['0']));
+  assert.match(confirmation.content, /Discordカテゴリ/);
+  assert.match(confirmation.content, /Codexのtask\/threadとローカルファイルは削除しません/);
+  assert.match(confirmation.components[0].toJSON().components[0].custom_id, /^cx:confirm:[^:]+:yes$/);
+  assert.equal(stateStore.hiddenProjects().length, 0);
+});
+
+test('task sync deletes only the Discord mirror and completion notice for a hidden project', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hidden-project-sync-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({
+    controlCategoryId: 'control-category',
+    controlChannelId: 'control-channel',
+    completionsChannelId: 'completions-channel',
+    archiveCategoryIds: [],
+  });
+  stateStore.setProjectCategory('c:\\git\\hidden', {
+    projectId: 'prj_hidden',
+    path: 'C:\\git\\hidden',
+    name: 'Codex - hidden',
+    categoryIds: ['project-category'],
+  });
+  stateStore.setBinding('thread-hidden', {
+    channelId: 'task-channel',
+    categoryId: 'project-category',
+    projectKey: 'c:\\git\\hidden',
+    projectId: 'prj_hidden',
+    cwd: 'C:\\git\\hidden',
+    name: 'Hidden task',
+    archived: false,
+    taskStatus: 'idle',
+  });
+  stateStore.setTurnRecord('thread-hidden', 'turn-1', {
+    completionNoticeMessageId: 'notice-1',
+    finalMessageIds: ['final-1'],
+  });
+  stateStore.setHiddenProject('c:\\git\\hidden', {
+    projectId: 'prj_hidden',
+    path: 'C:\\git\\hidden',
+    name: 'Codex - hidden',
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user', tag: 'bot#0001' };
+  const codex = new EventEmitter();
+  codex.connected = true;
+  const codexThreads = [{
+    id: 'thread-hidden',
+    cwd: 'C:\\git\\hidden',
+    name: 'Hidden task',
+    status: { type: 'idle' },
+    turns: [],
+  }];
+  codex.listAllThreads = async ({ archived }) => (archived ? [] : structuredClone(codexThreads));
+
+  const channels = new Map();
+  const categoryChildren = new Map();
+  let taskDeleted = false;
+  let categoryDeleted = false;
+  const taskChannel = {
+    id: 'task-channel',
+    type: ChannelType.GuildText,
+    parentId: 'project-category',
+    topic: 'Codex task: thread-hidden',
+    delete: async () => {
+      taskDeleted = true;
+      channels.delete('task-channel');
+      categoryChildren.delete('task-channel');
+    },
+  };
+  const projectCategory = {
+    id: 'project-category',
+    type: ChannelType.GuildCategory,
+    name: 'Codex - hidden',
+    children: { cache: categoryChildren },
+    delete: async () => {
+      categoryDeleted = true;
+      channels.delete('project-category');
+    },
+  };
+  categoryChildren.set(taskChannel.id, taskChannel);
+  const controlCategory = {
+    id: 'control-category',
+    type: ChannelType.GuildCategory,
+    name: 'Codex Control',
+    children: { cache: new Map() },
+  };
+  const completionMessages = new Map();
+  let noticeDeleted = false;
+  const notice = {
+    id: 'notice-1',
+    author: { id: 'bot-user' },
+    content: 'https://discord.com/channels/guild-1/task-channel/final-1',
+    delete: async () => {
+      noticeDeleted = true;
+      completionMessages.delete('notice-1');
+    },
+  };
+  completionMessages.set(notice.id, notice);
+  const discordCollection = (source) => Object.assign(new Map(source), {
+    find: (predicate) => [...source.values()].find(predicate),
+    last: () => [...source.values()].at(-1) ?? null,
+  });
+  const completions = {
+    id: 'completions-channel',
+    type: ChannelType.GuildText,
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? completionMessages.get(value) ?? null
+        : discordCollection(completionMessages)),
+    },
+  };
+  const controlMessages = new Map();
+  const control = {
+    id: 'control-channel',
+    type: ChannelType.GuildText,
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? controlMessages.get(value) ?? null
+        : discordCollection(controlMessages)),
+    },
+    send: async (payload) => {
+      const message = {
+        id: `control-message-${controlMessages.size + 1}`,
+        author: { id: 'bot-user' },
+        content: payload.content ?? '',
+        embeds: (payload.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
+        components: (payload.components ?? []).map((component) => component.toJSON?.() ?? component),
+        pinned: false,
+        edit: async () => message,
+      };
+      controlMessages.set(message.id, message);
+      return message;
+    },
+  };
+  channels.set(controlCategory.id, controlCategory);
+  channels.set(control.id, control);
+  channels.set(completions.id, completions);
+  channels.set(projectCategory.id, projectCategory);
+  channels.set(taskChannel.id, taskChannel);
+  const guild = {
+    channels: {
+      fetch: async () => discordCollection(channels),
+    },
+  };
+  client.channels = { fetch: async (channelId) => channels.get(channelId) ?? null };
+
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      guildId: 'guild-1',
+      authorizedUserIds: ['user-1'],
+      projectCategoryPrefix: 'Codex - ',
+      defaultWatchLevel: 'normal',
+    },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({ guild, controlCategory, control, completions });
+  controller.attach();
+  const interaction = {
+    guildId: 'guild-1',
+    channelId: 'control-channel',
+    user: { id: 'user-1' },
+    customId: 'cx:ui:control:sync',
+    deferred: false,
+    replied: false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => false,
+    isStringSelectMenu: () => false,
+    isButton: () => true,
+    isModalSubmit: () => false,
+    isRepliable: () => true,
+    deferReply: async function deferReply() { this.deferred = true; },
+    editReply: async function editReply(payload) { this.lastReply = payload; return payload; },
+  };
+  client.emit('interactionCreate', interaction);
+  for (let attempt = 0; attempt < 200 && !interaction.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.match(interaction.lastReply, /Discord削除 2/);
+  assert.equal(taskDeleted, true);
+  assert.equal(categoryDeleted, true);
+  assert.equal(noticeDeleted, true);
+  assert.deepEqual(codexThreads.map((thread) => thread.id), ['thread-hidden']);
+  assert.equal(stateStore.binding('thread-hidden').hidden, true);
+  assert.equal(stateStore.binding('thread-hidden').channelId, null);
+  assert.equal(stateStore.projectCategory('c:\\git\\hidden'), null);
 });
 
 test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the pinned task panel exactly once', async (context) => {

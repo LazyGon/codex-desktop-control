@@ -135,7 +135,16 @@ blocked, and there is no arbitrary-path input UI.
 
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
-requests, task navigation, and a `履歴復元` button. For exceptional catch-up,
+requests, task navigation, `プロジェクト表示`, and a `履歴復元` button.
+`プロジェクト表示` is a paged selector for hiding or restoring a complete
+project mirror. Hiding requires confirmation and deletes that project's
+Discord categories and all child channels (including task channels and
+subagent threads), plus tracked completion notices. It does not delete Codex
+task/thread data or local project files.
+Restoring recreates the mirror from App Server history; Discord-only live cards
+and attachments are not recoverable.
+
+For exceptional catch-up,
 select 1, 3, or 7 days and confirm. The Bridge processes every Discord-managed
 non-archived task in the background and restores completed-turn user messages,
 commentary, final answers, and App Server reasoning summaries. The current

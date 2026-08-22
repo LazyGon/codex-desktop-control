@@ -31,12 +31,20 @@ outbound connection to Discord.
   local write succeeds. This inbox does not create or deliver a Codex task.
 - Pins one persistent control panel in `codex-remote` and one in every task
   channel. The global panel exposes status, account usage, read-only Codex
-  resource inventory, full sync, pending requests, and task navigation. Task
+  resource inventory, full sync, pending requests, project visibility, and task navigation. Task
   panels expose delivery mode, watch level, a per-task `codex-completions`
   report toggle, detailed status, task-scoped pending requests, a task control
   center, archive/restore, and confirmed interrupt, plus a paged project-file
   browser. Control panels use a dedicated purple embed color; completed result
   cards remain blue.
+- Provides a paged `プロジェクト表示` selector. After explicit confirmation,
+  hiding a project deletes its Discord categories and all child channels
+  (including task channels and subagent threads), plus tracked completion notices, while leaving Codex task/thread data
+  and local files untouched. Hidden projects are omitted from task discovery,
+  history restoration, live mirroring, subscriptions, and completion reports.
+  Selecting the hidden project again recreates its Discord mirror from the
+  history still available through the shared app-server; Discord-only live
+  cards and attachments cannot be restored.
 - Offers a confirmed `履歴復元` exception from the global panel. The user
   selects 1, 3, or 7 days; the Bridge then restores completed-turn user,
   commentary, final-answer, and available reasoning-summary cards for every
@@ -215,6 +223,7 @@ Discord's guild/account upload limit normally applies first.
 The state schema is the durable lookup table:
 
 - project ID -> one or more Discord category IDs;
+- hidden project ID -> descriptor and Discord-mirror exclusion state;
 - Codex task ID -> Discord task channel ID;
 - Codex subagent thread ID -> its parent task ID and Discord thread ID;
 - Codex turn ID -> user, live commentary, final, and completion-notice message IDs;

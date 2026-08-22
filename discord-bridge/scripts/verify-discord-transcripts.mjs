@@ -119,10 +119,11 @@ try {
   await client.login(token);
   if (!client.isReady()) await new Promise((resolve) => client.once('clientReady', resolve));
   await codex.connect();
-  if (state.schemaVersion !== 7) errors.push(`State schema is ${state.schemaVersion}; expected 7.`);
+  if (state.schemaVersion !== 8) errors.push(`State schema is ${state.schemaVersion}; expected 8.`);
 
   const guild = await client.guilds.fetch(config.guildId);
   for (const [threadId, binding] of Object.entries(state.bindings ?? {})) {
+    if (binding.hidden || state.hiddenProjects?.[binding.projectKey]) continue;
     stats.channels += 1;
     if (binding.transcriptVersion !== 11) errors.push(`${threadId}: transcriptVersion is not 11.`);
     if (!binding.projectId) errors.push(`${threadId}: projectId is missing.`);
