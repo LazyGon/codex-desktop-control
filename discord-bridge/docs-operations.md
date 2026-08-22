@@ -136,6 +136,8 @@ blocked, and there is no arbitrary-path input UI.
 The pinned `codex-remote` panel provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
 requests, task navigation, `プロジェクト表示`, and a `履歴復元` button.
+Automatic task-sync summaries are posted to the sibling `codex-sync` channel,
+not to `codex-remote`; explicit sync controls continue to reply ephemerally.
 `プロジェクト表示` is a paged selector for hiding or restoring a complete
 project mirror. Hiding requires confirmation and deletes that project's
 Discord categories and all child channels (including task channels and

@@ -123,6 +123,9 @@ project receives a private category, every top-level task is synchronized
 automatically, and archived tasks move to `Codex Archived`. Installation,
 commands, approval routing, reconnection behavior, and credential rotation are
 documented in `discord-bridge\README.md` and `discord-bridge\docs-operations.md`.
+Automatic task-sync summaries are posted to `codex-sync` rather than
+`codex-remote`, so routine synchronization does not displace the pinned control
+panel in the control-plane timeline.
 
 Ordinary ChatGPT conversations are a separate explicit surface. Run
 `/chatgpt link` with an existing `https://chatgpt.com/.../c/<UUID>` URL; the

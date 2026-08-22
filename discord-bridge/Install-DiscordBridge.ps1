@@ -159,6 +159,7 @@ try {
         archiveCategoryName = 'Codex Archived'
         projectCategoryPrefix = 'Codex - '
         controlChannelName = 'codex-remote'
+        syncChannelName = 'codex-sync'
         alertsChannelName = 'codex-alerts'
         completionsChannelName = 'codex-completions'
         transferCategoryName = 'Others'

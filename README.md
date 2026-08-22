@@ -186,6 +186,8 @@ to ON; turning it OFF keeps final cards in the task channel but suppresses
 future `codex-completions` posts for that task. After every turn ends, the task
 panel is reposted and pinned below the final card so its controls remain at the
 latest channel position.
+Automatic task-sync summaries are posted separately in `codex-sync`, keeping
+the `codex-remote` control panel from being displaced by routine activity.
 Codex subagents are shown as read-only Discord threads beneath their top-level
 task channel. Each thread mirrors that agent's commentary, App Server reasoning
 summaries, tool progress, and final answer. Nested agents are flattened beneath

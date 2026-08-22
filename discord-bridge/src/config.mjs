@@ -34,6 +34,7 @@ const defaults = {
   archiveCategoryName: 'Codex Archived',
   projectCategoryPrefix: 'Codex - ',
   controlChannelName: 'codex-remote',
+  syncChannelName: 'codex-sync',
   alertsChannelName: 'codex-alerts',
   completionsChannelName: 'codex-completions',
   transferCategoryName: 'Others',
@@ -217,6 +218,9 @@ export function loadConfig() {
   }
   if (typeof config.chatgptControlChannelName !== 'string' || !config.chatgptControlChannelName.trim()) {
     errors.push('chatgptControlChannelName must be a non-empty string.');
+  }
+  if (typeof config.syncChannelName !== 'string' || !config.syncChannelName.trim()) {
+    errors.push('syncChannelName must be a non-empty string.');
   }
   if (!config.reviewerAccessorRoot || !path.isAbsolute(config.reviewerAccessorRoot)) {
     errors.push('reviewerAccessorRoot must be an absolute path.');

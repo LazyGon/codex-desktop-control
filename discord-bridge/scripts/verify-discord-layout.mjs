@@ -52,6 +52,7 @@ try {
     || category.name.startsWith(`${config.archiveCategoryName} (`));
   const projectCategories = categories.filter((category) => category.name.startsWith(config.projectCategoryPrefix));
   const controlChannel = textChannels.find((channel) => channel.name === config.controlChannelName);
+  const syncChannel = textChannels.find((channel) => channel.name === config.syncChannelName);
   const chatgptCategory = config.chatgptEnabled
     ? categories.find((category) => category.name === config.chatgptCategoryName)
     : null;
@@ -142,6 +143,11 @@ try {
   if (!controlCategory) errors.push(`Missing control category: ${config.controlCategoryName}`);
   if (!controlChannel) errors.push(`Missing control channel: ${config.controlChannelName}`);
   if (controlChannel && controlChannel.parentId !== controlCategory?.id) errors.push('Control channel has the wrong parent.');
+  if (!syncChannel) errors.push(`Missing sync channel: ${config.syncChannelName}`);
+  if (syncChannel && syncChannel.parentId !== controlCategory?.id) errors.push('Sync channel has the wrong parent.');
+  if (syncChannel && state.infrastructure.syncChannelId !== syncChannel.id) {
+    errors.push('Sync channel ID does not match persisted state.');
+  }
   if (config.textTransferEnabled && !transferCategory) {
     errors.push(`Missing transfer category: ${config.transferCategoryName}`);
   }
@@ -323,7 +329,11 @@ try {
 
   process.stdout.write(`${JSON.stringify({
     ok: errors.length === 0,
-    control: { category: controlCategory?.name ?? null, channel: controlChannel?.name ?? null },
+    control: {
+      category: controlCategory?.name ?? null,
+      channel: controlChannel?.name ?? null,
+      syncChannel: syncChannel?.name ?? null,
+    },
     transfer: {
       enabled: config.textTransferEnabled,
       category: transferCategory?.name ?? null,

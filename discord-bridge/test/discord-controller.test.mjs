@@ -15,6 +15,7 @@ import {
   managedProjectCategoryCleanupPlan,
   managedProjectCategoryNames,
   orderedSessionCardItems,
+  postTaskSyncSummary,
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
@@ -73,6 +74,42 @@ test('managed project category names drop stale collision suffixes once the Desk
     projectKey: 'local-project-2',
     name: descriptor.name,
   }], 1), [`Codex - Example - ${suffix}`]);
+});
+
+test('task sync summaries use the dedicated sync channel instead of the control panel channel', async () => {
+  const fetched = [];
+  const sent = [];
+  const client = {
+    channels: {
+      fetch: async (channelId) => {
+        fetched.push(channelId);
+        return channelId === 'sync-channel'
+          ? { send: async (payload) => { sent.push(payload); } }
+          : null;
+      },
+    },
+  };
+  const stateStore = {
+    snapshot: () => ({
+      infrastructure: {
+        controlChannelId: 'control-channel',
+        syncChannelId: 'sync-channel',
+      },
+    }),
+  };
+
+  assert.equal(await postTaskSyncSummary(client, stateStore, {
+    created: 1,
+    moved: 2,
+    deleted: 0,
+    failed: 0,
+    channels: ['task-channel'],
+  }), true);
+  assert.deepEqual(fetched, ['sync-channel']);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].content, /新規 1 \/ 移動 2/);
+  assert.match(sent[0].content, /<#task-channel>/);
+  assert.deepEqual(sent[0].allowedMentions, { parse: [] });
 });
 
 test('project visibility catalog merges active and hidden projects without losing task counts', () => {

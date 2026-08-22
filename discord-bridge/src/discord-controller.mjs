@@ -139,6 +139,17 @@ function channelMention(channelId) {
   return `<#${channelId}>`;
 }
 
+export async function postTaskSyncSummary(client, stateStore, result) {
+  const channelId = stateStore.snapshot().infrastructure.syncChannelId;
+  const channel = channelId ? await client.channels.fetch(channelId).catch(() => null) : null;
+  if (!channel) return false;
+  const links = result.channels.slice(0, 10).map(channelMention).join(' ');
+  await channel.send(messageOptions(
+    `全タスク同期を更新しました。新規 ${result.created} / 移動 ${result.moved} / Discord削除 ${result.deleted ?? 0} / 失敗 ${result.failed}${links ? `\n${links}` : ''}`,
+  ));
+  return true;
+}
+
 function taskTitleFromChannelName(channelName) {
   const withoutStatus = String(channelName ?? '').replace(/^[🟢⚫]\s*-?\s*/u, '');
   return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
@@ -679,6 +690,11 @@ export class DiscordController {
       this.config.controlChannelName,
       'Codex Remote control and task discovery',
     );
+    const sync = await ensureTextChannel(
+      state.infrastructure.syncChannelId,
+      this.config.syncChannelName,
+      'Codex automatic task synchronization activity',
+    );
     const alerts = await ensureTextChannel(
       state.infrastructure.alertsChannelId,
       this.config.alertsChannelName,
@@ -701,6 +717,7 @@ export class DiscordController {
     this.stateStore.setInfrastructure({
       controlCategoryId: controlCategory.id,
       controlChannelId: control.id,
+      syncChannelId: sync.id,
       alertsChannelId: alerts.id,
       completionsChannelId: completions.id,
       transferCategoryId: transferCategory?.id ?? null,
@@ -715,7 +732,7 @@ export class DiscordController {
       });
     }
     return {
-      guild, controlCategory, archiveCategories, transferCategory, control, alerts, completions, transferText,
+      guild, controlCategory, archiveCategories, transferCategory, control, sync, alerts, completions, transferText,
     };
   }
 
@@ -3524,7 +3541,9 @@ export class DiscordController {
     const run = () => {
       if (this.stopping || !this.codex.connected) return;
       this.#syncAllTasks().then((result) => {
-        if (result.created > 0 || result.moved > 0) this.#postTaskSyncSummary(result).catch(() => {});
+        if (result.created > 0 || result.moved > 0) {
+          postTaskSyncSummary(this.client, this.stateStore, result).catch(() => {});
+        }
       }).catch((error) => {
         this.#log('task-sync-error', { error: error.stack ?? error.message });
         this.#postAlert(`全タスク同期に失敗しました。\n${error.message}`, 'error').catch(() => {});
@@ -3685,16 +3704,6 @@ export class DiscordController {
     await this.#ensureControlPanel();
     this.#log('task-sync', result);
     return result;
-  }
-
-  async #postTaskSyncSummary(result) {
-    const channelId = this.stateStore.snapshot().infrastructure.controlChannelId;
-    const channel = channelId ? await this.client.channels.fetch(channelId).catch(() => null) : null;
-    if (!channel) return;
-    const links = result.channels.slice(0, 10).map(channelMention).join(' ');
-    await channel.send(messageOptions(
-      `全タスク同期を更新しました。新規 ${result.created} / 移動 ${result.moved} / Discord削除 ${result.deleted ?? 0} / 失敗 ${result.failed}${links ? `\n${links}` : ''}`,
-    ));
   }
 
   #startRecentHistoryRestore(days, requestedBy) {

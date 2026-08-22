@@ -6,8 +6,10 @@ outbound connection to Discord.
 
 ## Capabilities
 
-- Creates a private `Codex Control` category with `codex-remote`, alert, and
-  completion channels.
+- Creates a private `Codex Control` category with `codex-remote`, `codex-sync`,
+  alert, and completion channels. Automatic task-sync summaries go to
+  `codex-sync`, so they do not push the pinned control surface down the
+  `codex-remote` timeline.
 - Creates `chatgpt-remote` in the control category and a separate private
   `ChatGPT` category for ordinary ChatGPT conversations. Only URLs explicitly
   registered with `/chatgpt link` are listed; the Bridge does not discover,

@@ -11,6 +11,7 @@ test('StateStore persists bindings atomically', () => {
     const first = new StateStore(directory, '123456789012345');
     first.setInfrastructure({
       controlChannelId: 'control',
+      syncChannelId: 'sync',
       controlPanelMessageId: 'control-panel',
       transferCategoryId: 'others',
       transferTextChannelId: 'transfer-text',
@@ -26,6 +27,7 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.binding('thread-1').threadId, 'thread-1');
     assert.equal(second.bindingByChannel('channel-1').threadId, 'thread-1');
     assert.equal(second.snapshot().infrastructure.controlChannelId, 'control');
+    assert.equal(second.snapshot().infrastructure.syncChannelId, 'sync');
     assert.equal(second.snapshot().infrastructure.controlPanelMessageId, 'control-panel');
     assert.equal(second.snapshot().infrastructure.transferCategoryId, 'others');
     assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
@@ -123,6 +125,7 @@ test('StateStore migrates the legacy Codex Remote category without losing bindin
     const state = new StateStore(directory, '123456789012345').snapshot();
     assert.equal(state.schemaVersion, 8);
     assert.equal(state.infrastructure.controlCategoryId, 'legacy-category');
+    assert.equal(state.infrastructure.syncChannelId, null);
     assert.equal(state.infrastructure.transferCategoryId, null);
     assert.equal(state.infrastructure.transferTextChannelId, null);
     assert.equal(state.infrastructure.chatgptCategoryId, null);

@@ -13,6 +13,7 @@ function initialState(guildId) {
     infrastructure: {
       controlCategoryId: null,
       controlChannelId: null,
+      syncChannelId: null,
       alertsChannelId: null,
       completionsChannelId: null,
       transferCategoryId: null,
@@ -97,6 +98,7 @@ export class StateStore {
     }
     this.value.infrastructure.archiveCategoryIds ??= [];
     this.value.infrastructure.controlPanelMessageId ??= null;
+    this.value.infrastructure.syncChannelId ??= null;
     this.value.infrastructure.transferCategoryId ??= null;
     this.value.infrastructure.transferTextChannelId ??= null;
     this.value.infrastructure.chatgptCategoryId ??= null;
