@@ -73,10 +73,15 @@ internal static class CodexSharedLauncher
     }
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
+            bool noDialogs = args.Length == 1 &&
+                String.Equals(args[0], "--no-dialogs", StringComparison.OrdinalIgnoreCase);
+            if (args.Length > 0 && !noDialogs)
+                throw new ArgumentException("The shared launcher received an unsupported argument.");
+
             string launcherRoot = AppDomain.CurrentDomain.BaseDirectory;
             string scriptPath = Path.Combine(launcherRoot, "Start-CodexShared.ps1");
             string powerShellPath = ResolvePowerShell();
@@ -88,7 +93,8 @@ internal static class CodexSharedLauncher
             {
                 FileName = powerShellPath,
                 Arguments = "-NoLogo -NoProfile -NonInteractive " +
-                    "-WindowStyle Hidden -File \"" + scriptPath.Replace("\"", "\\\"") + "\"",
+                    "-WindowStyle Hidden -File \"" + scriptPath.Replace("\"", "\\\"") + "\"" +
+                    (noDialogs ? " -NoDialogs" : String.Empty),
                 WorkingDirectory = launcherRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,

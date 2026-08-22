@@ -223,3 +223,36 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const notification = await notificationPromise;
   assert.equal(notification.params.turn.id, 'live-turn');
 });
+
+test('CodexService fallback starts the shared launcher without interactive dialogs', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-service-launcher-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const launcherPath = path.join(directory, 'CodexSharedLauncher.exe');
+  fs.writeFileSync(launcherPath, 'fixture');
+
+  let spawned;
+  const service = new CodexService({
+    config: { autoStartSharedDesktop: true, sharedLauncherPath: launcherPath, taskListLimit: 20 },
+    stateStore: { bindings: () => [], projectCategories: () => [] },
+    discoverEndpoint: () => ({ url: 'ws://127.0.0.1:1', source: 'test' }),
+    logDir: directory,
+    spawnProcess: (file, args, options) => {
+      spawned = { file, args, options, unrefCalled: false };
+      return {
+        pid: 12345,
+        unref() { spawned.unrefCalled = true; },
+      };
+    },
+  });
+  context.after(() => service.stop());
+  const launcherStarted = new Promise((resolve) => service.once('launcherStarted', resolve));
+  service.start();
+
+  const event = await launcherStarted;
+  assert.equal(event.launcherPath, launcherPath);
+  assert.equal(spawned.file, launcherPath);
+  assert.deepEqual(spawned.args, ['--no-dialogs']);
+  assert.equal(spawned.options.detached, true);
+  assert.equal(spawned.options.windowsHide, true);
+  assert.equal(spawned.unrefCalled, true);
+});

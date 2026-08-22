@@ -53,11 +53,12 @@ function textInput(text, attachments = null) {
 }
 
 export class CodexService extends EventEmitter {
-  constructor({ config, stateStore, discoverEndpoint, logDir }) {
+  constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn }) {
     super();
     this.config = config;
     this.stateStore = stateStore;
     this.discoverEndpoint = discoverEndpoint;
+    this.spawnProcess = spawnProcess;
     this.logPath = path.join(logDir, `codex-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.client = null;
     this.stopping = false;
@@ -507,7 +508,7 @@ export class CodexService extends EventEmitter {
     if (Date.now() - this.lastLauncherStartAt < 120_000) return;
     this.lastLauncherStartAt = Date.now();
     try {
-      const child = spawn(launcherPath, [], {
+      const child = this.spawnProcess(launcherPath, ['--no-dialogs'], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,

@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Codex Discord Remote")]
@@ -10,6 +12,44 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("Codex Desktop Control")]
 [assembly: AssemblyCompany("Codex Desktop Control")]
 [assembly: AssemblyVersion("1.0.0.0")]
+
+internal static class CodexDiscordRemoteBootstrap
+{
+    public static ProcessStartInfo CreateSharedLauncherStartInfo(string root)
+    {
+        string configPath = Path.Combine(root, "config", "config.json");
+        if (!File.Exists(configPath))
+            return null;
+
+        var serializer = new JavaScriptSerializer();
+        var config = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(configPath));
+        object enabledValue;
+        if (!config.TryGetValue("autoStartSharedDesktop", out enabledValue) ||
+            !(enabledValue is bool) || !(bool)enabledValue)
+            return null;
+
+        object launcherValue;
+        if (!config.TryGetValue("sharedLauncherPath", out launcherValue))
+            return null;
+        string launcherPath = launcherValue as string;
+        if (String.IsNullOrWhiteSpace(launcherPath))
+            return null;
+        if (!Path.IsPathRooted(launcherPath))
+            launcherPath = Path.Combine(root, launcherPath);
+        launcherPath = Path.GetFullPath(launcherPath);
+        if (!File.Exists(launcherPath))
+            return null;
+
+        var startInfo = new ProcessStartInfo();
+        startInfo.FileName = launcherPath;
+        startInfo.Arguments = "--no-dialogs";
+        startInfo.WorkingDirectory = Path.GetDirectoryName(launcherPath);
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+        return startInfo;
+    }
+}
 
 internal sealed class CodexDiscordRemoteContext : ApplicationContext
 {
@@ -42,12 +82,37 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
         notifyIcon.Visible = true;
         notifyIcon.DoubleClick += delegate { ShowStatus(); };
 
+        StartSharedDesktopIfConfigured();
         bridgeProcess = StartPowerShell(startScript, true);
 
         processTimer = new Timer();
         processTimer.Interval = 500;
         processTimer.Tick += delegate { CheckBridgeProcess(); };
         processTimer.Start();
+    }
+
+    private void StartSharedDesktopIfConfigured()
+    {
+        try
+        {
+            Process[] desktopProcesses = Process.GetProcessesByName("ChatGPT");
+            if (desktopProcesses.Length > 0)
+            {
+                foreach (Process desktopProcess in desktopProcesses)
+                    desktopProcess.Dispose();
+                return;
+            }
+            ProcessStartInfo startInfo = CodexDiscordRemoteBootstrap.CreateSharedLauncherStartInfo(root);
+            if (startInfo == null)
+                return;
+            Process launcherProcess = Process.Start(startInfo);
+            if (launcherProcess != null)
+                launcherProcess.Dispose();
+        }
+        catch
+        {
+            // The Bridge still owns the bounded retry path if the early logon launch cannot start.
+        }
     }
 
     private static string PowerShellPath()

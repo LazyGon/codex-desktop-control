@@ -151,4 +151,11 @@ test('shared launcher uses a supported shell without injecting execution policy'
   }
   assert.ok(payload.ProcessPolicy == null || payload.ProcessPolicy === '');
   assert.doesNotMatch(payload.CommandLine, /(?:^|\s)-ExecutionPolicy(?:\s|$)/i);
+
+  fs.rmSync(output);
+  const automaticLaunch = spawnSync(executable, ['--no-dialogs'], { env: environment, encoding: 'utf8' });
+  assert.equal(automaticLaunch.status, 0, automaticLaunch.stderr || automaticLaunch.stdout);
+  await waitForFile(output);
+  const automaticPayload = JSON.parse(fs.readFileSync(output, 'utf8').replace(/^\uFEFF/, ''));
+  assert.match(automaticPayload.CommandLine, /(?:^|\s)-NoDialogs(?:\s|$)/i);
 });

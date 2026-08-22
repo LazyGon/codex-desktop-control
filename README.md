@@ -107,6 +107,15 @@ The launcher caches the package's `codex.exe` and
 app-server builds start the companion Code Mode host beside `codex.exe`; both
 hashes must match the installed Desktop package before the runtime is reused.
 
+If the Store replaces the `OpenAI.Codex` package while a shared session is
+running, the launcher detects the new package version after the old Desktop
+root exits, activates the updated Desktop, and verifies that it reattached to
+the existing loopback app-server. At Windows logon, the Discord Remote host
+starts the configured shared launcher before loading Discord dependencies, so
+the shared Desktop wins the startup race after a reboot. The logon path honors
+the existing `autoStartSharedDesktop` setting, and update recovery remains
+scoped to the same package identity.
+
 Before each Desktop start, the launcher reads the Bridge's managed project
 paths and the app-server's active and archived task lists. While Desktop is
 still stopped, it creates any missing local-project records and assigns tasks

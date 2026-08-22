@@ -65,7 +65,7 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw 'The .NET Framework C# compiler was not found.'
 }
 
-$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$sharedLauncherIcon" "/out:$hostExecutable" /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $hostSource 2>&1
+$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$sharedLauncherIcon" "/out:$hostExecutable" /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Windows.Forms.dll $hostSource 2>&1
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
     throw "Discord Remote host compilation failed: $($compilerOutput -join [Environment]::NewLine)"
 }

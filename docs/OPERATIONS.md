@@ -16,6 +16,13 @@
    session and its transient environment were cleaned up. A Desktop-only attach
    does not take over or clean up the existing server.
 
+When the Store updates `OpenAI.Codex` during a shared session, the launcher
+recognizes the replacement package, opens its updated Desktop executable, and
+verifies the new Desktop connection before continuing to supervise the shared
+app-server. After a Windows logon, the Discord Remote host starts the shared
+launcher before the full Bridge cold start when `autoStartSharedDesktop` is
+enabled. Manual launch is not required after an app update or reboot.
+
 The most recent reconciliation result is stored in
 `launcher\state\project-sync-last.json`. Backups of the Desktop global state
 are stored in `launcher\state\project-sync-backups\`. A reconciliation failure

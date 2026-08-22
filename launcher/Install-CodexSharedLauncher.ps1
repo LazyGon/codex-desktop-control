@@ -14,6 +14,7 @@ $launcherScript = Join-Path $launcherRoot 'Start-CodexShared.ps1'
 $launcherSource = Join-Path $launcherRoot 'CodexSharedLauncher.cs'
 $launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 $launcherIcon = Join-Path $launcherRoot 'CodexSharedLauncher.ico'
+$desktopPackageScript = Join-Path $launcherRoot 'CodexDesktopPackage.ps1'
 $startMenuRoot = [Environment]::GetFolderPath('Programs')
 $shortcutPath = Join-Path $startMenuRoot 'Codex Shared Server.lnk'
 $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Codex Shared Server.lnk'
@@ -74,18 +75,13 @@ if (-not (Test-Path -LiteralPath $launcherScript -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) {
     throw "Launcher source was not found: $launcherSource"
 }
-
-$package = Get-AppxPackage -Name 'OpenAI.Codex' |
-    Sort-Object { [version]$_.Version } -Descending |
-    Select-Object -First 1
-if ($null -eq $package) {
-    throw 'OpenAI.Codex is not installed for the current Windows user.'
+if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
+    throw "Codex Desktop package helper was not found: $desktopPackageScript"
 }
+. $desktopPackageScript
 
-$desktopExecutable = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
-if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
-    throw "Desktop executable was not found: $desktopExecutable"
-}
+$package = Get-CodexDesktopPackageInfo
+$desktopExecutable = $package.DesktopExecutable
 
 Add-Type -AssemblyName System.Drawing
 $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($desktopExecutable)

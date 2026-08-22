@@ -18,6 +18,7 @@ $logRoot = Join-Path $launcherRoot 'logs'
 $stateRoot = Join-Path $launcherRoot 'state'
 $cacheRoot = Join-Path $launcherRoot 'cache'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
+$desktopPackageScript = Join-Path $launcherRoot 'CodexDesktopPackage.ps1'
 $processEnvironmentScript = Join-Path $launcherRoot 'CodexProcessEnvironment.ps1'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
@@ -25,10 +26,14 @@ New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
 if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
     throw "Codex runtime cache helper was not found: $runtimeCacheScript"
 }
+if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
+    throw "Codex Desktop package helper was not found: $desktopPackageScript"
+}
 if (-not (Test-Path -LiteralPath $processEnvironmentScript -PathType Leaf)) {
     throw "Codex process environment helper was not found: $processEnvironmentScript"
 }
 . $runtimeCacheScript
+. $desktopPackageScript
 . $processEnvironmentScript
 
 $cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
@@ -102,41 +107,22 @@ function Invoke-LauncherSignal {
 }
 
 function Get-CodexPackageInfo {
-    $package = Get-AppxPackage -Name 'OpenAI.Codex' |
-        Sort-Object { [version]$_.Version } -Descending |
-        Select-Object -First 1
-
-    if ($null -eq $package) {
-        throw 'OpenAI.Codex is not installed for the current Windows user.'
-    }
-
-    $desktopExecutable = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
-    $bundledServerExecutable = Join-Path $package.InstallLocation 'app\resources\codex.exe'
-    $bundledCodeModeHostExecutable = Join-Path $package.InstallLocation 'app\resources\codex-code-mode-host.exe'
-    if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
-        throw "Desktop executable was not found: $desktopExecutable"
-    }
-    if (-not (Test-Path -LiteralPath $bundledServerExecutable -PathType Leaf)) {
-        throw "Bundled app-server executable was not found: $bundledServerExecutable"
-    }
-    if (-not (Test-Path -LiteralPath $bundledCodeModeHostExecutable -PathType Leaf)) {
-        throw "Bundled Code Mode host executable was not found: $bundledCodeModeHostExecutable"
-    }
+    $package = Get-CodexDesktopPackageInfo -RequireBundledRuntime
 
     $runtimeCache = Initialize-CodexRuntimeCache `
-        -BundledServerExecutable $bundledServerExecutable `
-        -BundledCodeModeHostExecutable $bundledCodeModeHostExecutable `
+        -BundledServerExecutable $package.BundledServerExecutable `
+        -BundledCodeModeHostExecutable $package.BundledCodeModeHostExecutable `
         -CacheRoot $cacheRoot `
-        -PackageVersion $package.Version.ToString()
+        -PackageVersion $package.Version
 
     [pscustomobject]@{
-        Version = $package.Version.ToString()
+        Version = $package.Version
         PackageFamilyName = $package.PackageFamilyName
-        ApplicationUserModelId = "$($package.PackageFamilyName)!App"
+        ApplicationUserModelId = $package.ApplicationUserModelId
         InstallLocation = $package.InstallLocation
-        DesktopExecutable = [IO.Path]::GetFullPath($desktopExecutable)
-        BundledServerExecutable = [IO.Path]::GetFullPath($bundledServerExecutable)
-        BundledCodeModeHostExecutable = [IO.Path]::GetFullPath($bundledCodeModeHostExecutable)
+        DesktopExecutable = $package.DesktopExecutable
+        BundledServerExecutable = $package.BundledServerExecutable
+        BundledCodeModeHostExecutable = $package.BundledCodeModeHostExecutable
         ServerExecutable = $runtimeCache.ServerExecutable
         ServerSha256 = $runtimeCache.ServerSha256
         CodeModeHostExecutable = $runtimeCache.CodeModeHostExecutable
@@ -447,6 +433,7 @@ function Start-DesktopOnRuntime {
         [Parameter(Mandatory)][int]$PortNumber
     )
 
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopExecutable' -Value $PackageInfo.DesktopExecutable
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
     Write-RuntimeState -State $RuntimeState
@@ -770,17 +757,61 @@ try {
                 -PortNumber $Port
             Invoke-LauncherSignal -Kind Ready
 
+            $monitoredDesktopVersion = $packageInfo.Version
+            $monitoredDesktopExecutable = $packageInfo.DesktopExecutable
+            $attemptedReplacementKey = $null
             $missingSince = $null
             while ($true) {
-                $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
+                $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $monitoredDesktopExecutable)
                 if ($currentRoots.Count -gt 0) {
                     $missingSince = $null
                 }
-                elseif ($null -eq $missingSince) {
-                    $missingSince = Get-Date
-                }
-                elseif (((Get-Date) - $missingSince).TotalSeconds -ge 60) {
-                    break
+                else {
+                    $replacement = $null
+                    try {
+                        $replacement = Get-CodexDesktopPackageReplacement `
+                            -CurrentVersion $monitoredDesktopVersion `
+                            -CurrentDesktopExecutable $monitoredDesktopExecutable
+                    }
+                    catch {
+                        Write-LauncherLog "Unable to inspect a possible Desktop package replacement: $($_.Exception.Message)"
+                    }
+
+                    if ($null -ne $replacement) {
+                        $replacementKey = "$($replacement.Version)|$($replacement.DesktopExecutable)"
+                        if ($replacementKey -ne $attemptedReplacementKey) {
+                            $attemptedReplacementKey = $replacementKey
+                            Write-LauncherLog (
+                                "Desktop package replacement detected. " +
+                                "oldVersion=$monitoredDesktopVersion newVersion=$($replacement.Version)"
+                            )
+                            try {
+                                $null = Start-DesktopOnRuntime `
+                                    -PackageInfo $replacement `
+                                    -RuntimeState $runtimeState `
+                                    -PortNumber $Port
+                                $monitoredDesktopVersion = $replacement.Version
+                                $monitoredDesktopExecutable = $replacement.DesktopExecutable
+                                $missingSince = $null
+                                Write-LauncherLog (
+                                    "Updated Desktop attached automatically to the existing shared app-server. " +
+                                    "version=$monitoredDesktopVersion"
+                                )
+                                Invoke-LauncherSignal -Kind Ready
+                                continue
+                            }
+                            catch {
+                                Write-LauncherLog "Automatic updated-Desktop attachment failed: $($_.Exception.Message)"
+                            }
+                        }
+                    }
+
+                    if ($null -eq $missingSince) {
+                        $missingSince = Get-Date
+                    }
+                    elseif (((Get-Date) - $missingSince).TotalSeconds -ge 60) {
+                        break
+                    }
                 }
                 Start-Sleep -Seconds 1
             }
