@@ -1,6 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { projectDescriptor, projectPathKey } from './util.mjs';
+import {
+  isPathWithinProject,
+  normalizeProjectPath,
+  projectDescriptor,
+  projectPathKey,
+  truncate,
+} from './util.mjs';
 
 function objectValue(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -18,19 +24,53 @@ function projectPathKeyIfValid(value) {
   }
 }
 
+function normalizedProjectPathIfValid(value) {
+  try {
+    return normalizeProjectPath(value);
+  } catch {
+    return null;
+  }
+}
+
+function localProjectRecord(projectId, value) {
+  const roots = new Map();
+  for (const rootPath of arrayValue(value?.rootPaths)) {
+    const normalized = normalizedProjectPathIfValid(rootPath);
+    const key = projectPathKeyIfValid(normalized);
+    if (key && !roots.has(key)) roots.set(key, normalized);
+  }
+  const rootPaths = [...roots.values()];
+  const configuredName = typeof value?.name === 'string' ? value.name.trim() : '';
+  return {
+    projectId,
+    name: configuredName || path.win32.basename(rootPaths[0] ?? '') || projectId,
+    rootPaths,
+  };
+}
+
 export function desktopProjectSnapshot(value, source = null) {
   const state = objectValue(value);
+  const projects = new Map();
   const projectRoots = new Set();
-  for (const project of Object.values(objectValue(state['local-projects']))) {
-    for (const rootPath of arrayValue(project?.rootPaths)) {
-      const key = projectPathKeyIfValid(rootPath);
-      if (key) projectRoots.add(key);
+  const roots = [];
+  for (const [projectId, value] of Object.entries(objectValue(state['local-projects']))) {
+    if (!projectId) continue;
+    const project = localProjectRecord(projectId, value);
+    projects.set(projectId, project);
+    for (const rootPath of project.rootPaths) {
+      const key = projectPathKey(rootPath);
+      projectRoots.add(key);
+      roots.push({ projectId, path: rootPath, key });
     }
   }
+  roots.sort((left, right) => right.key.length - left.key.length
+    || left.projectId.localeCompare(right.projectId));
   return {
     available: true,
     source,
+    projects,
     projectRoots,
+    roots,
     assignments: new Map(Object.entries(objectValue(state['thread-project-assignments']))),
   };
 }
@@ -41,7 +81,9 @@ export function readDesktopProjectSnapshot(statePath) {
     return {
       available: false,
       source: null,
+      projects: new Map(),
       projectRoots: new Set(),
+      roots: [],
       assignments: new Map(),
       error: 'Desktop global state path is not configured.',
     };
@@ -55,22 +97,50 @@ export function readDesktopProjectSnapshot(statePath) {
     return {
       available: false,
       source,
+      projects: new Map(),
       projectRoots: new Set(),
+      roots: [],
       assignments: new Map(),
       error: error.message,
     };
   }
 }
 
-export function projectCwdForThread(thread, snapshot) {
-  if (!thread?.cwd) return null;
-  if (!snapshot?.available) return thread.cwd;
+export function desktopProjectForThread(thread, snapshot) {
+  if (!snapshot?.available) return null;
+  const assignment = snapshot.assignments?.get(thread?.id);
+  const assignedProjectId = typeof assignment?.projectId === 'string'
+    ? assignment.projectId
+    : null;
+  const assigned = assignedProjectId ? snapshot.projects?.get(assignedProjectId) : null;
+  if (assigned) return { ...assigned, resolution: 'assignment', matchedRootPath: null };
 
-  if (snapshot.assignments.has(thread.id)) return thread.cwd;
-  const cwdKey = projectPathKeyIfValid(thread.cwd);
-  return cwdKey && snapshot.projectRoots.has(cwdKey) ? thread.cwd : null;
+  const cwd = normalizedProjectPathIfValid(thread?.cwd);
+  if (!cwd) return null;
+  const match = (snapshot.roots ?? [])
+    .find((candidate) => isPathWithinProject(cwd, candidate.path));
+  if (!match) return null;
+  const project = snapshot.projects.get(match.projectId);
+  return project
+    ? { ...project, resolution: 'root', matchedRootPath: match.path }
+    : null;
+}
+
+export function projectCwdForThread(thread, snapshot) {
+  if (!snapshot?.available) return thread?.cwd ?? null;
+  const project = desktopProjectForThread(thread, snapshot);
+  return project ? (thread?.cwd ?? project.rootPaths[0] ?? null) : null;
 }
 
 export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ') {
-  return projectDescriptor(projectCwdForThread(thread, snapshot), categoryPrefix);
+  if (!snapshot?.available) return projectDescriptor(thread?.cwd, categoryPrefix);
+  const project = desktopProjectForThread(thread, snapshot);
+  if (!project) return projectDescriptor(null, categoryPrefix);
+  const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd, categoryPrefix);
+  return {
+    ...descriptor,
+    id: project.projectId,
+    key: project.projectId,
+    name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+  };
 }

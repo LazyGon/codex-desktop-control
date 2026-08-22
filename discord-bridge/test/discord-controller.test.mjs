@@ -785,6 +785,18 @@ test('control panel project selector requires confirmation before deleting a Dis
 test('task sync deletes only the Discord mirror and completion notice for a hidden project', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hidden-project-sync-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const desktopStatePath = path.join(directory, '.codex-global-state.json');
+  const hiddenProjectId = 'local-hidden';
+  fs.writeFileSync(desktopStatePath, JSON.stringify({
+    'local-projects': {
+      [hiddenProjectId]: {
+        id: hiddenProjectId,
+        name: 'hidden-project',
+        rootPaths: ['C:\\git\\hidden-runs'],
+      },
+    },
+    'thread-project-assignments': {},
+  }));
   const stateStore = new StateStore(directory, 'guild-1');
   stateStore.setInfrastructure({
     controlCategoryId: 'control-category',
@@ -792,18 +804,18 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     completionsChannelId: 'completions-channel',
     archiveCategoryIds: [],
   });
-  stateStore.setProjectCategory('c:\\git\\hidden', {
-    projectId: 'prj_hidden',
-    path: 'C:\\git\\hidden',
-    name: 'Codex - hidden',
+  stateStore.setProjectCategory(hiddenProjectId, {
+    projectId: hiddenProjectId,
+    path: 'C:\\git\\hidden-runs',
+    name: 'Codex - hidden-project',
     categoryIds: ['project-category'],
   });
   stateStore.setBinding('thread-hidden', {
     channelId: 'task-channel',
     categoryId: 'project-category',
-    projectKey: 'c:\\git\\hidden',
-    projectId: 'prj_hidden',
-    cwd: 'C:\\git\\hidden',
+    projectKey: hiddenProjectId,
+    projectId: hiddenProjectId,
+    cwd: 'C:\\git\\hidden-runs\\RUN-OLD\\scratch\\workspace',
     name: 'Hidden task',
     archived: false,
     taskStatus: 'idle',
@@ -812,10 +824,10 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     completionNoticeMessageId: 'notice-1',
     finalMessageIds: ['final-1'],
   });
-  stateStore.setHiddenProject('c:\\git\\hidden', {
-    projectId: 'prj_hidden',
-    path: 'C:\\git\\hidden',
-    name: 'Codex - hidden',
+  stateStore.setHiddenProject(hiddenProjectId, {
+    projectId: hiddenProjectId,
+    path: 'C:\\git\\hidden-runs',
+    name: 'Codex - hidden-project',
   });
 
   const client = new EventEmitter();
@@ -824,7 +836,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
   codex.connected = true;
   const codexThreads = [{
     id: 'thread-hidden',
-    cwd: 'C:\\git\\hidden',
+    cwd: 'C:\\git\\hidden-runs\\RUN-NEW\\scratch\\workspace',
     name: 'Hidden task',
     status: { type: 'idle' },
     turns: [],
@@ -849,7 +861,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
   const projectCategory = {
     id: 'project-category',
     type: ChannelType.GuildCategory,
-    name: 'Codex - hidden',
+    name: 'Codex - hidden-project',
     children: { cache: categoryChildren },
     delete: async () => {
       categoryDeleted = true;
@@ -932,6 +944,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
       authorizedUserIds: ['user-1'],
       projectCategoryPrefix: 'Codex - ',
       defaultWatchLevel: 'normal',
+      desktopGlobalStatePath: desktopStatePath,
     },
     logDir: directory,
   });
@@ -965,7 +978,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
   assert.deepEqual(codexThreads.map((thread) => thread.id), ['thread-hidden']);
   assert.equal(stateStore.binding('thread-hidden').hidden, true);
   assert.equal(stateStore.binding('thread-hidden').channelId, null);
-  assert.equal(stateStore.projectCategory('c:\\git\\hidden'), null);
+  assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 });
 
 test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the pinned task panel exactly once', async (context) => {

@@ -203,9 +203,12 @@ remain immediately available through the Bridge.
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
 notifications. `/codex sync` forces the same reconciliation immediately.
-The bridge uses Desktop's `thread-project-assignments` and saved local-project
-roots to distinguish selected folders from generated App Server working
-directories. Empty superseded project categories are removed after migration.
+The bridge uses Desktop's actual local-project ID and name as the Discord
+project-category identity. `thread-project-assignments.projectId` takes
+precedence; unassigned tasks resolve from the most specific saved local-project
+root that contains their cwd. Multiple roots and scratch cwds belonging to one
+local project therefore share one category. Empty superseded project categories
+are removed after migration.
 Moving a task channel into `Codex Archived` archives the matching Codex task.
 Moving an archived channel back to its own project category unarchives it.
 Moving it to any unrelated category is rejected and immediately rolled back to
