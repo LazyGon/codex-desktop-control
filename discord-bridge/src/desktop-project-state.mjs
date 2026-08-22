@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { projectDescriptor, projectPathKey } from './util.mjs';
+import { isPathWithinProject, projectDescriptor, projectPathKey } from './util.mjs';
+
+export const ECONOMIC_SUPPORT_AUTOMATION_PROJECT_ROOT =
+  'C:\\git\\other\\economic-support-automation';
+export const ECONOMIC_SUPPORT_AUTOMATION_RUN_ROOT =
+  'C:\\git\\other\\economic-support-supervisor-runtime\\runs';
 
 function objectValue(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -64,6 +69,9 @@ export function readDesktopProjectSnapshot(statePath) {
 
 export function projectCwdForThread(thread, snapshot) {
   if (!thread?.cwd) return null;
+  if (isPathWithinProject(thread.cwd, ECONOMIC_SUPPORT_AUTOMATION_RUN_ROOT)) {
+    return ECONOMIC_SUPPORT_AUTOMATION_PROJECT_ROOT;
+  }
   if (!snapshot?.available) return thread.cwd;
 
   if (snapshot.assignments.has(thread.id)) return thread.cwd;

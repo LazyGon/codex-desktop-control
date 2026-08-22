@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  ECONOMIC_SUPPORT_AUTOMATION_PROJECT_ROOT,
+  ECONOMIC_SUPPORT_AUTOMATION_RUN_ROOT,
   desktopProjectSnapshot,
   projectCwdForThread,
   projectDescriptorForThread,
@@ -50,6 +52,38 @@ test('recognizes saved project roots for tasks started outside the Desktop UI', 
   assert.equal(
     projectCwdForThread({ id: 'discord-started', cwd: 'c:\\GIT\\work\\' }, snapshot),
     'c:\\GIT\\work\\',
+  );
+});
+
+test('groups economic-support run scratches into one automation project', () => {
+  const snapshot = desktopProjectSnapshot({
+    'local-projects': {},
+    'thread-project-assignments': {},
+  });
+  const first = {
+    id: 'asu-first',
+    cwd: `${ECONOMIC_SUPPORT_AUTOMATION_RUN_ROOT}\\RUN-1\\scratch\\workspace`,
+  };
+  const second = {
+    id: 'asu-second',
+    cwd: `${ECONOMIC_SUPPORT_AUTOMATION_RUN_ROOT}\\RUN-2\\scratch\\workspace`,
+  };
+
+  assert.equal(projectCwdForThread(first, snapshot), ECONOMIC_SUPPORT_AUTOMATION_PROJECT_ROOT);
+  assert.deepEqual(
+    projectDescriptorForThread(first, snapshot),
+    projectDescriptorForThread(second, snapshot),
+  );
+  assert.equal(
+    projectDescriptorForThread(first, snapshot).name,
+    'Codex - economic-support-automation',
+  );
+  assert.equal(
+    projectCwdForThread(
+      { id: 'other', cwd: 'C:\\git\\other\\other-runtime\\runs\\RUN-1' },
+      snapshot,
+    ),
+    null,
   );
 });
 
