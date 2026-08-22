@@ -131,8 +131,8 @@ Ordinary ChatGPT conversations are a separate explicit surface. Run
 `/chatgpt link` with an existing `https://chatgpt.com/.../c/<UUID>` URL; the
 Bridge then creates one channel under the private `ChatGPT` category. It never
 discovers or links the default reviewer conversation automatically. Messages in
-that channel use `reviewer-accessor` and its DPAPI-protected current-user
-session, not the Codex app-server. `/chatgpt list` and the pinned
+that channel use `reviewer-accessor`'s exported `chat-direct-client/discord-bridge`
+wrapper and current-user Chrome profile, not the Codex app-server. `/chatgpt list` and the pinned
 `chatgpt-remote` panel enumerate only explicitly linked conversations.
 
 To create a Codex task from a phone, create a text channel inside the target

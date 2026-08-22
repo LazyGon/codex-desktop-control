@@ -8,14 +8,10 @@ function moduleUrl(root, relativePath) {
   return pathToFileURL(path.join(root, ...relativePath.split('/'))).href;
 }
 
-async function defaultModuleLoader(root) {
+export async function loadReviewerAccessorModules(root) {
   const requiredFiles = [
     'scripts/update-client.mjs',
-    'transport/client.mjs',
-    'transport/config.mjs',
-    'transport/dpapi-cache.mjs',
-    'transport/runtime-paths.mjs',
-    'transport/session.mjs',
+    'package.json',
   ];
   for (const relativePath of requiredFiles) {
     const stat = await fs.promises.stat(path.join(root, ...relativePath.split('/'))).catch(() => null);
@@ -25,14 +21,22 @@ async function defaultModuleLoader(root) {
   }
   const updater = await import(moduleUrl(root, 'scripts/update-client.mjs'));
   const updateResult = await updater.updateClient({ mode: 'auto' });
-  const [client, config, cache, runtime, session] = await Promise.all([
-    import(moduleUrl(root, 'transport/client.mjs')),
-    import(moduleUrl(root, 'transport/config.mjs')),
-    import(moduleUrl(root, 'transport/dpapi-cache.mjs')),
-    import(moduleUrl(root, 'transport/runtime-paths.mjs')),
-    import(moduleUrl(root, 'transport/session.mjs')),
-  ]);
-  return { ...updater, ...client, ...config, ...cache, ...runtime, ...session, updateResult };
+  const packageJson = JSON.parse(await fs.promises.readFile(path.join(root, 'package.json'), 'utf8'));
+  const exportTarget = packageJson?.exports?.['./discord-bridge'];
+  if (typeof exportTarget !== 'string' || !exportTarget.startsWith('./')) {
+    throw new Error('reviewer-accessorの公開Discord Bridge exportがありません。');
+  }
+  const entryPath = path.resolve(root, exportTarget);
+  const relativeEntry = path.relative(root, entryPath);
+  if (relativeEntry.startsWith('..') || path.isAbsolute(relativeEntry)) {
+    throw new Error('reviewer-accessorの公開Discord Bridge exportがroot外を指しています。');
+  }
+  const stat = await fs.promises.stat(entryPath).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new Error('reviewer-accessorの公開Discord Bridge entrypointがありません。');
+  }
+  const bridge = await import(pathToFileURL(entryPath).href);
+  return { ...updater, ...bridge, updateResult };
 }
 
 export function normalizeChatgptPerformance(value, fallback = 'fastest') {
@@ -43,28 +47,41 @@ export function normalizeChatgptPerformance(value, fallback = 'fastest') {
   return normalized;
 }
 
-export function chatgptConversationIdentity(value, validateConversationUrl) {
-  if (typeof validateConversationUrl !== 'function') {
-    throw new Error('reviewer-accessorのURL検証APIを読み込めませんでした。');
+export function chatgptConversationIdentity(value) {
+  let url;
+  try {
+    url = new URL(String(value ?? '').trim());
+  } catch {
+    throw new Error('ChatGPT会話URLが不正です。');
   }
-  const validated = validateConversationUrl(String(value ?? '').trim());
+  if (url.origin !== 'https://chatgpt.com') {
+    throw new Error('ChatGPT会話URLはhttps://chatgpt.comを使用してください。');
+  }
+  const conversationId = url.pathname.match(/\/c\/([0-9a-f-]{36})(?:\/|$)/i)?.[1];
+  if (!conversationId) {
+    throw new Error('ChatGPT会話URLには/c/<conversation ID>が必要です。');
+  }
   return {
-    conversationId: validated.conversationId,
-    conversationUrl: validated.url.href,
+    conversationId: conversationId.toLowerCase(),
+    conversationUrl: url.href,
   };
+}
+
+function chatgptStatusText(event) {
+  if (!event || typeof event !== 'object') return String(event ?? '');
+  return [event.phase, event.code, event.submissionStatus].filter(Boolean).join(' ');
 }
 
 export class ChatgptService {
   constructor({
     config,
     onStatus = () => undefined,
-    moduleLoader = defaultModuleLoader,
+    moduleLoader = loadReviewerAccessorModules,
   }) {
     this.config = config;
     this.onStatus = onStatus;
     this.moduleLoader = moduleLoader;
     this.modulesPromise = null;
-    this.runtimePromise = null;
     this.updateResult = null;
     this.active = new Map();
     this.stopping = false;
@@ -81,14 +98,7 @@ export class ChatgptService {
         const modules = await this.moduleLoader(root);
         const required = [
           'updateClient',
-          'ChatDirectClient',
-          'loadDirectConfig',
-          'DpapiCredentialCache',
-          'migrateLegacyRuntime',
-          'validateConversationUrl',
-          'authIsFresh',
-          'conversationStateIsUsable',
-          'integrityIsFresh',
+          'DiscordReviewerAccessor',
         ];
         for (const name of required) {
           if (typeof modules[name] !== 'function') {
@@ -107,54 +117,33 @@ export class ChatgptService {
     return this.modulesPromise;
   }
 
-  async #runtime() {
-    if (!this.runtimePromise) {
-      this.runtimePromise = (async () => {
-        const modules = await this.#modules();
-        const migration = await modules.migrateLegacyRuntime({
-          profile: this.config.reviewerAccessorProfile,
-          migrateCredentialCache: true,
-          onStatus: (message) => this.onStatus('runtime', message),
-        });
-        return { modules, paths: migration.paths };
-      })().catch((error) => {
-        this.runtimePromise = null;
-        throw error;
-      });
-    }
-    return this.runtimePromise;
-  }
-
   async identity(conversationUrl) {
-    const { modules } = await this.#runtime();
-    return chatgptConversationIdentity(conversationUrl, modules.validateConversationUrl);
+    await this.#modules();
+    return chatgptConversationIdentity(conversationUrl);
   }
 
   async status(conversationUrl = null) {
-    const { modules, paths } = await this.#runtime();
-    const config = await modules.loadDirectConfig(
-      path.join(this.config.reviewerAccessorRoot, 'chat-direct.config.json'),
-    );
-    const selectedUrl = conversationUrl || config.conversationUrl;
-    if (!selectedUrl) {
+    const modules = await this.#modules();
+    if (!conversationUrl) {
       return {
         ready: true,
         configured: false,
         activeCount: this.activeCount,
+        profile: this.config.reviewerAccessorProfile,
+        schemaVersion: modules.DISCORD_REVIEWER_ACCESSOR_SCHEMA_VERSION ?? null,
+        transport: 'reviewer-accessor-discord-bridge',
         update: this.updateResult,
       };
     }
-    const identity = chatgptConversationIdentity(selectedUrl, modules.validateConversationUrl);
-    const cache = new modules.DpapiCredentialCache({ filePath: paths.cachePath });
-    const session = await cache.read(identity.conversationUrl).catch(() => null);
+    const identity = chatgptConversationIdentity(conversationUrl);
     return {
       ready: true,
       configured: true,
       ...identity,
-      cached: Boolean(session),
-      authFresh: Boolean(session && modules.authIsFresh(session)),
-      integrityFresh: Boolean(session && modules.integrityIsFresh(session)),
-      conversationStateUsable: Boolean(session && modules.conversationStateIsUsable(session)),
+      profile: this.config.reviewerAccessorProfile,
+      schemaVersion: modules.DISCORD_REVIEWER_ACCESSOR_SCHEMA_VERSION ?? null,
+      transport: 'reviewer-accessor-discord-bridge',
+      browserSessionCheck: 'on-send',
       active: this.active.has(identity.conversationId),
       activeCount: this.activeCount,
       update: this.updateResult,
@@ -171,8 +160,8 @@ export class ChatgptService {
     onAttachments = null,
   }) {
     if (this.stopping) throw new Error('ChatGPT連携は停止処理中です。');
-    const { modules, paths } = await this.#runtime();
-    const identity = chatgptConversationIdentity(conversationUrl, modules.validateConversationUrl);
+    const modules = await this.#modules();
+    const identity = chatgptConversationIdentity(conversationUrl);
     if (this.active.has(identity.conversationId)) {
       throw new Error('このChatGPT会話では別の応答が進行中です。');
     }
@@ -184,25 +173,23 @@ export class ChatgptService {
     const relayAbort = () => controller.abort(signal?.reason ?? new Error('ChatGPT送信が中断されました。'));
     if (signal?.aborted) relayAbort();
     else signal?.addEventListener?.('abort', relayAbort, { once: true });
-    const cache = new modules.DpapiCredentialCache({ filePath: paths.cachePath });
-    const client = new modules.ChatDirectClient({
-      cache,
+    const accessor = new modules.DiscordReviewerAccessor();
+    const operation = accessor.send({
       conversationUrl: identity.conversationUrl,
-      responsePerformance: performance,
+      files,
       port: this.config.reviewerAccessorPort,
       profile: this.config.reviewerAccessorProfile,
-      runtimeRoot: paths.runtimeRoot,
-      onStatus: (message) => this.onStatus('transport', message, identity),
-    });
-    const operation = client.send(prompt, {
-      files,
+      prompt,
+      responsePerformance: performance,
       signal: controller.signal,
-      onText,
-      onAttachments,
+      onStatus: (event) => this.onStatus('transport', chatgptStatusText(event), identity),
     });
     this.active.set(identity.conversationId, { controller, operation });
     try {
-      return await operation;
+      const result = await operation;
+      onText?.(result.assistantText);
+      onAttachments?.(result.assistantAttachments);
+      return result;
     } finally {
       signal?.removeEventListener?.('abort', relayAbort);
       if (this.active.get(identity.conversationId)?.operation === operation) {

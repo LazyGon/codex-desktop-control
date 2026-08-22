@@ -146,6 +146,65 @@ test('linked ChatGPT channel delivers a duplicated Discord event exactly once', 
   await controller.stop();
 });
 
+test('structured reviewer-accessor submission status controls safe retry classification', async (context) => {
+  for (const scenario of [
+    { submissionStatus: 'NOT_STARTED', expectedState: 'failed', expectedSubmitted: false },
+    { submissionStatus: 'POSSIBLE', expectedState: 'uncertain', expectedSubmitted: null },
+    { submissionStatus: 'CONFIRMED', expectedState: 'uncertain', expectedSubmitted: true },
+  ]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `chatgpt-controller-${scenario.submissionStatus}-`));
+    context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const stateStore = new StateStore(directory, 'guild-1');
+    const channel = fakeTextChannel('chat-channel-1', 'bot-user');
+    stateStore.setChatgptConversation(CONVERSATION_ID, {
+      channelId: channel.id,
+      name: 'Explicit chat',
+      conversationUrl: `https://chatgpt.com/c/${CONVERSATION_ID}`,
+      responsePerformance: 'fastest',
+    });
+    const client = new EventEmitter();
+    client.user = { id: 'bot-user' };
+    client.channels = { fetch: async () => channel };
+    const service = {
+      activeCount: 0,
+      async send() {
+        throw Object.assign(new Error('safe public failure'), {
+          code: 'DISCORD_CHAT_FIXTURE',
+          submissionStatus: scenario.submissionStatus,
+        });
+      },
+      async stop() {},
+    };
+    const controller = new ChatgptController({
+      client,
+      service,
+      stateStore,
+      config: {
+        guildId: 'guild-1',
+        chatgptEnabled: true,
+        authorizedUserIds: ['authorized-user'],
+        inputAttachmentMaxBytes: 1_000_000,
+        inputAttachmentTotalMaxBytes: 1_000_000,
+        inputAttachmentMaxCount: 10,
+        discordRestTimeoutMs: 300_000,
+        chatgptLiveUpdateIntervalMs: 1_000,
+      },
+      logDir: directory,
+      incomingAttachmentStore: { store: async () => [] },
+    });
+    controller.attach();
+    client.emit('messageCreate', fakeDiscordMessage('discord-message-1', channel));
+    const record = await waitForRecord(stateStore, scenario.expectedState);
+    assert.equal(record.submitted, scenario.expectedSubmitted);
+    assert.equal(record.submissionStatus, scenario.submissionStatus);
+    const response = channel._messages.get(record.liveMessageId);
+    const description = response.embeds[0].data?.description ?? response.embeds[0].description;
+    assert.match(description, /DISCORD_CHAT_FIXTURE/);
+    assert.doesNotMatch(description, /safe public failure/);
+    await controller.stop();
+  }
+});
+
 test('ordinary Discord messages outside explicitly linked ChatGPT channels are ignored', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-controller-ignore-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

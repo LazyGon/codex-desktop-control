@@ -441,18 +441,24 @@ export class ChatgptController {
         clearTimeout(renderTimer);
         this.renderTimers.delete(renderTimer);
       }
-      const dispatching = this.stateStore.chatgptMessageRecord(conversationId, message.id)?.state === 'dispatching';
+      const submissionStatus = String(error?.submissionStatus ?? 'NOT_STARTED').toUpperCase();
+      const submissionUncertain = submissionStatus === 'POSSIBLE' || submissionStatus === 'CONFIRMED';
       this.stateStore.setChatgptMessageRecord(conversationId, message.id, {
-        state: dispatching ? 'uncertain' : 'failed',
-        submitted: dispatching ? null : false,
+        state: submissionUncertain ? 'uncertain' : 'failed',
+        submitted: submissionStatus === 'CONFIRMED' ? true : submissionUncertain ? null : false,
+        submissionStatus,
         error: truncate(error.message, 1_000),
       });
       const description = [
-        dispatching
+        submissionUncertain
           ? 'ChatGPTへの送信結果を確定できませんでした。二重送信を避けるため自動再送はしません。'
           : 'ChatGPTへ送信する前に失敗しました。',
-        truncate(error.message, 3_000),
+        error?.code ? `エラーコード: ${truncate(error.code, 300)}` : '',
+        `送信状態: ${submissionStatus}`,
+        Number.isInteger(error?.transportStatus) ? `HTTP状態: ${error.transportStatus}` : '',
+        error?.recoveryReason ? `復元状態: ${truncate(error.recoveryReason, 300)}` : '',
         error.partialResponse?.assistantText ? `\n途中応答:\n${truncate(error.partialResponse.assistantText, 2_500)}` : '',
+        error.partialResult?.assistantText ? `\n復元済み応答:\n${truncate(error.partialResult.assistantText, 2_500)}` : '',
       ].filter(Boolean).join('\n');
       const payload = {
         embeds: [new EmbedBuilder().setTitle('ChatGPT error').setColor(ERROR_COLOR).setDescription(description)],
@@ -575,9 +581,9 @@ export class ChatgptController {
     if (selected) {
       lines.push(
         `conversation: ${selected.conversationId}`,
-        `cache: ${status.cached ? 'present' : 'missing (first send will bootstrap)'}`,
-        `auth: ${status.authFresh ? 'fresh' : 'refresh required'}`,
-        `conversation state: ${status.conversationStateUsable ? 'usable' : 'bootstrap required'}`,
+        `transport: ${status.transport}`,
+        `profile: ${status.profile}`,
+        'browser session: checked on send',
       );
     }
     await interaction.editReply(messageOptions(lines.join('\n')));

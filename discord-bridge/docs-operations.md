@@ -85,9 +85,10 @@ discovery or status reconciliation for other channels.
    `chatgpt-remote` to inspect the explicitly linked set. No configured default
    conversation is linked automatically.
 
-The first send may open reviewer-accessor's Chrome for Testing bootstrap when
-its DPAPI session is absent or stale. Text streams into one green response card;
-long output is capped at five posts with a complete UTF-8 attachment. Documents,
+Each send uses reviewer-accessor's exported `chat-direct-client/discord-bridge`
+wrapper, shared Chrome for Testing profile, and current browser session. Discord
+shows a green waiting card and replaces it with the exact recovered final answer; long output is
+capped at five posts with a complete UTF-8 attachment. Documents,
 source files, and archives accepted by reviewer-accessor may be attached to the
 Discord input. Its current direct transport does not accept image input.
 If Bridge state becomes uncertain after ChatGPT submission, the message is

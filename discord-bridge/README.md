@@ -146,9 +146,11 @@ outbound connection to Discord.
   logged without terminating the Bridge. Authentication, certificate,
   configuration, and programming errors remain fatal.
 - Uses `reviewer-accessor`'s explicit conversation URL, response-performance,
-  cross-process turn lock, Chrome-for-Testing bootstrap, and DPAPI credential
-  cache for ordinary ChatGPT. The Bridge never copies tokens into its config,
-  state, command line, or logs. Supported outgoing attachments follow the
+  cross-process turn lock, shared Chrome-for-Testing profile, and exported
+  `chat-direct-client/discord-bridge` wrapper for ordinary ChatGPT. The Bridge
+  resolves that package export instead of importing Accessor transport internals.
+  Authentication remains in the current browser profile; the Bridge never copies
+  tokens into its config, state, command line, or logs. Supported outgoing attachments follow the
   reviewer contract: ordinary documents, source files, and archives are
   accepted; image input is rejected before submission. A post-submission
   failure is marked uncertain and is never automatically retried.
