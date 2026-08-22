@@ -13,6 +13,7 @@ import {
   sleep,
   threadStatusLabel,
 } from './util.mjs';
+import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
 
 function attachmentValues(attachments) {
   if (!attachments) return [];
@@ -419,7 +420,9 @@ export class CodexService extends EventEmitter {
       let disconnectedResolve;
       const disconnected = new Promise((resolve) => { disconnectedResolve = resolve; });
       client.on('notification', (message) => {
-        this.#log('notification', { method: message.method, threadId: message.params?.threadId, turnId: message.params?.turnId ?? message.params?.turn?.id });
+        if (!isHighVolumeCodexNotification(message)) {
+          this.#log('notification', { method: message.method, threadId: message.params?.threadId, turnId: message.params?.turnId ?? message.params?.turn?.id });
+        }
         this.emit('notification', message);
       });
       client.on('request', (message) => {

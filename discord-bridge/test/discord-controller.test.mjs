@@ -356,6 +356,80 @@ test('session-order repair targets only bot transcript cards for explicitly mark
   );
 });
 
+test('Codex notification floods coalesce content deltas and yield to Discord work', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-notification-flood-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setBinding('thread-1', {
+    channelId: 'channel-1',
+    name: 'Flood test',
+    cwd: 'C:\\work',
+    watchLevel: 'normal',
+    archived: false,
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      authorizedUserIds: ['user-1'],
+      liveUpdateIntervalMs: 60_000,
+      elapsedUpdateIntervalMs: 60_000,
+    },
+    logDir: directory,
+  });
+  controller.attach();
+  context.after(() => controller.stop());
+
+  for (let index = 0; index < 20_000; index += 1) {
+    codex.emit('notification', {
+      method: 'item/commandExecution/outputDelta',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'command-1',
+        delta: 'ignored',
+      },
+    });
+  }
+  assert.equal(controller.notificationQueues.size, 0);
+
+  for (let index = 0; index < 10_000; index += 1) {
+    codex.emit('notification', {
+      method: 'item/agentMessage/delta',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'assistant-1',
+        delta: 'x',
+      },
+    });
+  }
+  codex.emit('notification', {
+    method: 'turn/plan/updated',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      plan: [{ step: 'after deltas', status: 'in_progress' }],
+    },
+  });
+
+  assert.equal(controller.notificationBuffers.get('thread-1').entries.length, 2);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(controller.notificationQueues.size, 0);
+  const view = controller.turnViews.get('thread-1:turn-1');
+  assert.equal(view.text, 'x'.repeat(10_000));
+  assert.deepEqual(view.plan, [{ step: 'after deltas', status: 'in_progress' }]);
+});
+
 test('completed context compaction posts one durable card and keeps the live card latest', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-context-compaction-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

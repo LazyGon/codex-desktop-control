@@ -222,6 +222,26 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   peer.send(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'live-turn' } } }));
   const notification = await notificationPromise;
   assert.equal(notification.params.turn.id, 'live-turn');
+
+  const deltaPromise = new Promise((resolve) => service.once('notification', resolve));
+  peer.send(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'item/agentMessage/delta',
+    params: { threadId: 'thread-1', turnId: 'live-turn', itemId: 'message-1', delta: 'secret body' },
+  }));
+  await deltaPromise;
+  const completedPromise = new Promise((resolve) => service.once('notification', resolve));
+  peer.send(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'turn/completed',
+    params: { threadId: 'thread-1', turn: { id: 'live-turn', status: 'completed', items: [] } },
+  }));
+  await completedPromise;
+
+  const codexLog = fs.readdirSync(directory).find((name) => /^codex-\d+\.jsonl$/.test(name));
+  const logText = fs.readFileSync(path.join(directory, codexLog), 'utf8');
+  assert.doesNotMatch(logText, /item\/agentMessage\/delta/);
+  assert.match(logText, /turn\/completed/);
 });
 
 test('CodexService fallback starts the shared launcher without interactive dialogs', async (context) => {

@@ -113,6 +113,10 @@ import {
   readSessionWorkspaceRoots,
 } from './session-workspace-roots.mjs';
 import { IncomingAttachmentStore } from './incoming-attachment-store.mjs';
+import {
+  coalesceCodexNotification,
+  isControllerCodexNotification,
+} from './codex-notification-buffer.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -447,6 +451,7 @@ export class DiscordController {
     this.recentHistoryRestoreJob = null;
     this.recentHistoryRestorePromise = null;
     this.notificationQueues = new Map();
+    this.notificationBuffers = new Map();
     this.subscriptionSyncPromises = new Map();
     this.discordMessageQueues = new Map();
     this.liveCardMovePromises = new Map();
@@ -489,10 +494,12 @@ export class DiscordController {
       });
       this.#postAlert(`Discordチャンネル操作によるタスク更新に失敗しました: ${newChannel.id}\n${error.message}`, 'error').catch(() => {});
     }));
-    this.codex.on('notification', (message) => this.#queueCodexNotification(
-      message,
-      ++this.codexEventSequence,
-    ));
+    this.codex.on('notification', (message) => {
+      const eventSequence = ++this.codexEventSequence;
+      if (isControllerCodexNotification(message)) {
+        this.#queueCodexNotification(message, eventSequence);
+      }
+    });
     this.codex.on('serverRequest', (request) => this.#handleServerRequest(
       request,
       ++this.codexEventSequence,
@@ -6052,16 +6059,77 @@ export class DiscordController {
   #queueCodexNotification(message, eventSequence) {
     if (this.stopping) return;
     const threadId = message.params?.threadId ?? message.params?.thread?.id ?? '__global__';
-    const previous = this.notificationQueues.get(threadId) ?? Promise.resolve();
-    const queued = previous.then(() => runAfterTranscriptBarrier(
-      this.transcriptSyncPromises,
-      threadId,
-      () => this.#handleCodexNotification(message, eventSequence),
-    ));
-    this.notificationQueues.set(threadId, queued);
-    queued.finally(() => {
-      if (this.notificationQueues.get(threadId) === queued) this.notificationQueues.delete(threadId);
-    });
+    let buffer = this.notificationBuffers.get(threadId);
+    if (!buffer) {
+      let resolve;
+      const promise = new Promise((complete) => { resolve = complete; });
+      buffer = {
+        entries: [],
+        offset: 0,
+        scheduled: false,
+        promise,
+        resolve,
+      };
+      this.notificationBuffers.set(threadId, buffer);
+      this.notificationQueues.set(threadId, promise);
+    }
+
+    const entry = { message, eventSequence };
+    const tailIndex = buffer.entries.length - 1;
+    const merged = tailIndex >= buffer.offset
+      ? coalesceCodexNotification(buffer.entries[tailIndex], entry)
+      : null;
+    if (merged) buffer.entries[tailIndex] = merged;
+    else buffer.entries.push(entry);
+    this.#scheduleCodexNotificationDrain(threadId, buffer);
+  }
+
+  #scheduleCodexNotificationDrain(threadId, buffer) {
+    if (buffer.scheduled) return;
+    buffer.scheduled = true;
+    setImmediate(() => this.#drainCodexNotifications(threadId, buffer));
+  }
+
+  async #drainCodexNotifications(threadId, buffer) {
+    buffer.scheduled = false;
+    const startedAt = Date.now();
+    let processed = 0;
+    try {
+      while (buffer.offset < buffer.entries.length
+        && processed < 100
+        && Date.now() - startedAt < 8) {
+        const entry = buffer.entries[buffer.offset];
+        buffer.offset += 1;
+        processed += 1;
+        await runAfterTranscriptBarrier(
+          this.transcriptSyncPromises,
+          threadId,
+          () => this.#handleCodexNotification(entry.message, entry.eventSequence),
+        );
+      }
+    } catch (error) {
+      this.#log('notification-drain-error', {
+        threadId,
+        error: error.stack ?? error.message,
+      });
+    }
+
+    if (buffer.offset < buffer.entries.length) {
+      if (buffer.offset >= 1_000) {
+        buffer.entries.splice(0, buffer.offset);
+        buffer.offset = 0;
+      }
+      this.#scheduleCodexNotificationDrain(threadId, buffer);
+      return;
+    }
+
+    if (this.notificationBuffers.get(threadId) === buffer) {
+      this.notificationBuffers.delete(threadId);
+      if (this.notificationQueues.get(threadId) === buffer.promise) {
+        this.notificationQueues.delete(threadId);
+      }
+    }
+    buffer.resolve();
   }
 
   #queueSubscriptionRestored(event) {
