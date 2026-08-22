@@ -124,8 +124,8 @@ automatically, and archived tasks move to `Codex Archived`. Installation,
 commands, approval routing, reconnection behavior, and credential rotation are
 documented in `discord-bridge\README.md` and `discord-bridge\docs-operations.md`.
 Automatic task-sync summaries are posted to `codex-sync` rather than
-`codex-remote`, so routine synchronization does not displace the pinned control
-panel in the control-plane timeline.
+`codex-remote`. The unpinned global control card is also replaced after any
+persistent `codex-remote` message so it remains at the latest timeline position.
 
 Ordinary ChatGPT conversations are a separate explicit surface. Run
 `/chatgpt link` with an existing `https://chatgpt.com/.../c/<UUID>` URL; the
@@ -143,7 +143,7 @@ first turn. Rapid messages in the same channel are serialized, so only one task
 is created. Unbound channels in the control, archive, or unrelated categories
 are ignored rather than becoming tasks.
 
-Use the pinned panel in `codex-remote` for connection status, account usage,
+Use the latest control card in `codex-remote` for connection status, account usage,
 read-only Codex resource inventory, full sync, pending requests, task
 navigation, and bounded recent-history recovery. Select `履歴復元`, choose 1,
 3, or 7 days, and confirm to restore completed-turn user messages, commentary,
@@ -151,7 +151,7 @@ final answers, and available App Server reasoning summaries for every
 Discord-managed non-archived task. This is an explicit exception to normal
 history reconciliation; it never includes archived tasks, data older than
 seven days, raw private reasoning content, or the current live turn. Every task
-channel has its own pinned panel for delivery mode,
+channel has its own unpinned control card for delivery mode,
 watch level, detailed status, pending requests, the task control center,
 archive/restore, and confirmed interrupt. The control center uses app-server
 catalogs for model, reasoning, permissions, and Plan/Default mode. Its More

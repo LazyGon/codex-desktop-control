@@ -8,7 +8,7 @@ outbound connection to Discord.
 
 - Creates a private `Codex Control` category with `codex-remote`, `codex-sync`,
   alert, and completion channels. Automatic task-sync summaries go to
-  `codex-sync`, so they do not push the pinned control surface down the
+  `codex-sync`, so they do not push the latest control surface down the
   `codex-remote` timeline.
 - Creates `chatgpt-remote` in the control category and a separate private
   `ChatGPT` category for ordinary ChatGPT conversations. Only URLs explicitly
@@ -35,8 +35,8 @@ outbound connection to Discord.
   UTF-8 to `data/transfer-text/<timestamp>.txt`; only the newest timestamped
   text file is retained. The source Discord message is deleted only after the
   local write succeeds. This inbox does not create or deliver a Codex task.
-- Pins one persistent control panel in `codex-remote` and one in every task
-  channel. The global panel exposes status, account usage, read-only Codex
+- Keeps one unpinned control card as the latest message in `codex-remote` and
+  uses unpinned control cards in every task channel. The global panel exposes status, account usage, read-only Codex
   resource inventory, full sync, pending requests, project visibility, and task navigation. Task
   panels expose delivery mode, watch level, a per-task `codex-completions`
   report toggle, detailed status, task-scoped pending requests, a task control
@@ -56,7 +56,7 @@ outbound connection to Discord.
   commentary, final-answer, and available reasoning-summary cards for every
   Discord-managed non-archived task. Raw private reasoning content, archived
   tasks, older turns, and the current live turn are excluded.
-- Reposts and pins the task control panel immediately below each terminal turn
+- Reposts the unpinned task control panel immediately below each terminal turn
   card. The previous bot-owned task panel is removed only after the replacement
   ID is persisted, so mobile users always find controls at the latest position.
 - Provides a dropdown-first task control center backed by live app-server
@@ -215,7 +215,7 @@ text is attached to that card.
 
 Slash commands remain supported for explicit task IDs, search, attachments,
 and recovery. Normal phone operation can use project/category navigation,
-ordinary task-channel messages, channel rename/move, and the pinned panels
+ordinary task-channel messages, channel rename/move, and the control cards
 without entering a command.
 
 Incoming files are stored under
@@ -295,7 +295,7 @@ identified only by generic PowerShell and Node processes. Its notification-area
 menu exposes status and a confirmed graceful stop; stopping it does not stop
 Codex Desktop or the shared app-server.
 
-Bots installed before pinned panels were added need one OAuth
+Bots installed before pinned ChatGPT panels were added need one OAuth
 re-authorization using the URL printed by the installer. Discord grants
 **Pin Messages** separately from **Manage Messages**.
 
@@ -401,7 +401,7 @@ time is deferred before execution.
   Messages, Pin Messages, View Channels, Send Messages, Embed Links, Attach
   Files, and Read Message History. Manage Roles is used only for private
   category permission overwrites; message management is used for durable cards
-  and pinned control panels.
+  and durable control cards.
 - Discord input becomes Codex turn text. There is no raw shell endpoint.
 - Permission changes, compact, fork, goal removal, and background-terminal
   termination require explicit confirmation. Terminal termination accepts only

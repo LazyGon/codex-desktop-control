@@ -116,7 +116,15 @@ try {
 
   const customIds = (message) => message.components
     .flatMap((row) => row.components.map((component) => component.customId).filter(Boolean));
-  const verifyPanel = async (channel, messageId, marker, requiredIds, color = CONTROL_PANEL_COLOR) => {
+  const verifyPanel = async (
+    channel,
+    messageId,
+    marker,
+    requiredIds,
+    color = CONTROL_PANEL_COLOR,
+    expectedPinned = true,
+    expectedLatest = false,
+  ) => {
     if (!messageId) {
       errors.push(`${channel?.name ?? '(unknown channel)'}: control panel message ID is missing.`);
       return null;
@@ -126,7 +134,13 @@ try {
       errors.push(`${channel?.name ?? '(unknown channel)'}: control panel ${messageId} is unavailable.`);
       return null;
     }
-    if (!message.pinned) errors.push(`${channel.name}: control panel ${messageId} is not pinned.`);
+    if (expectedPinned && !message.pinned) errors.push(`${channel.name}: control panel ${messageId} is not pinned.`);
+    if (!expectedPinned && message.pinned) errors.push(`${channel.name}: control panel ${messageId} is still pinned.`);
+    if (expectedLatest) {
+      const recent = await channel.messages.fetch({ limit: 1 }).catch(() => null);
+      const latest = recent?.first?.() ?? [...(recent?.values?.() ?? [])][0] ?? null;
+      if (latest?.id !== message.id) errors.push(`${channel.name}: control panel ${messageId} is not the latest message.`);
+    }
     if (message.embeds[0]?.color !== color) {
       errors.push(`${channel.name}: control panel ${messageId} does not use the dedicated control color.`);
     }
@@ -248,6 +262,9 @@ try {
         'cx:ui:control:resources',
         ...(visibleBindings.length ? ['cx:ui:control:open'] : []),
       ],
+      CONTROL_PANEL_COLOR,
+      false,
+      true,
     );
   }
   if (chatgptControlChannel) {
@@ -302,6 +319,8 @@ try {
         `cx:ui:task:project:${threadId}`,
         `cx:ui:task:git:${threadId}`,
       ],
+      CONTROL_PANEL_COLOR,
+      false,
     );
     if (panel) taskPanels += 1;
   }

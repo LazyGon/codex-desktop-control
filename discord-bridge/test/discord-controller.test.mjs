@@ -26,7 +26,11 @@ import {
   subagentMetadata,
   subagentOwnTurns,
 } from '../src/discord-controller.mjs';
-import { CONTROL_PANEL_COLOR, taskPanelMarker } from '../src/discord-panels.mjs';
+import {
+  CONTROL_PANEL_COLOR,
+  CONTROL_PANEL_MARKER,
+  taskPanelMarker,
+} from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
@@ -112,6 +116,124 @@ test('task sync summaries use the dedicated sync channel instead of the control 
   assert.match(sent[0].content, /新規 1 \/ 移動 2/);
   assert.match(sent[0].content, /<#task-channel>/);
   assert.deepEqual(sent[0].allowedMentions, { parse: [] });
+});
+
+test('control channel messages replace the unpinned control card at the latest position', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-control-panel-latest-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({
+    controlChannelId: 'control-channel',
+    controlPanelMessageId: 'control-panel-old',
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  codex.connected = true;
+  const messages = new Map();
+  let sent = 0;
+  let oldPanelUnpinned = 0;
+  let oldPanelDeleted = 0;
+  let newPanelPinned = 0;
+  const collection = (entries) => Object.assign(new Map(entries), {
+    first() { return this.values().next().value ?? null; },
+  });
+  const makeMessage = (id, payload = {}) => {
+    const message = {
+      id,
+      guildId: 'guild-1',
+      channelId: 'control-channel',
+      author: payload.author ?? { id: 'bot-user', bot: true },
+      webhookId: null,
+      content: payload.content ?? '',
+      embeds: (payload.embeds ?? []).map((embed) => embed.toJSON?.() ?? embed),
+      components: (payload.components ?? []).map((component) => component.toJSON?.() ?? component),
+      pinned: Boolean(payload.pinned),
+      edit: async (next) => {
+        message.content = next.content ?? message.content;
+        if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+        if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
+        return message;
+      },
+      pin: async () => {
+        newPanelPinned += 1;
+        message.pinned = true;
+        return message;
+      },
+      unpin: async () => {
+        message.pinned = false;
+        if (message.id === 'control-panel-old') oldPanelUnpinned += 1;
+        return message;
+      },
+      delete: async () => {
+        messages.delete(message.id);
+        if (message.id === 'control-panel-old') oldPanelDeleted += 1;
+      },
+    };
+    messages.set(id, message);
+    return message;
+  };
+  makeMessage('control-panel-old', {
+    embeds: [{ footer: { text: CONTROL_PANEL_MARKER } }],
+    pinned: true,
+  });
+  const laterMessage = makeMessage('later-message', {
+    author: { id: 'user-1', bot: false },
+    content: 'ordinary control-channel message',
+  });
+  const control = {
+    id: 'control-channel',
+    messages: {
+      fetch: async (value) => {
+        if (typeof value === 'string') return messages.get(value) ?? null;
+        const limit = value?.limit ?? messages.size;
+        return collection([...messages].reverse().slice(0, limit));
+      },
+      fetchPinned: async () => collection([...messages].filter(([, message]) => message.pinned)),
+    },
+    send: async (payload) => {
+      sent += 1;
+      return makeMessage(`control-panel-new-${sent}`, payload);
+    },
+  };
+  client.channels = { fetch: async () => control };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      guildId: 'guild-1',
+      authorizedUserIds: ['user-1'],
+      textTransferEnabled: false,
+      plainMessageInputEnabled: false,
+    },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({ control });
+  controller.attach();
+
+  client.emit('messageCreate', laterMessage);
+  for (let attempt = 0; attempt < 100 && controller.discordMessageQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  const panelId = stateStore.snapshot().infrastructure.controlPanelMessageId;
+  const panel = messages.get(panelId);
+  assert.equal(sent, 1);
+  assert.equal(panelId, 'control-panel-new-1');
+  assert.equal([...messages.keys()].at(-1), panelId);
+  assert.equal(panel.pinned, false);
+  assert.equal(panel.embeds[0].footer.text, CONTROL_PANEL_MARKER);
+  assert.equal(newPanelPinned, 0);
+  assert.equal(oldPanelUnpinned, 1);
+  assert.equal(oldPanelDeleted, 1);
+
+  client.emit('messageCreate', panel);
+  for (let attempt = 0; attempt < 100 && controller.discordMessageQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(sent, 1);
 });
 
 test('project visibility catalog merges active and hidden projects without losing task counts', () => {
@@ -1052,7 +1174,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 });
 
-test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the pinned task panel exactly once', async (context) => {
+test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the unpinned task panel exactly once', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-panel-repost-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -1245,7 +1367,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   assert.equal(channelMessages.has('panel-old'), false);
   const panel = channelMessages.get(binding.controlPanelMessageId);
   assert.ok(panel);
-  assert.equal(panel.pinned, true);
+  assert.equal(panel.pinned, false);
   assert.equal(panel.embeds[0].footer.text, taskPanelMarker(binding.threadId));
   assert.equal(panel.embeds[0].fields.find((field) => field.name === 'Status').value, 'idle');
   assert.deepEqual(Object.keys(binding.turnMessages['turn-complete'].userEntries), ['persisted-user']);

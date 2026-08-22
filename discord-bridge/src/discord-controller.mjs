@@ -578,7 +578,6 @@ export class DiscordController {
     this.infrastructureReady = this.#ensureInfrastructure();
     const infrastructure = await this.infrastructureReady;
     await infrastructure.guild.commands.set(commandPayload);
-    await this.#ensureControlPanel();
     const state = this.stateStore.snapshot();
     if (state.announcedVersion !== '2.0.0') {
       const embed = new EmbedBuilder()
@@ -597,6 +596,7 @@ export class DiscordController {
       await infrastructure.control.send({ embeds: [embed], allowedMentions: { parse: [] } });
       this.stateStore.update((value) => { value.announcedVersion = '2.0.0'; });
     }
+    await this.#ensureControlPanel();
     this.#log('discord-ready', { user: this.client.user?.tag, guildId: this.config.guildId });
     this.#startTaskSyncPolling();
   }
@@ -932,6 +932,11 @@ export class DiscordController {
 
   async #handleDiscordMessage(message) {
     if (message.guildId !== this.config.guildId) return;
+    const controlChannelId = this.stateStore.snapshot?.().infrastructure?.controlChannelId ?? null;
+    if (message.channelId === controlChannelId) {
+      if (this.#panelMarker(message) !== CONTROL_PANEL_MARKER) await this.#ensureControlPanel();
+      return;
+    }
     if (this.config.textTransferEnabled && message.channelId === this.transferTextChannelId) {
       await this.#handleTransferTextMessage(message);
       return;
@@ -3837,7 +3842,16 @@ export class DiscordController {
       && isDeepStrictEqual((message.components ?? []).map(componentData), (payload.components ?? []).map(componentData));
   }
 
-  async #ensurePanelMessage({ key, channel, storedId, marker, payload, persist }) {
+  async #ensurePanelMessage({
+    key,
+    channel,
+    storedId,
+    marker,
+    payload,
+    persist,
+    pin = true,
+    keepLatest = false,
+  }) {
     const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
       let message = storedId ? await channel.messages.fetch(storedId).catch(() => null) : null;
@@ -3856,14 +3870,50 @@ export class DiscordController {
             && this.#panelMarker(candidate) === marker) ?? null
           : null;
       }
+      let superseded = null;
+      if (message && keepLatest) {
+        const recent = await channel.messages.fetch({ limit: 1 }).catch(() => null);
+        const latest = recent?.first?.() ?? [...(recent?.values?.() ?? [])][0] ?? null;
+        if (latest && latest.id !== message.id) {
+          superseded = message;
+          message = latest.author.id === this.client.user.id && this.#panelMarker(latest) === marker
+            ? latest
+            : null;
+        }
+      }
       if (!message) message = await channel.send(payload);
       else if (!this.#panelMessageMatches(message, payload)) await message.edit(payload);
-      if (this.canPinControlPanels && !message.pinned && typeof message.pin === 'function') {
+      if (pin && this.canPinControlPanels && !message.pinned && typeof message.pin === 'function') {
         await message.pin('Keep Codex Remote controls available').catch((error) => {
           this.#log('control-panel-pin-failed', { channelId: channel.id, messageId: message.id, error: error.message });
         });
       }
+      if (!pin && message.pinned && typeof message.unpin === 'function') {
+        await message.unpin('Keep the latest Codex Remote control card unpinned').catch((error) => {
+          this.#log('control-panel-unpin-failed', { channelId: channel.id, messageId: message.id, error: error.message });
+        });
+      }
       if (storedId !== message.id) persist(message.id);
+      if (superseded && superseded.id !== message.id && superseded.author.id === this.client.user.id) {
+        if (superseded.pinned && typeof superseded.unpin === 'function') {
+          await superseded.unpin('Replace the Codex Remote control card at the latest position').catch((error) => {
+            this.#log('control-panel-unpin-failed', {
+              channelId: channel.id,
+              messageId: superseded.id,
+              error: error.message,
+            });
+          });
+        }
+        await superseded.delete().catch(async (error) => {
+          if (error.code === 10008) return;
+          await superseded.edit({ components: [] }).catch(() => {});
+          this.#log('superseded-control-panel-delete-failed', {
+            channelId: channel.id,
+            messageId: superseded.id,
+            error: error.message,
+          });
+        });
+      }
       return message;
     });
     this.panelSyncPromises.set(key, operation);
@@ -3892,6 +3942,8 @@ export class DiscordController {
       marker: CONTROL_PANEL_MARKER,
       payload,
       persist: (messageId) => this.stateStore.setInfrastructure({ controlPanelMessageId: messageId }),
+      pin: false,
+      keepLatest: true,
     });
   }
 
@@ -3907,6 +3959,7 @@ export class DiscordController {
       marker: taskPanelMarker(thread.id),
       payload,
       persist: (messageId) => this.stateStore.setBinding(thread.id, { controlPanelMessageId: messageId }),
+      pin: false,
     });
   }
 
@@ -3926,21 +3979,17 @@ export class DiscordController {
         thread,
         binding: { ...binding, archived },
       }));
-      if (this.canPinControlPanels && typeof newPanel.pin === 'function') {
-        try {
-          await newPanel.pin('Place Codex task controls below synchronized history');
-        } catch (error) {
-          await newPanel.delete().catch(() => {});
-          this.#log('control-panel-pin-failed', {
-            channelId: channel.id,
-            messageId: newPanel.id,
-            error: error.message,
-          });
-          throw error;
-        }
-      }
       this.stateStore.setBinding(thread.id, { controlPanelMessageId: newPanel.id });
       if (oldPanel && oldPanel.id !== newPanel.id && oldPanel.author.id === this.client.user.id) {
+        if (oldPanel.pinned && typeof oldPanel.unpin === 'function') {
+          await oldPanel.unpin('Replace the Codex task control card without a pin').catch((error) => {
+            this.#log('control-panel-unpin-failed', {
+              channelId: channel.id,
+              messageId: oldPanel.id,
+              error: error.message,
+            });
+          });
+        }
         await oldPanel.delete().catch(async (error) => {
           if (error.code === 10008) return;
           await oldPanel.edit({ components: [] }).catch(() => {});
@@ -3984,25 +4033,21 @@ export class DiscordController {
       const completedBinding = { ...binding, taskStatus: 'idle' };
       const thread = this.#threadFromBinding(completedBinding);
       const newPanel = await channel.send(taskPanelPayload({ thread, binding: completedBinding }));
-      if (this.canPinControlPanels && typeof newPanel.pin === 'function') {
-        try {
-          await newPanel.pin('Keep the latest completed Codex task controls available');
-        } catch (error) {
-          await newPanel.delete().catch(() => {});
-          this.#log('control-panel-pin-failed', {
-            channelId: channel.id,
-            messageId: newPanel.id,
-            error: error.message,
-          });
-          throw error;
-        }
-      }
       this.stateStore.setBinding(threadId, {
         controlPanelMessageId: newPanel.id,
         lastPanelCompletionTurnId: turnId,
         taskStatus: 'idle',
       });
       if (oldPanel && oldPanel.id !== newPanel.id && oldPanel.author.id === this.client.user.id) {
+        if (oldPanel.pinned && typeof oldPanel.unpin === 'function') {
+          await oldPanel.unpin('Replace the Codex task control card without a pin').catch((error) => {
+            this.#log('control-panel-unpin-failed', {
+              channelId: channel.id,
+              messageId: oldPanel.id,
+              error: error.message,
+            });
+          });
+        }
         await oldPanel.delete().catch(async (error) => {
           if (error.code === 10008) return;
           await oldPanel.edit({ components: [] }).catch(() => {});

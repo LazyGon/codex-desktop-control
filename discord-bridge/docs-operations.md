@@ -32,9 +32,9 @@ discovery or status reconciliation for other channels.
    are grouped under the single `Codex - No Project` category.
 3. Review orange user cards, final assistant cards, and commentary cards captured
    while the task was live. `🟢` in the channel name means a turn is running;
-   `⚫` means stopped. Pinned control panels are purple, while completed result
+   `⚫` means stopped. Control cards are purple, while completed result
    cards are blue.
-4. Use the pinned task panel's delivery-mode select, or post an ordinary
+4. Use the task panel's delivery-mode select, or post an ordinary
    message for automatic delivery. Slash commands remain available for explicit
    task IDs, search, and attachments.
    With `plainMessageInputEnabled`, an ordinary message in the task channel is
@@ -50,7 +50,7 @@ discovery or status reconciliation for other channels.
 5. Watch the latest turn card. It shows current commentary, reasoning, and work
    state. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,
-   then reposts the pinned task control panel directly below it.
+   then reposts the unpinned task control panel directly below it.
    When app-server completes context compaction, the task channel also retains
    a separate `Codex context compacted` card with task, turn, and item identity.
    Subagents appear as read-only Discord threads under this task channel. Their
@@ -60,7 +60,7 @@ discovery or status reconciliation for other channels.
    threads. Finished child threads change to `⚫` and archive automatically;
    they do not create `codex-completions` posts.
 6. Respond to approval or input cards when they appear.
-7. Use `Project files` in the pinned task panel to browse the task working
+7. Use `Project files` in the task control card to browse the task working
    directory. Select a directory to open it or a file to post it into the
    private task channel. `/codex-files` opens the same browser with explicit
    task autocomplete. On an assistant card, use `Linked files` to select a
@@ -133,7 +133,8 @@ Windows-protected system directories. This includes sibling repositories,
 other task runtime directories. Filesystem links and special entries remain
 blocked, and there is no arbitrary-path input UI.
 
-The pinned `codex-remote` panel provides status, account usage, read-only MCP/
+The unpinned `codex-remote` panel is kept at the latest channel position and
+provides status, account usage, read-only MCP/
 Skills/Plugins/Hooks/experimental-feature inventory, full sync, pending
 requests, task navigation, `プロジェクト表示`, and a `履歴復元` button.
 Automatic task-sync summaries are posted to the sibling `codex-sync` channel,
@@ -155,7 +156,8 @@ non-archived task in the background and restores completed-turn user messages,
 commentary, final answers, and App Server reasoning summaries. The current
 live turn stays on its single live card. Archived tasks, turns older than the
 selected rolling window, and raw private reasoning content are never included.
-Completion counts are posted back to `codex-remote`. Each pinned task panel provides delivery mode,
+Completion counts are posted back to `codex-remote`, after which the global
+control card returns to the latest position. Each task panel provides delivery mode,
 watch level, a per-task completion-report selector, detailed status, task-scoped
 pending requests, a task control center, archive/restore, and confirmed
 interrupt. The control center uses
@@ -249,7 +251,7 @@ When a turn completes and that task's completion-report setting is ON,
 `タスクが完了しました。`, puts a one-line final-answer summary on the second
 line, and uses the bare completion-message URL as the final line so Discord
 renders its channel-aware compact form. The setting defaults to ON. Selecting
-OFF in the pinned task panel leaves final cards in the task channel but skips
+OFF in the task control card leaves final cards in the task channel but skips
 future completion posts, including reconnect recovery for turns completed
 while OFF.
 

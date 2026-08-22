@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 # Manage Channels, Manage Roles, Manage Messages, Pin Messages, View Channels,
 # Send Messages, Embed Links, Attach Files, and Read Message History. Manage
 # Roles is required to create private category permission overwrites; message
-# permissions support durable user cards and pinned control panels.
+# permissions support durable user cards and the pinned ChatGPT panels.
 $permissions = '2251800082246672'
 $url = "https://discord.com/oauth2/authorize?client_id=$ApplicationId&permissions=$permissions&integration_type=0&scope=bot+applications.commands"
 if ($GuildId) {

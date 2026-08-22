@@ -178,13 +178,15 @@ replaces it. After the local write succeeds, the source Discord message is
 deleted. A failed write leaves the message in Discord. This channel is a local
 text inbox and never sends content to Codex.
 
-`codex-remote` and every task channel contain a pinned control panel. Task
+`codex-remote` and every task channel contain an unpinned control card. The
+global card is replaced whenever another persistent message appears so it stays
+at the latest channel position. Task
 panels provide delivery-mode, watch-level, and per-task completion-report
 selects plus status refresh, pending requests, a task control center,
 archive/restore, and confirmed interrupt actions. Completion reporting defaults
 to ON; turning it OFF keeps final cards in the task channel but suppresses
 future `codex-completions` posts for that task. After every turn ends, the task
-panel is reposted and pinned below the final card so its controls remain at the
+panel is reposted without a pin below the final card so its controls remain at the
 latest channel position.
 Automatic task-sync summaries are posted separately in `codex-sync`, keeping
 the `codex-remote` control panel from being displaced by routine activity.
@@ -194,7 +196,7 @@ summaries, tool progress, and final answer. Nested agents are flattened beneath
 the same task channel with their full agent path and depth retained. Active
 subagent threads use `🟢`; finished threads use `⚫` and are archived without
 creating separate completion-channel notifications.
-Pinned control panels use a dedicated purple embed color, while completed
+Control cards use a dedicated purple embed color, while completed
 Codex result cards remain blue, so the two surfaces are visually distinct.
 They also provide a project-file browser, while assistant
 cards expose explicitly linked local files for download to the private task
@@ -226,7 +228,7 @@ running/stopped status prefix.
 After pulling an update, rerun `Install.ps1` with the same Discord IDs. Existing
 DPAPI credentials are reused when no new token is supplied.
 
-Bots installed before pinned panels were added need one OAuth
+Bots installed before pinned ChatGPT panels were added need one OAuth
 re-authorization using the URL printed by the installer. Discord grants
 **Pin Messages** separately from **Manage Messages**.
 
