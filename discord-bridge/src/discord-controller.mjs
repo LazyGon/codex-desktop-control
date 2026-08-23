@@ -6170,7 +6170,6 @@ export class DiscordController {
   }
 
   async #drainCodexNotifications(threadId, buffer) {
-    buffer.scheduled = false;
     const startedAt = Date.now();
     let processed = 0;
     try {
@@ -6198,10 +6197,11 @@ export class DiscordController {
         buffer.entries.splice(0, buffer.offset);
         buffer.offset = 0;
       }
-      this.#scheduleCodexNotificationDrain(threadId, buffer);
+      setImmediate(() => this.#drainCodexNotifications(threadId, buffer));
       return;
     }
 
+    buffer.scheduled = false;
     if (this.notificationBuffers.get(threadId) === buffer) {
       this.notificationBuffers.delete(threadId);
       if (this.notificationQueues.get(threadId) === buffer.promise) {

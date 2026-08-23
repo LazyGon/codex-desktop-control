@@ -430,6 +430,89 @@ test('Codex notification floods coalesce content deltas and yield to Discord wor
   assert.deepEqual(view.plan, [{ step: 'after deltas', status: 'in_progress' }]);
 });
 
+test('Codex notifications stay serial while an earlier Discord operation is pending', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-notification-serial-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setBinding('thread-1', {
+    channelId: 'channel-1',
+    name: 'Serial notification test',
+    cwd: 'C:\\work',
+    watchLevel: 'normal',
+    archived: false,
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  let markFetchStarted;
+  let releaseFetch;
+  const fetchStarted = new Promise((resolve) => { markFetchStarted = resolve; });
+  const fetchRelease = new Promise((resolve) => { releaseFetch = resolve; });
+  client.channels = {
+    fetch: async () => {
+      markFetchStarted();
+      await fetchRelease;
+      throw new Error('test release');
+    },
+  };
+  const codex = new EventEmitter();
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {
+      authorizedUserIds: ['user-1'],
+      liveUpdateIntervalMs: 60_000,
+      elapsedUpdateIntervalMs: 60_000,
+    },
+    logDir: directory,
+  });
+  controller.attach();
+  context.after(() => controller.stop());
+
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: {
+      threadId: 'thread-1',
+      turn: { id: 'turn-1', status: 'inProgress', startedAt: Date.now() },
+    },
+  });
+  await fetchStarted;
+  codex.emit('notification', {
+    method: 'item/agentMessage/delta',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'assistant-1',
+      delta: 'ordered text',
+    },
+  });
+  codex.emit('notification', {
+    method: 'turn/plan/updated',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      plan: [{ step: 'ordered plan', status: 'in_progress' }],
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const blockedBuffer = controller.notificationBuffers.get('thread-1');
+  assert.equal(blockedBuffer.offset, 1);
+  assert.equal(blockedBuffer.entries.length, 3);
+  const blockedView = controller.turnViews.get('thread-1:turn-1');
+  assert.equal(blockedView.text, '');
+  assert.deepEqual(blockedView.plan, []);
+
+  releaseFetch();
+  for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(controller.notificationQueues.size, 0);
+  assert.equal(blockedView.text, 'ordered text');
+  assert.deepEqual(blockedView.plan, [{ step: 'ordered plan', status: 'in_progress' }]);
+});
+
 test('live turn mutations remove duplicate cards and finish an in-flight render before completion', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-context-compaction-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
