@@ -427,21 +427,26 @@ export class StateStore {
     if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
       throw new Error('A valid threadId is required for a hidden Discord binding.');
     }
+    const existing = this.value.bindings[threadId] ?? {};
+    const normalized = {
+      ...existing,
+      ...patch,
+      channelId: null,
+      categoryId: null,
+      controlPanelMessageId: null,
+      lastCompletionMessageId: null,
+      lastPanelCompletionTurnId: null,
+      lastMirroredUserItemId: null,
+      snapshotInitialized: false,
+      transcriptVersion: 0,
+      turnMessages: {},
+      hidden: true,
+    };
+    delete normalized.updatedAt;
+    if (!patchChanges(existing, normalized)) return;
     return this.update((state) => {
-      const existing = state.bindings[threadId] ?? {};
       state.bindings[threadId] = {
-        ...existing,
-        ...patch,
-        channelId: null,
-        categoryId: null,
-        controlPanelMessageId: null,
-        lastCompletionMessageId: null,
-        lastPanelCompletionTurnId: null,
-        lastMirroredUserItemId: null,
-        snapshotInitialized: false,
-        transcriptVersion: 0,
-        turnMessages: {},
-        hidden: true,
+        ...normalized,
         updatedAt: new Date().toISOString(),
       };
     });

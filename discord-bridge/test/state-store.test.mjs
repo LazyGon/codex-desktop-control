@@ -56,6 +56,12 @@ test('StateStore persists bindings atomically', () => {
       hidden: false,
       completionReportsEnabled: true,
     }]);
+    second.hideBinding('thread-1', { projectKey: 'hidden-project', name: 'Hidden task' });
+    const unchangedHiddenText = fs.readFileSync(second.filePath, 'utf8');
+    const unchangedHiddenUpdatedAt = second.binding('thread-1').updatedAt;
+    second.hideBinding('thread-1', { projectKey: 'hidden-project', name: 'Hidden task' });
+    assert.equal(second.binding('thread-1').updatedAt, unchangedHiddenUpdatedAt);
+    assert.equal(fs.readFileSync(second.filePath, 'utf8'), unchangedHiddenText);
     second.setChatgptConversation('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
       channelId: 'chat-channel-1',
       name: 'Explicit chat',
