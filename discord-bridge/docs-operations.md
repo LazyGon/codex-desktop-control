@@ -152,7 +152,10 @@ full sync; a subagent observed live still receives its normal completion update.
 project mirror. Hiding requires confirmation and deletes that project's
 Discord categories and all child channels (including task channels and
 subagent threads), plus tracked completion notices. It does not delete Codex
-task/thread data or local project files.
+task/thread data or local project files. If one of those tasks is archived
+while the project remains hidden, its saved Desktop project identity keeps it
+out of `Codex Archived` even when its current cwd no longer resolves to that
+project.
 Restoring recreates the mirror from App Server history; Discord-only live cards
 and attachments are not recoverable.
 

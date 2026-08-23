@@ -1508,7 +1508,7 @@ test('control panel project selector requires confirmation before deleting a Dis
   assert.equal(stateStore.hiddenProjects().length, 0);
 });
 
-test('task sync deletes only the Discord mirror and completion notice for a hidden project', async (context) => {
+test('task sync deletes active and archived Discord mirrors for a hidden project', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hidden-project-sync-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const desktopStatePath = path.join(directory, '.codex-global-state.json');
@@ -1528,7 +1528,7 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     controlCategoryId: 'control-category',
     controlChannelId: 'control-channel',
     completionsChannelId: 'completions-channel',
-    archiveCategoryIds: [],
+    archiveCategoryIds: ['archive-category'],
   });
   stateStore.setProjectCategory(hiddenProjectId, {
     projectId: hiddenProjectId,
@@ -1550,6 +1550,20 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     completionNoticeMessageId: 'notice-1',
     finalMessageIds: ['final-1'],
   });
+  stateStore.setBinding('thread-hidden-archived', {
+    channelId: 'archived-task-channel',
+    categoryId: 'archive-category',
+    projectKey: hiddenProjectId,
+    projectId: hiddenProjectId,
+    cwd: 'C:\\detached-scratch\\RUN-OLD\\workspace',
+    name: 'Archived hidden task',
+    archived: true,
+    taskStatus: 'idle',
+  });
+  stateStore.setTurnRecord('thread-hidden-archived', 'turn-2', {
+    completionNoticeMessageId: 'notice-2',
+    finalMessageIds: ['final-2'],
+  });
   stateStore.setHiddenProject(hiddenProjectId, {
     projectId: hiddenProjectId,
     path: 'C:\\git\\hidden-runs',
@@ -1567,11 +1581,19 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     status: { type: 'idle' },
     turns: [],
   }];
-  codex.listAllThreads = async ({ archived }) => (archived ? [] : structuredClone(codexThreads));
+  const archivedCodexThreads = [{
+    id: 'thread-hidden-archived',
+    cwd: 'C:\\detached-scratch\\RUN-NEW\\workspace',
+    name: 'Archived hidden task',
+    status: { type: 'idle' },
+    turns: [],
+  }];
+  codex.listAllThreads = async ({ archived }) => structuredClone(archived ? archivedCodexThreads : codexThreads);
 
   const channels = new Map();
   const categoryChildren = new Map();
   let taskDeleted = false;
+  let archivedTaskDeleted = false;
   let categoryDeleted = false;
   const taskChannel = {
     id: 'task-channel',
@@ -1594,7 +1616,26 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
       channels.delete('project-category');
     },
   };
+  const archiveChildren = new Map();
+  const archivedTaskChannel = {
+    id: 'archived-task-channel',
+    type: ChannelType.GuildText,
+    parentId: 'archive-category',
+    topic: 'Codex task: thread-hidden-archived',
+    delete: async () => {
+      archivedTaskDeleted = true;
+      channels.delete('archived-task-channel');
+      archiveChildren.delete('archived-task-channel');
+    },
+  };
+  const archiveCategory = {
+    id: 'archive-category',
+    type: ChannelType.GuildCategory,
+    name: 'Codex Archived',
+    children: { cache: archiveChildren },
+  };
   categoryChildren.set(taskChannel.id, taskChannel);
+  archiveChildren.set(archivedTaskChannel.id, archivedTaskChannel);
   const controlCategory = {
     id: 'control-category',
     type: ChannelType.GuildCategory,
@@ -1613,6 +1654,17 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     },
   };
   completionMessages.set(notice.id, notice);
+  let archivedNoticeDeleted = false;
+  const archivedNotice = {
+    id: 'notice-2',
+    author: { id: 'bot-user' },
+    content: 'https://discord.com/channels/guild-1/archived-task-channel/final-2',
+    delete: async () => {
+      archivedNoticeDeleted = true;
+      completionMessages.delete('notice-2');
+    },
+  };
+  completionMessages.set(archivedNotice.id, archivedNotice);
   const discordCollection = (source) => Object.assign(new Map(source), {
     find: (predicate) => [...source.values()].find(predicate),
     last: () => [...source.values()].at(-1) ?? null,
@@ -1654,6 +1706,8 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
   channels.set(completions.id, completions);
   channels.set(projectCategory.id, projectCategory);
   channels.set(taskChannel.id, taskChannel);
+  channels.set(archiveCategory.id, archiveCategory);
+  channels.set(archivedTaskChannel.id, archivedTaskChannel);
   const guild = {
     channels: {
       fetch: async () => discordCollection(channels),
@@ -1697,13 +1751,20 @@ test('task sync deletes only the Discord mirror and completion notice for a hidd
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
-  assert.match(interaction.lastReply, /Discord削除 2/);
+  assert.match(interaction.lastReply, /Discord削除 3/);
   assert.equal(taskDeleted, true);
+  assert.equal(archivedTaskDeleted, true);
   assert.equal(categoryDeleted, true);
   assert.equal(noticeDeleted, true);
+  assert.equal(archivedNoticeDeleted, true);
   assert.deepEqual(codexThreads.map((thread) => thread.id), ['thread-hidden']);
+  assert.deepEqual(archivedCodexThreads.map((thread) => thread.id), ['thread-hidden-archived']);
   assert.equal(stateStore.binding('thread-hidden').hidden, true);
   assert.equal(stateStore.binding('thread-hidden').channelId, null);
+  assert.equal(stateStore.binding('thread-hidden-archived').hidden, true);
+  assert.equal(stateStore.binding('thread-hidden-archived').archived, true);
+  assert.equal(stateStore.binding('thread-hidden-archived').channelId, null);
+  assert.equal(stateStore.binding('thread-hidden-archived').projectKey, hiddenProjectId);
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 });
 

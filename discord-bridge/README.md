@@ -47,7 +47,8 @@ outbound connection to Discord.
   hiding a project deletes its Discord categories and all child channels
   (including task channels and subagent threads), plus tracked completion notices, while leaving Codex task/thread data
   and local files untouched. Hidden projects are omitted from task discovery,
-  history restoration, live mirroring, subscriptions, and completion reports.
+  history restoration, live mirroring, subscriptions, completion reports, and
+  `Codex Archived`; archiving a hidden task does not recreate its Discord mirror.
   Selecting the hidden project again recreates its Discord mirror from the
   history still available through the shared app-server; Discord-only live
   cards and attachments cannot be restored.

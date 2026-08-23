@@ -1352,7 +1352,7 @@ export class DiscordController {
         desktopProjects,
         this.config.projectCategoryPrefix,
       );
-      return !this.#isProjectHidden(descriptor.key);
+      return !this.#hiddenProjectDescriptorForThread(thread, descriptor);
     });
     const visibleThreads = this.#isAuthorizedUser(interaction.user.id)
       ? projectVisibleThreads
@@ -1402,6 +1402,20 @@ export class DiscordController {
 
   #isBindingHidden(binding) {
     return Boolean(binding?.hidden || this.#isProjectHidden(binding?.projectKey));
+  }
+
+  #hiddenProjectDescriptorForThread(thread, descriptor) {
+    if (this.#isProjectHidden(descriptor?.key)) return descriptor;
+    const binding = this.stateStore.binding?.(thread?.id);
+    if (!binding?.projectKey || !this.#isProjectHidden(binding.projectKey)) return null;
+    const hiddenProject = this.stateStore.hiddenProject?.(binding.projectKey) ?? null;
+    return {
+      ...descriptor,
+      id: binding.projectId ?? hiddenProject?.projectId ?? binding.projectKey,
+      key: binding.projectKey,
+      path: hiddenProject?.path ?? binding.cwd ?? thread?.cwd ?? descriptor?.path ?? '(no project)',
+      name: hiddenProject?.name ?? descriptor?.name ?? this.config.projectCategoryPrefix,
+    };
   }
 
   #projectVisibilityProjects() {
@@ -1460,7 +1474,7 @@ export class DiscordController {
       desktopProjects,
       this.config.projectCategoryPrefix,
     );
-    if (this.#isProjectHidden(descriptor.key)) {
+    if (this.#hiddenProjectDescriptorForThread(thread, descriptor)) {
       throw new Error('このプロジェクトはDiscordで非表示です。Codex Remoteの「プロジェクト表示」から再表示してください。');
     }
   }
@@ -2511,7 +2525,7 @@ export class DiscordController {
           desktopProjects,
           this.config.projectCategoryPrefix,
         );
-        return !this.#isProjectHidden(descriptor.key);
+        return !this.#hiddenProjectDescriptorForThread(thread, descriptor);
       });
       if (!threads.length) {
         await interaction.editReply('タスクが見つかりませんでした。');
@@ -3691,23 +3705,27 @@ export class DiscordController {
       channels,
       desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
     };
-    const classified = (threads) => threads.map((thread) => ({
-      thread,
-      project: projectDescriptorForThread(
+    const classified = (threads) => threads.map((thread) => {
+      const project = projectDescriptorForThread(
         thread,
         context.desktopProjects,
         this.config.projectCategoryPrefix,
-      ),
-    }));
+      );
+      return {
+        thread,
+        project,
+        hiddenProject: this.#hiddenProjectDescriptorForThread(thread, project),
+      };
+    });
     const activeEntries = classified(syncableActive);
     const archivedEntries = classified(syncableArchived);
-    const active = activeEntries.filter((entry) => !this.#isProjectHidden(entry.project.key))
+    const active = activeEntries.filter((entry) => !entry.hiddenProject)
       .map((entry) => entry.thread);
-    const archived = archivedEntries.filter((entry) => !this.#isProjectHidden(entry.project.key))
+    const archived = archivedEntries.filter((entry) => !entry.hiddenProject)
       .map((entry) => entry.thread);
     const hiddenEntries = [...activeEntries.map((entry) => ({ ...entry, archived: false })),
       ...archivedEntries.map((entry) => ({ ...entry, archived: true }))]
-      .filter((entry) => this.#isProjectHidden(entry.project.key));
+      .filter((entry) => entry.hiddenProject);
     context.completionMessages = hiddenEntries.length > 0
       ? await completions.messages.fetch({ limit: 100 }).catch(() => new Map())
       : new Map();
@@ -3732,14 +3750,19 @@ export class DiscordController {
     for (const entry of hiddenEntries) {
       hiddenThreadIds.add(entry.thread.id);
       try {
-        const removed = await this.#removeHiddenTaskMirror(entry.thread, entry.archived, context);
+        const removed = await this.#removeHiddenTaskMirror(
+          entry.thread,
+          entry.archived,
+          context,
+          entry.hiddenProject,
+        );
         result.deleted += removed.deleted;
         result.completionNoticesDeleted += removed.noticesDeleted;
       } catch (error) {
         result.failed += 1;
         this.#log('hidden-project-task-removal-error', {
           threadId: entry.thread.id,
-          projectKey: entry.project.key,
+          projectKey: entry.hiddenProject.key,
           archived: entry.archived,
           error: error.stack ?? error.message,
         });
@@ -4266,8 +4289,9 @@ export class DiscordController {
       context.desktopProjects,
       this.config.projectCategoryPrefix,
     );
-    if (this.#isProjectHidden(descriptor.key)) {
-      throw new Error(`Project is hidden from Discord: ${descriptor.path}`);
+    const hiddenProject = this.#hiddenProjectDescriptorForThread(thread, descriptor);
+    if (hiddenProject) {
+      throw new Error(`Project is hidden from Discord: ${hiddenProject.path}`);
     }
     if (archived) {
       const categories = await this.#archiveCategories(context);
@@ -4349,12 +4373,16 @@ export class DiscordController {
     return pending.length;
   }
 
-  async #removeHiddenTaskMirror(thread, archived, context) {
-    const descriptor = projectDescriptorForThread(
+  async #removeHiddenTaskMirror(thread, archived, context, hiddenDescriptor = null) {
+    const descriptor = hiddenDescriptor ?? this.#hiddenProjectDescriptorForThread(
       thread,
-      context.desktopProjects,
-      this.config.projectCategoryPrefix,
+      projectDescriptorForThread(
+        thread,
+        context.desktopProjects,
+        this.config.projectCategoryPrefix,
+      ),
     );
+    if (!descriptor) throw new Error(`No hidden project identity is available for task ${thread.id}.`);
     const waited = await this.#waitForTaskMirrorOperations(thread.id);
     if (waited > 0) {
       context.completionMessages = await context.completions.messages.fetch({ limit: 100 })
