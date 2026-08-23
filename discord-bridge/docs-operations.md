@@ -103,6 +103,11 @@ Linked PNG, JPEG, GIF, and WebP files that fit one Discord attachment are also
 attached to their assistant card and rendered inline. The linked-file picker
 remains available for downloading the original file.
 
+Images rendered by Codex directly from tool or MCP result blocks are posted as
+`Codex image` cards with native Discord image attachments. Their task, turn,
+item, attachment hash, and Discord message identity are retained so duplicate
+notifications and reconnect reconciliation converge on one card.
+
 Files that fit in one attachment are posted directly. Larger files are posted
 as numbered 7z volumes followed by a `.7z-manifest.json` file. Download every
 volume into the same folder and open the `.7z.001` file with a 7z-compatible

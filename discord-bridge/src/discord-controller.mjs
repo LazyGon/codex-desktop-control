@@ -117,6 +117,10 @@ import {
   coalesceCodexNotification,
   isControllerCodexNotification,
 } from './codex-notification-buffer.mjs';
+import {
+  codexImageFilesFromItem,
+  hasCodexImageContent,
+} from './codex-image-item.mjs';
 
 const COLORS = {
   neutral: 0x5865f2,
@@ -1854,6 +1858,79 @@ export class DiscordController {
       }
     }
     return { attachments, files, names };
+  }
+
+  async #codexImageCardAttachments(binding, item, existingMessage) {
+    const maximumBytes = this.config.fileShareChunkBytes ?? 7_500_000;
+    const extracted = codexImageFilesFromItem(item, {
+      maximumBytes,
+      maximumAttachments: MAX_DISCORD_MESSAGE_ATTACHMENTS,
+    });
+    for (const skipped of extracted.skipped) {
+      this.#log('codex-image-skipped', {
+        threadId: binding.threadId,
+        itemId: item?.id ?? null,
+        imageIndex: skipped.index,
+        reason: skipped.reason,
+      });
+    }
+
+    const existingAttachments = [...(existingMessage?.attachments.values() ?? [])];
+    const attachments = [];
+    const files = [];
+    const names = [];
+    const metadata = [];
+    const usedNames = new Set();
+    for (const file of extracted.files) {
+      const name = uniqueDiscordAttachmentName(safeAttachmentName(file.name), usedNames);
+      usedNames.add(name.toLocaleLowerCase('en-US'));
+      names.push(name);
+      metadata.push({
+        name,
+        mimeType: file.mimeType,
+        size: file.size,
+        sha256: file.sha256,
+      });
+      const existing = existingAttachments.find((attachment) => attachment.name === name
+        && (attachment.size == null || attachment.size === file.size));
+      if (existing) attachments.push({ id: existing.id });
+      else files.push(new AttachmentBuilder(file.buffer, { name }));
+    }
+
+    if (this.config.fileShareEnabled !== false
+      && item?.type === 'imageView'
+      && typeof item.path === 'string'
+      && names.length < MAX_DISCORD_MESSAGE_ATTACHMENTS) {
+      try {
+        if (!isDiscordInlineImageTarget(item.path)) throw new Error('Discordで表示できる画像形式ではありません。');
+        const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
+        const resolved = await resolveShareFile(item.path, roots);
+        if (resolved.size > maximumBytes) {
+          throw new Error(`画像がDiscord添付上限を超えています (${resolved.size} > ${maximumBytes})`);
+        }
+        const transfer = await hashResolvedFile(resolved, maximumBytes);
+        const name = uniqueDiscordAttachmentName(transfer.name, usedNames);
+        names.push(name);
+        metadata.push({
+          name,
+          mimeType: null,
+          size: transfer.size,
+          sha256: transfer.sha256,
+        });
+        const existing = existingAttachments.find((attachment) => attachment.name === name
+          && (attachment.size == null || attachment.size === transfer.size));
+        if (existing) attachments.push({ id: existing.id });
+        else files.push(new AttachmentBuilder(await readHashedFile(transfer), { name }));
+      } catch (error) {
+        this.#log('codex-image-skipped', {
+          threadId: binding.threadId,
+          itemId: item?.id ?? null,
+          imageIndex: 'path',
+          reason: error.message,
+        });
+      }
+    }
+    return { attachments, files, names, metadata };
   }
 
   #fileSession(key, userId, type = null) {
@@ -5023,6 +5100,16 @@ export class DiscordController {
     return null;
   }
 
+  #embedCodexImageItemId(message) {
+    for (const embed of message.embeds) {
+      if (embed.title !== 'Codex image') continue;
+      const field = embed.fields?.find((candidate) => candidate.name === 'Item');
+      const match = field?.value?.match(/`([^`]+)`/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
   #isAssistantTurnCard(message, turnId) {
     return message.author.id === this.client.user.id
       && this.#embedTurnId(message) === turnId
@@ -5151,6 +5238,95 @@ export class DiscordController {
     }
     this.stateStore.setTurnRecord(binding.threadId, turn.id, patch);
     return message;
+  }
+
+  async #ensureCodexImageCard(binding, turn, item, channel, messages) {
+    if (!item?.id || !hasCodexImageContent(item)) return { message: null, created: false };
+    const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
+    const imageEntries = { ...(record.imageEntries ?? {}) };
+    const recorded = imageEntries[item.id] ?? null;
+    let message = await this.#resolveChannelMessage(channel, messages, recorded?.messageId);
+    if (!message) {
+      message = [...messages.values()].find((candidate) => candidate.author.id === this.client.user.id
+        && this.#embedTurnId(candidate) === turn.id
+        && this.#embedCodexImageItemId(candidate) === item.id) ?? null;
+    }
+    const duplicateIds = [...messages.values()]
+      .filter((candidate) => candidate.author.id === this.client.user.id
+        && this.#embedTurnId(candidate) === turn.id
+        && this.#embedCodexImageItemId(candidate) === item.id)
+      .map((candidate) => candidate.id);
+    const imageAttachments = await this.#codexImageCardAttachments(binding, item, message);
+    if (imageAttachments.names.length === 0) {
+      // A hydrated item can occasionally omit an older binary result. Never
+      // delete the Discord copy when the durable message still exists.
+      return { message, created: false };
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Codex image')
+      .setColor(COLORS.neutral)
+      .setDescription(imageAttachments.names.length === 1
+        ? 'Codex画面に表示された画像です。'
+        : `Codex画面に表示された画像 ${imageAttachments.names.length} 件です。`)
+      .addFields(
+        { name: 'Task', value: `\`${binding.threadId}\`` },
+        { name: 'Turn', value: `\`${turn.id}\`` },
+        { name: 'Item', value: `\`${item.id}\`` },
+      );
+    const options = {
+      content: '',
+      embeds: [embed],
+      attachments: imageAttachments.attachments,
+      allowedMentions: { parse: [] },
+    };
+    if (imageAttachments.files.length) options.files = imageAttachments.files;
+    let created = false;
+    if (message?.author.id === this.client.user.id) {
+      if (!this.#cardMessageMatches(message, options, imageAttachments.names)) {
+        message = await message.edit(options);
+      }
+    } else {
+      message = await channel.send(options);
+      created = true;
+    }
+    messages.set(message.id, message);
+
+    const staleIds = new Set([recorded?.messageId, ...duplicateIds].filter(Boolean));
+    staleIds.delete(message.id);
+    for (const staleId of staleIds) {
+      const stale = await this.#resolveChannelMessage(channel, messages, staleId);
+      if (stale?.author.id === this.client.user.id) {
+        await stale.delete().catch((error) => {
+          if (error.code !== 10008) throw error;
+        });
+      }
+      messages.delete(staleId);
+    }
+
+    imageEntries[item.id] = {
+      messageId: message.id,
+      attachments: imageAttachments.metadata,
+      completedAt: recorded?.completedAt ?? new Date().toISOString(),
+    };
+    this.stateStore.setTurnRecord(binding.threadId, turn.id, {
+      imageEntries,
+      imageMessageIds: [...new Set(Object.values(imageEntries)
+        .map((entry) => entry.messageId)
+        .filter(Boolean))],
+    });
+    return { message, created };
+  }
+
+  async #reconcileCodexImageItems(binding, turn, channel, messages, { onlyRecorded = false } = {}) {
+    const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
+    const recordedIds = new Set(Object.keys(record.imageEntries ?? {}));
+    const results = [];
+    for (const item of turn.items ?? []) {
+      if (!hasCodexImageContent(item) || (onlyRecorded && !recordedIds.has(item.id))) continue;
+      results.push(await this.#ensureCodexImageCard(binding, turn, item, channel, messages));
+    }
+    return results;
   }
 
   async #reconcileStableAssistantMessages(binding, turn, channel, messages) {
@@ -5767,6 +5943,9 @@ export class DiscordController {
             await this.#ensureAssistantMessageCard(binding, turn, item, channel, messages);
           }
         }
+        await this.#reconcileCodexImageItems(binding, turn, channel, messages, {
+          onlyRecorded: !includeHistoricalDetails,
+        });
         const finalText = finalTextFromTurn(
           turn,
           completionTextFromSession(thread.path, turn.id),
@@ -5776,8 +5955,10 @@ export class DiscordController {
     } else if (latestCompleted) {
       // Live notification item IDs can differ from the stable IDs returned by
       // thread/read. Reconcile only the latest completed user cards here so a
-      // reconnect converges without backfilling old commentary.
+      // reconnect converges without backfilling old commentary. Image result
+      // blocks in that same latest turn are safe to restore by stable item ID.
       await this.#ensureTurnUserMessages(binding, latestCompleted, channel, messages);
+      await this.#reconcileCodexImageItems(binding, latestCompleted, channel, messages);
     }
 
     if (activeTurn) {
@@ -5807,6 +5988,7 @@ export class DiscordController {
           await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
         }
       }
+      await this.#reconcileCodexImageItems(binding, activeTurn, channel, messages);
       const existingView = this.turnViews.get(`${threadId}:${activeTurn.id}`);
       if (!existingView) {
         const oldRecord = this.stateStore.turnRecord(threadId, activeTurn.id);
@@ -5839,7 +6021,11 @@ export class DiscordController {
     for (const record of Object.values(latestBinding.turnMessages ?? {})) {
       for (const id of record?.userMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.assistantMessageIds ?? []) protectedIds.add(id);
+      for (const id of record?.imageMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.finalMessageIds ?? []) protectedIds.add(id);
+      for (const entry of Object.values(record?.imageEntries ?? {})) {
+        if (entry?.messageId) protectedIds.add(entry.messageId);
+      }
       for (const entry of Object.values(record?.compactionEntries ?? {})) {
         if (entry?.messageId) protectedIds.add(entry.messageId);
       }
@@ -5974,11 +6160,14 @@ export class DiscordController {
       const turnRecord = turnId ? this.stateStore.turnRecord(threadId, turnId) : null;
       const contextCompactionCompleted = message.method === 'item/completed'
         && message.params?.item?.type === 'contextCompaction';
+      const codexImageCompleted = message.method === 'item/completed'
+        && hasCodexImageContent(message.params?.item);
       const finalizedTurnUpdate = turnRecord?.status !== 'inProgress'
         && turnRecord?.finalizedAt
         && turnRecord?.finalMessageIds?.length > 0
         && message.method !== 'turn/completed'
         && !contextCompactionCompleted
+        && !codexImageCompleted
         && (message.method === 'turn/started'
           || message.method.startsWith('item/')
           || message.method === 'turn/plan/updated'
@@ -6026,6 +6215,25 @@ export class DiscordController {
           if (result.created && view?.status === 'inProgress') {
             await this.#repostLiveTurnCardToLatest(binding, view);
           }
+        }
+      }
+      else if (codexImageCompleted) {
+        const result = await this.#codexImageCompleted(binding, message.params);
+        if (!turnRecord?.finalizedAt) {
+          await this.#itemChanged(binding, message.params, true);
+          const view = this.turnViews.get(`${binding.threadId}:${turnId}`);
+          if (result.created && view?.status === 'inProgress') {
+            await this.#repostLiveTurnCardToLatest(binding, view);
+          }
+        } else if (result.created && !binding.isSubagent) {
+          const channel = await this.client.channels.fetch(binding.channelId);
+          await this.#repostTaskPanelAfterCompletion(binding.threadId, turnId, channel).catch((error) => {
+            this.#log('task-panel-image-repost-failed', {
+              threadId: binding.threadId,
+              turnId,
+              error: error.stack ?? error.message,
+            });
+          });
         }
       }
       else if (message.method === 'item/completed') await this.#itemChanged(binding, message.params, true);
@@ -6709,6 +6917,28 @@ export class DiscordController {
     return { message, created };
   }
 
+  async #codexImageCompleted(binding, params) {
+    const turnId = params.turnId ?? params.turn?.id ?? null;
+    const item = params.item;
+    if (!turnId || !item?.id) {
+      this.#log('codex-image-identity-missing', {
+        threadId: binding.threadId,
+        turnId,
+        itemId: item?.id ?? null,
+      });
+      return { message: null, created: false };
+    }
+    const channel = await this.client.channels.fetch(binding.channelId);
+    const messages = await this.#fetchChannelHistory(channel, 100);
+    return this.#ensureCodexImageCard(
+      binding,
+      { id: turnId, status: params.turn?.status ?? 'inProgress' },
+      item,
+      channel,
+      messages,
+    );
+  }
+
   #planChanged(binding, params) {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
     view.plan = params.plan ?? [];
@@ -6839,6 +7069,7 @@ export class DiscordController {
     }
     await this.#ensureTurnUserMessages(binding, stableTurn, channel, messages);
     await this.#reconcileStableAssistantMessages(binding, stableTurn, channel, messages);
+    await this.#reconcileCodexImageItems(binding, stableTurn, channel, messages);
     const finalText = view.text;
     const completionMessage = await this.#ensureTurnFinalMessages(
       binding,

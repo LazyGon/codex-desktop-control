@@ -93,6 +93,11 @@ outbound connection to Discord.
 - Persists every completed app-server `contextCompaction` item as its own task
   card with task, turn, and item identity. The item-to-Discord-message mapping
   prevents reconnect or duplicate live notifications from posting it twice.
+- Persists image blocks returned by app-server tool/MCP items as Discord image
+  attachments on a dedicated `Codex image` card. The task, turn, and item
+  identity prevents duplicate posts, and a hydrated `thread/read` restores a
+  missing image card after reconnect without persisting the base64 payload in
+  Bridge state.
 - Adds a `Linked files` button to assistant cards that contain Markdown links
   to absolute local Windows files. A linked regular file may be anywhere on the
   local machine except a Windows-protected system directory, and the selected

@@ -2390,7 +2390,22 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
       cwd: binding.cwd,
       path: null,
       status: { type: 'active' },
-      turns: [{ id: 'turn-1', status: 'inProgress', items: [] }],
+      turns: [{
+        id: 'turn-1',
+        status: 'inProgress',
+        items: [{
+          type: 'mcpToolCall',
+          id: 'tool-image-restored',
+          status: 'completed',
+          result: {
+            content: [{
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            }],
+          },
+        }],
+      }],
     },
   });
   codex.emit('subscriptionRestored', {
@@ -2406,6 +2421,14 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   assert.equal(runningAfterRestore.embeds[0]?.title, 'Codex running');
   assert.ok(sent.indexOf(runningAfterRestore) > sent.indexOf(trailingCard));
   assert.notEqual(runningAfterRestore.id, runningAfterInput.id);
+  const restoredImageCard = [...channelMessages.values()].find((message) => message.embeds?.[0]?.fields
+    ?.some((field) => field.name === 'Item' && field.value === '`tool-image-restored`'));
+  assert.equal(restoredImageCard?.embeds[0]?.title, 'Codex image');
+  assert.deepEqual(
+    [...restoredImageCard.attachments.values()].map((attachment) => attachment.name),
+    ['codex-image-tool-image-restored-1.png'],
+  );
+  assert.ok(sent.indexOf(runningAfterRestore) > sent.indexOf(restoredImageCard));
   assert.equal(userCard.embeds[0].color, 0xe67e22);
   assert.equal(userCard.embeds[0].description, 'run the requested task');
   assert.equal(userCard.components[0].components[0].custom_id, 'cx:copy:card');
@@ -2661,6 +2684,56 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   );
   assert.deepEqual(turnRecords.get('thread-1:turn-1').assistantEntries['assistant-item-2'].messageIds, [liveAssistant.id]);
   assert.equal(new Set(turnRecords.get('thread-1:turn-1').assistantMessageIds).size, 2);
+
+  const codexImageNotification = {
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: {
+        type: 'mcpToolCall',
+        id: 'tool-image-1',
+        status: 'completed',
+        result: {
+          content: [{
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          }],
+        },
+      },
+    },
+  };
+  codex.emit('notification', codexImageNotification);
+  for (let attempt = 0; attempt < 100
+    && (controller.notificationQueues.size
+      || !turnRecords.get('thread-1:turn-1')?.imageEntries?.['tool-image-1']); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  let codexImageCards = [...channelMessages.values()]
+    .filter((message) => message.embeds?.[0]?.fields
+      ?.some((field) => field.name === 'Item' && field.value === '`tool-image-1`'));
+  assert.equal(codexImageCards.length, 1);
+  assert.deepEqual(
+    [...codexImageCards[0].attachments.values()].map((attachment) => attachment.name),
+    ['codex-image-tool-image-1-1.png'],
+  );
+  assert.equal(
+    codexImageCards[0].embeds[0].fields.find((field) => field.name === 'Item').value,
+    '`tool-image-1`',
+  );
+  assert.ok(turnRecords.get('thread-1:turn-1').imageMessageIds.includes(codexImageCards[0].id));
+  assert.equal(turnRecords.get('thread-1:turn-1').imageEntries['tool-image-1'].attachments[0].sha256.length, 64);
+  assert.equal([...channelMessages.values()].at(-1).embeds[0].title, 'Codex running');
+
+  codex.emit('notification', codexImageNotification);
+  for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  codexImageCards = [...channelMessages.values()]
+    .filter((message) => message.embeds?.[0]?.fields
+      ?.some((field) => field.name === 'Item' && field.value === '`tool-image-1`'));
+  assert.equal(codexImageCards.length, 1);
 
   const previousClientUserMessageId = delivered.clientUserMessageId;
   const attachmentOnlyReactions = [];
