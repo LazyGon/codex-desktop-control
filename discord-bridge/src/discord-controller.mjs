@@ -160,6 +160,18 @@ function stateBindingSummaries(stateStore, options = {}) {
     .map(([threadId, binding]) => ({ threadId, ...binding }));
 }
 
+function stateBindingSummary(stateStore, threadId) {
+  if (typeof stateStore.bindingSummary === 'function') return stateStore.bindingSummary(threadId);
+  return stateStore.binding?.(threadId) ?? null;
+}
+
+function stateTurnRecordSummaries(stateStore, threadId) {
+  if (typeof stateStore.turnRecordSummaries === 'function') {
+    return stateStore.turnRecordSummaries(threadId);
+  }
+  return stateStore.binding?.(threadId)?.turnMessages ?? {};
+}
+
 function stateBindingStats(stateStore) {
   if (typeof stateStore.bindingStats === 'function') return stateStore.bindingStats();
   const bindings = stateBindingSummaries(stateStore);
@@ -1442,7 +1454,7 @@ export class DiscordController {
 
   #hiddenProjectDescriptorForThread(thread, descriptor) {
     if (this.#isProjectHidden(descriptor?.key)) return descriptor;
-    const binding = this.stateStore.binding?.(thread?.id);
+    const binding = stateBindingSummary(this.stateStore, thread?.id);
     if (!binding?.projectKey || !this.#isProjectHidden(binding.projectKey)) return null;
     const hiddenProject = this.stateStore.hiddenProject?.(binding.projectKey) ?? null;
     return {
@@ -3722,13 +3734,22 @@ export class DiscordController {
 
   async #performTaskSync() {
     const startedAt = Date.now();
+    let phaseStartedAt = startedAt;
+    const phaseMs = {};
+    const markPhase = (name) => {
+      const now = Date.now();
+      phaseMs[name] = now - phaseStartedAt;
+      phaseStartedAt = now;
+    };
     if (this.pendingChannelBindings.size > 0) {
       await Promise.allSettled([...this.pendingChannelBindings.values()]);
     }
+    markPhase('pendingBindings');
     const [activeThreads, archivedThreads] = await Promise.all([
       this.codex.listAllThreads({ archived: false }),
       this.codex.listAllThreads({ archived: true }),
     ]);
+    markPhase('listThreads');
     const syncableActive = activeThreads.filter((thread) => this.#isSyncableThread(thread));
     const syncableArchived = archivedThreads.filter((thread) => this.#isSyncableThread(thread));
     const { guild, controlCategory, completions } = await this.infrastructureReady;
@@ -3740,6 +3761,7 @@ export class DiscordController {
       channels,
       desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
     };
+    markPhase('discordSetup');
     const classified = (threads) => threads.map((thread) => {
       const project = projectDescriptorForThread(
         thread,
@@ -3764,6 +3786,7 @@ export class DiscordController {
     context.completionMessages = hiddenEntries.length > 0
       ? await completions.messages.fetch({ limit: 100 }).catch(() => new Map())
       : new Map();
+    markPhase('classification');
     const result = {
       active: active.length,
       archived: archived.length,
@@ -3803,7 +3826,7 @@ export class DiscordController {
         });
       }
     }
-    for (const binding of this.stateStore.bindings?.({ includeHidden: true }) ?? []) {
+    for (const binding of stateBindingSummaries(this.stateStore, { includeHidden: true })) {
       if (hiddenThreadIds.has(binding.threadId) || !this.#isProjectHidden(binding.projectKey)) continue;
       try {
         const removed = await this.#removeStaleHiddenBindingMirror(binding, context);
@@ -3824,6 +3847,7 @@ export class DiscordController {
       result.failed += 1;
       this.#log('hidden-project-category-removal-error', { error: error.stack ?? error.message });
     }
+    markPhase('hiddenCleanup');
 
     const syncThreads = async (threads, isArchived) => {
       let nextIndex = 0;
@@ -3854,16 +3878,22 @@ export class DiscordController {
       await Promise.all(Array.from({ length: Math.min(4, threads.length) }, () => worker()));
     };
 
-    for (const [threads, isArchived] of [[active, false], [archived, true]]) {
-      await syncThreads(threads, isArchived);
-    }
+    await syncThreads(active, false);
+    markPhase('activeTasks');
+    await syncThreads(archived, true);
+    markPhase('archivedTasks');
     const subagents = await this.#syncSubagentsForTasks(active);
     result.subagentsCreated = subagents.created;
     result.subagentsExisting = subagents.existing;
     result.subagentsFailed = subagents.failed;
+    markPhase('subagents');
     context.channels = await guild.channels.fetch();
+    markPhase('channelRefresh');
     result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
+    markPhase('categoryCleanup');
     await this.#ensureControlPanel();
+    markPhase('controlPanel');
+    result.phaseMs = phaseMs;
     result.elapsedMs = Date.now() - startedAt;
     this.#log('task-sync', result);
     return result;
@@ -4096,7 +4126,7 @@ export class DiscordController {
   }
 
   async #ensureTaskPanel(thread, channel, archived = false) {
-    const binding = this.stateStore.binding(thread.id);
+    const binding = stateBindingSummary(this.stateStore, thread.id);
     if (!binding) return null;
     const effectiveBinding = { ...binding, archived };
     const payload = taskPanelPayload({ thread, binding: effectiveBinding });
@@ -4420,33 +4450,8 @@ export class DiscordController {
       ),
     );
     if (!descriptor) throw new Error(`No hidden project identity is available for task ${thread.id}.`);
-    const waited = await this.#waitForTaskMirrorOperations(thread.id);
-    if (waited > 0) {
-      context.completionMessages = await context.completions.messages.fetch({ limit: 100 })
-        .catch(() => context.completionMessages);
-    }
-    const existing = this.stateStore.binding(thread.id);
-    let channel = existing?.channelId ? context.channels.get(existing.channelId) : null;
-    if (!channel && existing?.channelId) {
-      channel = await this.client.channels.fetch(existing.channelId).catch(() => null);
-    }
-    if (!channel) {
-      channel = context.channels.find((candidate) => candidate?.type === ChannelType.GuildText
-        && candidate.topic?.includes(`Codex task: ${thread.id}`));
-    }
-    const noticeCount = await this.#deleteCompletionNoticesForBinding(existing, context);
-    let deleted = 0;
-    if (channel) {
-      await channel.delete('Remove the Discord mirror for a hidden Codex project');
-      context.channels.delete(channel.id);
-      deleted = 1;
-    }
-    for (const subagent of this.stateStore.subagentThreads?.() ?? []) {
-      if (subagent.topLevelParentThreadId !== thread.id) continue;
-      this.stateStore.removeSubagentThread(subagent.threadId);
-    }
-    this.#clearHiddenTaskRuntime(thread.id);
-    this.stateStore.hideBinding(thread.id, {
+    const existing = stateBindingSummary(this.stateStore, thread.id);
+    const hiddenPatch = {
       projectKey: descriptor.key,
       projectId: descriptor.id,
       archived,
@@ -4459,7 +4464,44 @@ export class DiscordController {
       lastCompletedTurnId: existing?.lastCompletedTurnId ?? null,
       lastNotifiedCompletedTurnId: existing?.lastNotifiedCompletedTurnId ?? null,
       runtimeSettings: existing?.runtimeSettings ?? null,
-    });
+    };
+    const alreadyDetached = existing?.hidden
+      && !existing.channelId
+      && !existing.categoryId
+      && !existing.controlPanelMessageId
+      && !existing.lastCompletionMessageId
+      && existing.turnMessageCount === 0;
+    if (alreadyDetached) {
+      this.stateStore.hideBinding(thread.id, hiddenPatch);
+      return { deleted: 0, noticesDeleted: 0, projectKey: descriptor.key };
+    }
+    const waited = await this.#waitForTaskMirrorOperations(thread.id);
+    if (waited > 0) {
+      context.completionMessages = await context.completions.messages.fetch({ limit: 100 })
+        .catch(() => context.completionMessages);
+    }
+    const refreshed = stateBindingSummary(this.stateStore, thread.id) ?? existing;
+    let channel = refreshed?.channelId ? context.channels.get(refreshed.channelId) : null;
+    if (!channel && refreshed?.channelId) {
+      channel = await this.client.channels.fetch(refreshed.channelId).catch(() => null);
+    }
+    if (!channel) {
+      channel = context.channels.find((candidate) => candidate?.type === ChannelType.GuildText
+        && candidate.topic?.includes(`Codex task: ${thread.id}`));
+    }
+    const noticeCount = await this.#deleteCompletionNoticesForBinding(refreshed, context);
+    let deleted = 0;
+    if (channel) {
+      await channel.delete('Remove the Discord mirror for a hidden Codex project');
+      context.channels.delete(channel.id);
+      deleted = 1;
+    }
+    for (const subagent of this.stateStore.subagentThreads?.() ?? []) {
+      if (subagent.topLevelParentThreadId !== thread.id) continue;
+      this.stateStore.removeSubagentThread(subagent.threadId);
+    }
+    this.#clearHiddenTaskRuntime(thread.id);
+    this.stateStore.hideBinding(thread.id, hiddenPatch);
     return { deleted, noticesDeleted: noticeCount, projectKey: descriptor.key };
   }
 
@@ -4571,7 +4613,7 @@ export class DiscordController {
   }
 
   async #syncTaskChannel(thread, archived, context) {
-    const existingBinding = this.stateStore.binding(thread.id);
+    const existingBinding = stateBindingSummary(this.stateStore, thread.id);
     let channel = existingBinding?.channelId ? context.channels.get(existingBinding.channelId) : null;
     if (!channel && existingBinding?.channelId) {
       channel = await this.client.channels.fetch(existingBinding.channelId).catch(() => null);
@@ -4624,8 +4666,12 @@ export class DiscordController {
       subscribe: !archived && (!existingBinding || existingBinding.archived || existingBinding.hidden),
     });
     await this.#ensureTaskPanel(thread, channel, archived);
-    const recoveryBinding = this.stateStore.binding(thread.id) ?? existingBinding;
-    const incompleteTurnId = completionRecoveryCandidate(recoveryBinding);
+    const recoveryBinding = stateBindingSummary(this.stateStore, thread.id) ?? existingBinding;
+    const recoveryTurnMessages = stateTurnRecordSummaries(this.stateStore, thread.id);
+    const incompleteTurnId = completionRecoveryCandidate({
+      ...recoveryBinding,
+      turnMessages: recoveryTurnMessages,
+    });
     const completedDuringSyncId = recoveryBinding?.lastCompletedTurnId !== existingBinding?.lastCompletedTurnId
       ? recoveryBinding?.lastCompletedTurnId
       : null;
@@ -4673,7 +4719,7 @@ export class DiscordController {
     for (const binding of this.stateStore.subagentThreads()) addChildId(binding.threadId);
 
     for (const parent of parentThreads) {
-      const binding = this.stateStore.binding(parent.id);
+      const binding = stateBindingSummary(this.stateStore, parent.id);
       if (!binding) continue;
       const sourceUpdatedAt = parent.updatedAt ?? parent.recencyAt ?? null;
       if (binding.subagentScanVersion === 1
@@ -4985,7 +5031,7 @@ export class DiscordController {
       channels: await guild.channels.fetch(),
       desktopProjects: readDesktopProjectSnapshot(this.config.desktopGlobalStatePath),
     };
-    const archived = Boolean(this.stateStore.binding(thread.id)?.archived);
+    const archived = Boolean(stateBindingSummary(this.stateStore, thread.id)?.archived);
     const synced = await this.#syncTaskChannel(thread, archived, context);
     return synced.channel;
   }
@@ -4995,7 +5041,7 @@ export class DiscordController {
   } = {}) {
     const colliding = this.stateStore.bindingByChannel(channel.id);
     if (colliding && colliding.threadId !== thread.id) this.stateStore.removeBinding(colliding.threadId);
-    const existing = this.stateStore.binding(thread.id);
+    const existing = stateBindingSummary(this.stateStore, thread.id);
     this.stateStore.setBinding(thread.id, {
       channelId: channel.id,
       categoryId,

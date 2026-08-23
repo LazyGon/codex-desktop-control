@@ -150,6 +150,53 @@ export class StateStore {
     return null;
   }
 
+  bindingSummary(threadId) {
+    const binding = this.value.bindings[threadId];
+    if (!binding) return null;
+    return {
+      threadId,
+      channelId: binding.channelId ?? null,
+      categoryId: binding.categoryId ?? null,
+      projectKey: binding.projectKey ?? null,
+      projectId: binding.projectId ?? null,
+      cwd: binding.cwd ?? null,
+      sessionPath: binding.sessionPath ?? null,
+      name: binding.name ?? null,
+      taskStatus: binding.taskStatus ?? 'unknown',
+      archived: Boolean(binding.archived),
+      hidden: Boolean(binding.hidden),
+      watchLevel: binding.watchLevel ?? null,
+      completionReportsEnabled: binding.completionReportsEnabled !== false,
+      controlPanelMessageId: binding.controlPanelMessageId ?? null,
+      lastCompletionMessageId: binding.lastCompletionMessageId ?? null,
+      lastPanelCompletionTurnId: binding.lastPanelCompletionTurnId ?? null,
+      lastMirroredUserItemId: binding.lastMirroredUserItemId ?? null,
+      lastCompletedTurnId: binding.lastCompletedTurnId ?? null,
+      lastNotifiedCompletedTurnId: binding.lastNotifiedCompletedTurnId ?? null,
+      snapshotInitialized: Boolean(binding.snapshotInitialized),
+      transcriptVersion: binding.transcriptVersion ?? 0,
+      runtimeSettings: deepClone(binding.runtimeSettings ?? null),
+      subagentScanVersion: binding.subagentScanVersion ?? 0,
+      subagentScanUpdatedAt: binding.subagentScanUpdatedAt ?? null,
+      subagentThreadIds: Array.isArray(binding.subagentThreadIds)
+        ? [...binding.subagentThreadIds]
+        : null,
+      turnMessageCount: Object.keys(binding.turnMessages ?? {}).length,
+    };
+  }
+
+  turnRecordSummaries(threadId) {
+    const records = this.value.bindings[threadId]?.turnMessages
+      ?? this.value.subagentThreads[threadId]?.turnMessages
+      ?? {};
+    return Object.fromEntries(Object.entries(records).map(([turnId, record]) => [turnId, {
+      status: record?.status ?? null,
+      cardMessageId: record?.cardMessageId ?? null,
+      finalMessageIds: [...(record?.finalMessageIds ?? [])],
+      finalizedAt: record?.finalizedAt ?? null,
+    }]));
+  }
+
   bindingByChannel(channelId) {
     if (typeof channelId !== 'string' || !channelId) return null;
     const entry = Object.entries(this.value.bindings)

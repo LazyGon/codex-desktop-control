@@ -90,6 +90,14 @@ test('StateStore persists bindings atomically', () => {
       userMessageIds: ['message-user'],
     });
     assert.deepEqual(second.turnRecord('thread-1', 'turn-1').userMessageIds, ['message-user']);
+    assert.equal(second.bindingSummary('thread-1').turnMessageCount, 1);
+    assert.equal(Object.hasOwn(second.bindingSummary('thread-1'), 'turnMessages'), false);
+    assert.deepEqual(second.turnRecordSummaries('thread-1')['turn-1'], {
+      status: null,
+      cardMessageId: null,
+      finalMessageIds: [],
+      finalizedAt: null,
+    });
     second.setTurnRecord('thread-1', 'turn-1', {
       liveMessageId: null,
       finalMessageIds: ['message-final'],

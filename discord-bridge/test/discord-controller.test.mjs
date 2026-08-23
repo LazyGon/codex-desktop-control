@@ -1790,6 +1790,20 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   assert.equal(stateStore.binding('thread-hidden-archived').channelId, null);
   assert.equal(stateStore.binding('thread-hidden-archived').projectKey, hiddenProjectId);
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
+
+  const settledState = fs.readFileSync(stateStore.filePath, 'utf8');
+  const repeatInteraction = {
+    ...interaction,
+    deferred: false,
+    replied: false,
+    lastReply: null,
+  };
+  client.emit('interactionCreate', repeatInteraction);
+  for (let attempt = 0; attempt < 200 && !repeatInteraction.lastReply; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(repeatInteraction.lastReply, /Discord削除 0/);
+  assert.equal(fs.readFileSync(stateStore.filePath, 'utf8'), settledState);
 });
 
 test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the unpinned task panel exactly once', async (context) => {
