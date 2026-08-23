@@ -522,6 +522,44 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
   });
   controller.attach();
 
+  stateStore.setBinding('thread-1', { transcriptVersion: 11 });
+  stateStore.setTurnRecord('thread-1', 'turn-1', {
+    cardMessageId: 'message-2',
+    liveMessageId: 'message-2',
+    status: 'inProgress',
+  });
+  let releaseTranscriptTail;
+  controller.transcriptSyncTail = new Promise((resolve) => { releaseTranscriptTail = resolve; });
+  const restoredActiveThread = {
+    id: 'thread-1',
+    name: 'Compaction task',
+    cwd: 'C:\\work',
+    path: null,
+    status: { type: 'active' },
+    turns: [{ id: 'turn-1', status: 'inProgress', items: [] }],
+  };
+  codex.readThread = async () => ({ thread: restoredActiveThread });
+  codex.emit('subscriptionRestored', {
+    binding: stateStore.binding('thread-1'),
+    thread: restoredActiveThread,
+    runtime: {},
+    missedCompletion: null,
+  });
+  for (let attempt = 0; attempt < 100
+    && [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length > 1;
+    attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(
+    [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length,
+    1,
+  );
+  assert.equal(controller.subscriptionSyncPromises.size, 1);
+  releaseTranscriptTail();
+  for (let attempt = 0; attempt < 200 && controller.subscriptionSyncPromises.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
   const waitForNotifications = async () => {
     for (let attempt = 0; attempt < 100 && controller.notificationQueues.size; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));

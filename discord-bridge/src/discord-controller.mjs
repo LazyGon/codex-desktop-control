@@ -5437,6 +5437,7 @@ export class DiscordController {
   }
 
   async #ensureLiveTurnCard(binding, turn, view, channel, messages) {
+    if (!this.#isCurrentLiveTurnView(view)) return null;
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     const assistantEntryId = view.currentPhase === 'commentary' ? view.currentMessageId : null;
     const assistantEntryMessageId = assistantEntryId
@@ -5453,6 +5454,7 @@ export class DiscordController {
         && candidate.embeds.some((embed) => embed.title === 'Codex running')
         && (!view.currentMessageId || this.#embedAssistantMessageId(candidate) === view.currentMessageId));
     }
+    if (!this.#isCurrentLiveTurnView(view)) return null;
     const localFiles = extractLocalFileReferences(view.text);
     const components = contentCardComponents(localFiles.length);
     if (message) {
@@ -6721,13 +6723,19 @@ export class DiscordController {
     let message = null;
     const components = contentCardComponents(extractLocalFileReferences(view.text).length);
     if (!view.messageId) {
-      message = await channel.send({ embeds: [this.#turnEmbed(view)], components, allowedMentions: { parse: [] } });
+      const messages = await this.#fetchChannelHistory(channel, 100);
+      return this.#ensureLiveTurnCard(
+        binding,
+        { id: view.turnId, status: 'inProgress' },
+        view,
+        channel,
+        messages,
+      );
     } else {
       message = await channel.messages.fetch(view.messageId).catch(() => null);
       if (!message) {
         view.messageId = null;
-        await this.#renderTurn(binding, view);
-        return;
+        return this.#renderTurn(binding, view);
       }
       await message.edit({
         content: '',
@@ -6863,6 +6871,68 @@ export class DiscordController {
           .flatMap((entry) => entry.messageIds ?? []))],
         ...(deletedIds.has(record.cardMessageId) ? { cardMessageId: null } : {}),
         ...(deletedIds.has(record.liveMessageId) ? { liveMessageId: null } : {}),
+      });
+    }
+  }
+
+  async #reconcileRestoredLiveTurnCards(binding, thread, channel) {
+    if (this.stopping || !Array.isArray(thread.turns)) return;
+    const recentMessages = await channel.messages.fetch({ limit: 100 });
+    const messages = new Map(recentMessages);
+    const activeTurn = [...thread.turns].reverse().find((turn) => turn.status === 'inProgress') ?? null;
+    const activeRecord = activeTurn
+      ? this.stateStore.turnRecord(binding.threadId, activeTurn.id) ?? {}
+      : {};
+    const finalizedActiveSnapshot = Boolean(
+      activeRecord.finalizedAt
+      && activeRecord.status !== 'inProgress'
+      && activeRecord.finalMessageIds?.length,
+    );
+    const liveByTurn = new Map();
+    for (const message of messages.values()) {
+      if (message.author.id !== this.client.user.id
+        || this.#embedTaskId(message) !== binding.threadId
+        || !message.embeds.some((embed) => embed.title === 'Codex running')) continue;
+      const turnId = this.#embedTurnId(message);
+      if (!turnId) continue;
+      if (!liveByTurn.has(turnId)) liveByTurn.set(turnId, []);
+      liveByTurn.get(turnId).push(message);
+    }
+
+    let keepMessageId = null;
+    if (activeTurn && !finalizedActiveSnapshot) {
+      const activeCards = liveByTurn.get(activeTurn.id) ?? [];
+      keepMessageId = [activeRecord.liveMessageId, activeRecord.cardMessageId]
+        .find((messageId) => activeCards.some((message) => message.id === messageId))
+        ?? activeCards.reduce((latest, candidate) => {
+          if (!latest) return candidate;
+          const latestTimestamp = latest.createdTimestamp ?? 0;
+          const candidateTimestamp = candidate.createdTimestamp ?? 0;
+          return candidateTimestamp >= latestTimestamp ? candidate : latest;
+        }, null)?.id
+        ?? null;
+    }
+
+    let removed = 0;
+    for (const [turnId, liveCards] of liveByTurn) {
+      const keepForTurn = turnId === activeTurn?.id ? keepMessageId : null;
+      const before = liveCards.filter((message) => message.id !== keepForTurn).length;
+      await this.#deleteDuplicateLiveTurnCards(binding, turnId, messages, keepForTurn);
+      removed += before;
+    }
+    if (keepMessageId) {
+      this.stateStore.setTurnRecord(binding.threadId, activeTurn.id, {
+        cardMessageId: keepMessageId,
+        liveMessageId: keepMessageId,
+        status: 'inProgress',
+      });
+    }
+    if (removed > 0) {
+      this.#log('restored-live-card-reconciled', {
+        threadId: binding.threadId,
+        activeTurnId: activeTurn?.id ?? null,
+        keptMessageId: keepMessageId,
+        removed,
       });
     }
   }
@@ -7497,6 +7567,11 @@ export class DiscordController {
     const latestBinding = this.stateStore.binding(binding.threadId);
     const needsHistory = (latestBinding?.transcriptVersion ?? 0) < 11;
     const hasActiveTurn = (thread.turns ?? []).some((turn) => turn.status === 'inProgress');
+    // Full transcript restoration is globally serialized to protect Discord
+    // rate limits. Live-card convergence cannot wait behind that background
+    // queue, especially after a Bridge restart, so repair this task's bounded
+    // recent live-card set first.
+    await this.#reconcileRestoredLiveTurnCards(latestBinding ?? binding, thread, channel);
     if (needsHistory) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });
     } else if (hasActiveTurn) {
