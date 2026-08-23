@@ -430,7 +430,7 @@ test('Codex notification floods coalesce content deltas and yield to Discord wor
   assert.deepEqual(view.plan, [{ step: 'after deltas', status: 'in_progress' }]);
 });
 
-test('Codex notifications stay serial while an earlier Discord operation is pending', async (context) => {
+test('same-task Codex notifications stay serial while another task proceeds', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-notification-serial-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const stateStore = new StateStore(directory, 'guild-1');
@@ -441,15 +441,28 @@ test('Codex notifications stay serial while an earlier Discord operation is pend
     watchLevel: 'normal',
     archived: false,
   });
+  stateStore.setBinding('thread-2', {
+    channelId: 'channel-2',
+    name: 'Parallel notification test',
+    cwd: 'C:\\work',
+    watchLevel: 'normal',
+    archived: false,
+  });
 
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
   let markFetchStarted;
   let releaseFetch;
+  let markSecondFetchStarted;
   const fetchStarted = new Promise((resolve) => { markFetchStarted = resolve; });
   const fetchRelease = new Promise((resolve) => { releaseFetch = resolve; });
+  const secondFetchStarted = new Promise((resolve) => { markSecondFetchStarted = resolve; });
   client.channels = {
-    fetch: async () => {
+    fetch: async (channelId) => {
+      if (channelId === 'channel-2') {
+        markSecondFetchStarted();
+        throw new Error('parallel test release');
+      }
       markFetchStarted();
       await fetchRelease;
       throw new Error('test release');
@@ -478,6 +491,17 @@ test('Codex notifications stay serial while an earlier Discord operation is pend
     },
   });
   await fetchStarted;
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: {
+      threadId: 'thread-2',
+      turn: { id: 'turn-2', status: 'inProgress', startedAt: Date.now() },
+    },
+  });
+  assert.equal(await Promise.race([
+    secondFetchStarted.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+  ]), true);
   codex.emit('notification', {
     method: 'item/agentMessage/delta',
     params: {
@@ -2367,6 +2391,10 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
 
   const reactions = [];
   const replies = [];
+  let markPendingReactionStarted;
+  let releasePendingReaction;
+  const pendingReactionStarted = new Promise((resolve) => { markPendingReactionStarted = resolve; });
+  const pendingReactionRelease = new Promise((resolve) => { releasePendingReaction = resolve; });
   let originalDeleted = false;
   const originalMessage = {
     id: 'message-1',
@@ -2395,13 +2423,26 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
       }],
     ]),
     reactions: { resolve: () => null },
-    react: async (reaction) => { reactions.push(reaction); },
+    react: async (reaction) => {
+      reactions.push(reaction);
+      if (reaction === '⏳') {
+        markPendingReactionStarted();
+        await pendingReactionRelease;
+      }
+    },
     reply: async (options) => { replies.push(options); },
     delete: async () => { originalDeleted = true; channelMessages.delete('message-1'); },
   };
   channelMessages.set(originalMessage.id, originalMessage);
   client.emit('messageCreate', originalMessage);
 
+  await pendingReactionStarted;
+  const deliveredBeforeReaction = await Promise.race([
+    delivery.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+  ]);
+  releasePendingReaction();
+  assert.equal(deliveredBeforeReaction, true);
   await delivery;
   for (let attempt = 0; attempt < 50 && !reactions.includes('✅'); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));

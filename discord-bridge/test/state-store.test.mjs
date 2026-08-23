@@ -21,6 +21,15 @@ test('StateStore persists bindings atomically', () => {
       watchLevel: 'normal',
       controlPanelMessageId: 'task-panel',
     });
+    const unchangedBindingText = fs.readFileSync(first.filePath, 'utf8');
+    const unchangedBindingUpdatedAt = first.binding('thread-1').updatedAt;
+    first.setBinding('thread-1', {
+      channelId: 'channel-1',
+      watchLevel: 'normal',
+      controlPanelMessageId: 'task-panel',
+    });
+    assert.equal(first.binding('thread-1').updatedAt, unchangedBindingUpdatedAt);
+    assert.equal(fs.readFileSync(first.filePath, 'utf8'), unchangedBindingText);
 
     const second = new StateStore(directory, '123456789012345');
     assert.equal(second.binding('thread-1').channelId, 'channel-1');
@@ -33,6 +42,20 @@ test('StateStore persists bindings atomically', () => {
     assert.equal(second.snapshot().infrastructure.transferTextChannelId, 'transfer-text');
     assert.equal(second.binding('thread-1').controlPanelMessageId, 'task-panel');
     assert.equal(second.binding('thread-1').completionReportsEnabled, true);
+    assert.deepEqual(second.bindingStats(), { total: 1, active: 1, archived: 0 });
+    assert.deepEqual(second.bindingSummaries(), [{
+      threadId: 'thread-1',
+      channelId: 'channel-1',
+      categoryId: null,
+      projectKey: null,
+      projectId: null,
+      cwd: null,
+      name: null,
+      taskStatus: 'unknown',
+      archived: false,
+      hidden: false,
+      completionReportsEnabled: true,
+    }]);
     second.setChatgptConversation('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
       channelId: 'chat-channel-1',
       name: 'Explicit chat',

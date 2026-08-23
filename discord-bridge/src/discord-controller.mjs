@@ -144,12 +144,44 @@ function messageOptions(content, extra = {}) {
   return { content, allowedMentions: { parse: [] }, ...extra };
 }
 
+function stateInfrastructure(stateStore) {
+  if (typeof stateStore.infrastructure === 'function') return stateStore.infrastructure();
+  return stateStore.snapshot?.().infrastructure ?? {};
+}
+
+function stateBindingSummaries(stateStore, options = {}) {
+  if (typeof stateStore.bindingSummaries === 'function') return stateStore.bindingSummaries(options);
+  if (typeof stateStore.bindings === 'function') return stateStore.bindings(options);
+  const snapshot = stateStore.snapshot?.() ?? {};
+  const includeHidden = options.includeHidden === true;
+  return Object.entries(snapshot.bindings ?? {})
+    .filter(([, binding]) => includeHidden
+      || (!binding.hidden && !snapshot.hiddenProjects?.[binding.projectKey]))
+    .map(([threadId, binding]) => ({ threadId, ...binding }));
+}
+
+function stateBindingStats(stateStore) {
+  if (typeof stateStore.bindingStats === 'function') return stateStore.bindingStats();
+  const bindings = stateBindingSummaries(stateStore);
+  return {
+    total: bindings.length,
+    active: bindings.filter((binding) => !binding.archived).length,
+    archived: bindings.filter((binding) => binding.archived).length,
+  };
+}
+
+function stateProjectCategory(stateStore, projectKey) {
+  if (!projectKey) return null;
+  if (typeof stateStore.projectCategory === 'function') return stateStore.projectCategory(projectKey);
+  return stateStore.snapshot?.().projectCategories?.[projectKey] ?? null;
+}
+
 function channelMention(channelId) {
   return `<#${channelId}>`;
 }
 
 export async function postTaskSyncSummary(client, stateStore, result) {
-  const channelId = stateStore.snapshot().infrastructure.syncChannelId;
+  const channelId = stateInfrastructure(stateStore).syncChannelId;
   const channel = channelId ? await client.channels.fetch(channelId).catch(() => null) : null;
   if (!channel) return false;
   const links = result.channels.slice(0, 10).map(channelMention).join(' ');
@@ -616,12 +648,12 @@ export class DiscordController {
   async #ensureInfrastructure() {
     const guild = await this.client.guilds.fetch(this.config.guildId);
     const channels = await guild.channels.fetch();
-    const state = this.stateStore.snapshot();
+    const infrastructure = stateInfrastructure(this.stateStore);
     this.canPinControlPanels = guild.members.me?.permissions.has(PermissionFlagsBits.PinMessages) ?? false;
-    const completionNotificationsAlreadyConfigured = Boolean(state.infrastructure.completionsChannelId);
+    const completionNotificationsAlreadyConfigured = Boolean(infrastructure.completionsChannelId);
 
-    let controlCategory = state.infrastructure.controlCategoryId
-      ? channels.get(state.infrastructure.controlCategoryId)
+    let controlCategory = infrastructure.controlCategoryId
+      ? channels.get(infrastructure.controlCategoryId)
       : null;
     if (!controlCategory || controlCategory.type !== ChannelType.GuildCategory) {
       controlCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
@@ -640,7 +672,7 @@ export class DiscordController {
     }
     if (controlCategoryCreated) await this.#configurePrivateCategory(controlCategory, guild);
 
-    const archiveCategories = (state.infrastructure.archiveCategoryIds ?? [])
+    const archiveCategories = (infrastructure.archiveCategoryIds ?? [])
       .map((categoryId) => channels.get(categoryId))
       .filter((channel) => channel?.type === ChannelType.GuildCategory);
     if (archiveCategories.length === 0) {
@@ -659,8 +691,8 @@ export class DiscordController {
 
     let transferCategory = null;
     if (this.config.textTransferEnabled) {
-      transferCategory = state.infrastructure.transferCategoryId
-        ? channels.get(state.infrastructure.transferCategoryId)
+      transferCategory = infrastructure.transferCategoryId
+        ? channels.get(infrastructure.transferCategoryId)
         : null;
       if (!transferCategory || transferCategory.type !== ChannelType.GuildCategory) {
         transferCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
@@ -709,28 +741,28 @@ export class DiscordController {
     };
 
     const control = await ensureTextChannel(
-      state.infrastructure.controlChannelId,
+      infrastructure.controlChannelId,
       this.config.controlChannelName,
       'Codex Remote control and task discovery',
     );
     const sync = await ensureTextChannel(
-      state.infrastructure.syncChannelId,
+      infrastructure.syncChannelId,
       this.config.syncChannelName,
       'Codex automatic task synchronization activity',
     );
     const alerts = await ensureTextChannel(
-      state.infrastructure.alertsChannelId,
+      infrastructure.alertsChannelId,
       this.config.alertsChannelName,
       'Codex Remote connection and error notifications',
     );
     const completions = await ensureTextChannel(
-      state.infrastructure.completionsChannelId,
+      infrastructure.completionsChannelId,
       this.config.completionsChannelName,
       'Codex task completion notifications and links',
     );
     const transferText = transferCategory
       ? await ensureTextChannel(
-        state.infrastructure.transferTextChannelId,
+        infrastructure.transferTextChannelId,
         this.config.transferTextChannelName,
         'Stores the latest authorized user or webhook message locally, then deletes the Discord source',
         transferCategory,
@@ -981,7 +1013,7 @@ export class DiscordController {
     const attachments = [...message.attachments.values()];
     if (!content && attachments.length === 0) return;
 
-    await message.react('⏳').catch(() => {});
+    const pendingReactionRequest = message.react('⏳').catch(() => {});
     const prompt = content || ATTACHMENT_ONLY_PROMPT;
     let reservation = null;
     try {
@@ -1027,6 +1059,7 @@ export class DiscordController {
       await message.reply(messageOptions(`Codexへの指示送信に失敗しました: ${truncate(error.message, 1700)}`)).catch(() => {});
       throw error;
     } finally {
+      await pendingReactionRequest;
       const pendingReaction = message.reactions.resolve('⏳');
       await pendingReaction?.users.remove(this.client.user.id).catch(() => {});
     }
@@ -1123,10 +1156,13 @@ export class DiscordController {
       if (internalTarget === newChannel.parentId) return;
     }
 
-    const state = this.stateStore.snapshot();
-    const archiveCategoryIds = new Set(state.infrastructure.archiveCategoryIds ?? []);
+    const infrastructure = stateInfrastructure(this.stateStore);
+    const archiveCategoryIds = new Set(infrastructure.archiveCategoryIds ?? []);
+    const projectCategory = binding.projectKey
+      ? stateProjectCategory(this.stateStore, binding.projectKey)
+      : null;
     const projectCategoryIds = new Set(
-      binding.projectKey ? state.projectCategories?.[binding.projectKey]?.categoryIds ?? [] : [],
+      projectCategory?.categoryIds ?? [],
     );
 
     if (archiveCategoryIds.has(newChannel.parentId)) {
@@ -1367,7 +1403,7 @@ export class DiscordController {
   async #statusEmbed() {
     const health = await this.codex.health();
     const codex = this.codex.status();
-    const bindings = this.stateStore.bindings();
+    const bindings = stateBindingStats(this.stateStore);
     const projects = this.#projectVisibilityProjects();
     return new EmbedBuilder()
       .setTitle('Codex Remote status')
@@ -1377,8 +1413,8 @@ export class DiscordController {
         { name: 'app-server', value: codex.connected ? 'connected' : 'offline/retrying', inline: true },
         { name: 'readyz', value: `${health.ready} (${health.status})`, inline: true },
         { name: 'Endpoint', value: `\`${health.endpoint}\`\nsource: ${health.source}` },
-        { name: 'Active tasks', value: String(bindings.filter((binding) => !binding.archived).length), inline: true },
-        { name: 'Archived tasks', value: String(bindings.filter((binding) => binding.archived).length), inline: true },
+        { name: 'Active tasks', value: String(bindings.active), inline: true },
+        { name: 'Archived tasks', value: String(bindings.archived), inline: true },
         { name: 'Visible projects', value: String(projects.filter((project) => !project.hidden).length), inline: true },
         { name: 'Hidden projects', value: String(projects.filter((project) => project.hidden).length), inline: true },
         { name: 'Pending requests', value: String(this.#visiblePendingRequestCount()), inline: true },
@@ -1419,9 +1455,7 @@ export class DiscordController {
   }
 
   #projectVisibilityProjects() {
-    const bindings = typeof this.stateStore.bindings === 'function'
-      ? this.stateStore.bindings({ includeHidden: true })
-      : [];
+    const bindings = stateBindingSummaries(this.stateStore, { includeHidden: true });
     return projectVisibilityCatalog({
       projectCategories: this.stateStore.projectCategories?.() ?? [],
       hiddenProjects: this.#hiddenProjects(),
@@ -1525,7 +1559,7 @@ export class DiscordController {
   }
 
   #assertControlPanelInteraction(interaction) {
-    const controlChannelId = this.stateStore.snapshot().infrastructure.controlChannelId;
+    const controlChannelId = stateInfrastructure(this.stateStore).controlChannelId;
     if (interaction.channelId !== controlChannelId) throw new Error('この操作はCodex制御チャンネルでのみ利用できます。');
   }
 
@@ -1665,7 +1699,7 @@ export class DiscordController {
       const cwd = this.stateStore.binding(threadId)?.cwd;
       return cwd ? [cwd] : [];
     }
-    return [...new Set(this.stateStore.bindings().map((binding) => binding.cwd).filter(Boolean))];
+    return [...new Set(stateBindingSummaries(this.stateStore).map((binding) => binding.cwd).filter(Boolean))];
   }
 
   async #resourceResponse(kind, threadId = null) {
@@ -3687,6 +3721,7 @@ export class DiscordController {
   }
 
   async #performTaskSync() {
+    const startedAt = Date.now();
     if (this.pendingChannelBindings.size > 0) {
       await Promise.allSettled([...this.pendingChannelBindings.values()]);
     }
@@ -3829,6 +3864,7 @@ export class DiscordController {
     context.channels = await guild.channels.fetch();
     result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
     await this.#ensureControlPanel();
+    result.elapsedMs = Date.now() - startedAt;
     this.#log('task-sync', result);
     return result;
   }
@@ -3912,7 +3948,7 @@ export class DiscordController {
       }
     }
 
-    const channelId = this.stateStore.snapshot().infrastructure.controlChannelId;
+    const channelId = stateInfrastructure(this.stateStore).controlChannelId;
     const control = channelId ? await this.client.channels.fetch(channelId).catch(() => null) : null;
     if (control) {
       await control.send(messageOptions([
@@ -3965,7 +4001,8 @@ export class DiscordController {
   }) {
     const previous = this.panelSyncPromises.get(key) ?? Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
-      let message = storedId ? await channel.messages.fetch(storedId).catch(() => null) : null;
+      let message = storedId ? channel.messages.cache?.get?.(storedId) ?? null : null;
+      if (!message && storedId) message = await channel.messages.fetch(storedId).catch(() => null);
       if (message && this.#panelMarker(message) !== marker) message = null;
       if (!message && typeof channel.messages.fetchPinned === 'function') {
         const pinned = await channel.messages.fetchPinned().catch(() => null);
@@ -4037,10 +4074,10 @@ export class DiscordController {
 
   async #ensureControlPanel() {
     const infrastructure = await this.infrastructureReady;
-    const state = this.stateStore.snapshot();
+    const storedInfrastructure = stateInfrastructure(this.stateStore);
     const projects = this.#projectVisibilityProjects();
     const payload = controlPanelPayload({
-      bindings: this.stateStore.bindings(),
+      bindings: stateBindingSummaries(this.stateStore),
       connected: this.codex.connected,
       pendingCount: this.#visiblePendingRequestCount(),
       projectCount: projects.filter((project) => !project.hidden).length,
@@ -4049,7 +4086,7 @@ export class DiscordController {
     return this.#ensurePanelMessage({
       key: 'control',
       channel: infrastructure.control,
-      storedId: state.infrastructure.controlPanelMessageId,
+      storedId: storedInfrastructure.controlPanelMessageId,
       marker: CONTROL_PANEL_MARKER,
       payload,
       persist: (messageId) => this.stateStore.setInfrastructure({ controlPanelMessageId: messageId }),
@@ -4248,7 +4285,7 @@ export class DiscordController {
   }
 
   async #archiveCategories(context) {
-    const infrastructure = this.stateStore.snapshot().infrastructure;
+    const infrastructure = stateInfrastructure(this.stateStore);
     const categories = (infrastructure.archiveCategoryIds ?? [])
       .map((categoryId) => context.channels.get(categoryId))
       .filter((channel) => channel?.type === ChannelType.GuildCategory);
@@ -8083,7 +8120,7 @@ export class DiscordController {
     if (state === 'disconnected') this.#clearPendingClientToolRequests('app-server-disconnected');
     if (this.client.user) {
       this.client.user.setPresence({
-        activities: [{ name: state === 'connected' ? `${this.stateStore.bindings().length} Codex task(s)` : 'app-server reconnecting' }],
+        activities: [{ name: state === 'connected' ? `${stateBindingStats(this.stateStore).total} Codex task(s)` : 'app-server reconnecting' }],
         status: state === 'connected' ? 'online' : 'idle',
       });
     }
@@ -8356,7 +8393,7 @@ export class DiscordController {
 
   async #postAlert(content, kind = 'normal') {
     await this.infrastructureReady?.catch(() => {});
-    const channelId = this.stateStore.snapshot().infrastructure.alertsChannelId;
+    const channelId = stateInfrastructure(this.stateStore).alertsChannelId;
     if (!channelId) return;
     const channel = await this.client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;

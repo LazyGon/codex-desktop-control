@@ -78,15 +78,24 @@ export class CodexService extends EventEmitter {
   }
 
   status() {
-    const bindings = this.stateStore.bindings();
+    const bindings = typeof this.stateStore.bindingStats === 'function'
+      ? this.stateStore.bindingStats()
+      : (() => {
+        const records = this.stateStore.bindings();
+        return {
+          total: records.length,
+          active: records.filter((binding) => !binding.archived).length,
+          archived: records.filter((binding) => binding.archived).length,
+        };
+      })();
     return {
       connected: this.connected,
       endpoint: this.endpoint,
       connectedAt: this.connectedAt,
       reconnectAttempt: this.connectionAttempt,
-      bindings: bindings.length,
-      activeBindings: bindings.filter((binding) => !binding.archived).length,
-      archivedBindings: bindings.filter((binding) => binding.archived).length,
+      bindings: bindings.total,
+      activeBindings: bindings.active,
+      archivedBindings: bindings.archived,
       projectCategories: this.stateStore.projectCategories().length,
     };
   }

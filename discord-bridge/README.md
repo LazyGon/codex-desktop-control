@@ -168,6 +168,10 @@ outbound connection to Discord.
   or producing delayed reports after reconnect.
 - Reconciles active and archived task lists every 30 seconds, after reconnect,
   and immediately after task lifecycle notifications.
+- Preserves notification order within one task while allowing different tasks
+  to progress independently. Periodic reconciliation skips unchanged durable
+  state writes and reuses cached control panels, and Discord input delivery does
+  not wait for its decorative progress reaction.
 - Treats ordinary messages from allowed users in bound task channels as Codex
   `deliver` input. The same input in an unbound channel under a managed project
   category first creates and binds a new task. After app-server accepts the

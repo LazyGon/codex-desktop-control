@@ -178,8 +178,8 @@ export class ChatgptController {
   async #ensureInfrastructure() {
     const guild = await this.client.guilds.fetch(this.config.guildId);
     const channels = await guild.channels.fetch();
-    const state = this.stateStore.snapshot();
-    const controlCategory = channels.get(state.infrastructure.controlCategoryId);
+    const infrastructure = this.stateStore.infrastructure();
+    const controlCategory = channels.get(infrastructure.controlCategoryId);
     if (!controlCategory || controlCategory.type !== ChannelType.GuildCategory) {
       throw new Error('Codex Controlカテゴリが未初期化です。');
     }
@@ -195,8 +195,8 @@ export class ChatgptController {
       throw new Error('Codex Controlカテゴリの非公開権限をChatGPTカテゴリへ複製できません。');
     }
 
-    let category = state.infrastructure.chatgptCategoryId
-      ? channels.get(state.infrastructure.chatgptCategoryId)
+    let category = infrastructure.chatgptCategoryId
+      ? channels.get(infrastructure.chatgptCategoryId)
       : null;
     if (!category || category.type !== ChannelType.GuildCategory) {
       category = channels.find((candidate) => candidate?.type === ChannelType.GuildCategory
@@ -220,8 +220,8 @@ export class ChatgptController {
       await category.setName(this.config.chatgptCategoryName, 'Refresh ChatGPT Remote category name');
     }
 
-    let control = state.infrastructure.chatgptControlChannelId
-      ? channels.get(state.infrastructure.chatgptControlChannelId)
+    let control = infrastructure.chatgptControlChannelId
+      ? channels.get(infrastructure.chatgptControlChannelId)
       : null;
     if (!control || control.type !== ChannelType.GuildText) {
       control = channels.find((candidate) => candidate?.type === ChannelType.GuildText
@@ -606,10 +606,13 @@ export class ChatgptController {
       ready: this.readyState,
       activeCount: this.service.activeCount,
     });
-    const storedId = this.stateStore.snapshot().infrastructure.chatgptControlPanelMessageId;
+    const storedId = this.stateStore.infrastructure().chatgptControlPanelMessageId;
     let message = storedId
-      ? await this.infrastructure.control.messages.fetch(storedId).catch(() => null)
+      ? this.infrastructure.control.messages.cache?.get?.(storedId) ?? null
       : null;
+    if (!message && storedId) {
+      message = await this.infrastructure.control.messages.fetch(storedId).catch(() => null);
+    }
     if (message && interactionMarker(message) !== CHATGPT_CONTROL_PANEL_MARKER) message = null;
     if (!message) {
       const recent = await this.infrastructure.control.messages.fetch({ limit: 100 }).catch(() => null);

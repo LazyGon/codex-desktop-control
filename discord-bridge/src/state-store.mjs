@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import {
   atomicWriteJson,
   deepClone,
@@ -31,6 +32,11 @@ function initialState(guildId) {
     chatgptConversations: {},
     lastReadyAt: null,
   };
+}
+
+function patchChanges(current, patch) {
+  if (!current) return true;
+  return Object.entries(patch).some(([key, value]) => !isDeepStrictEqual(current[key], value));
 }
 
 export class StateStore {
@@ -128,7 +134,10 @@ export class StateStore {
   update(mutator) {
     mutator(this.value);
     this.#write();
-    return this.snapshot();
+  }
+
+  infrastructure() {
+    return deepClone(this.value.infrastructure);
   }
 
   binding(threadId) {
@@ -155,6 +164,38 @@ export class StateStore {
       .map(([threadId, binding]) => ({ threadId, ...deepClone(binding) }));
   }
 
+  bindingSummaries({ includeHidden = false } = {}) {
+    return Object.entries(this.value.bindings)
+      .filter(([, binding]) => includeHidden
+        || (!binding.hidden && !this.value.hiddenProjects[binding.projectKey]))
+      .map(([threadId, binding]) => ({
+        threadId,
+        channelId: binding.channelId ?? null,
+        categoryId: binding.categoryId ?? null,
+        projectKey: binding.projectKey ?? null,
+        projectId: binding.projectId ?? null,
+        cwd: binding.cwd ?? null,
+        name: binding.name ?? null,
+        taskStatus: binding.taskStatus ?? 'unknown',
+        archived: Boolean(binding.archived),
+        hidden: Boolean(binding.hidden),
+        completionReportsEnabled: binding.completionReportsEnabled !== false,
+      }));
+  }
+
+  bindingStats({ includeHidden = false } = {}) {
+    let total = 0;
+    let active = 0;
+    let archived = 0;
+    for (const binding of Object.values(this.value.bindings)) {
+      if (!includeHidden && (binding.hidden || this.value.hiddenProjects[binding.projectKey])) continue;
+      total += 1;
+      if (binding.archived) archived += 1;
+      else active += 1;
+    }
+    return { total, active, archived };
+  }
+
   subagentThread(threadId) {
     const value = this.value.subagentThreads[threadId];
     return value ? { ...deepClone(value), threadId, isSubagent: true } : null;
@@ -175,6 +216,7 @@ export class StateStore {
     if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
       throw new Error('A valid threadId is required for a Discord subagent thread.');
     }
+    if (!patchChanges(this.value.subagentThreads[threadId], patch)) return;
     return this.update((state) => {
       state.subagentThreads[threadId] = {
         ...state.subagentThreads[threadId],
@@ -217,6 +259,7 @@ export class StateStore {
         ? 'subagentThreads'
         : null;
     if (!collection) throw new Error(`Unknown thread binding: ${threadId}`);
+    if (!patchChanges(this.value[collection][threadId].turnMessages?.[turnId], patch)) return;
     return this.update((state) => {
       state[collection][threadId].turnMessages ??= {};
       state[collection][threadId].turnMessages[turnId] = {
@@ -331,6 +374,7 @@ export class StateStore {
   }
 
   setProjectCategory(projectKey, value) {
+    if (!patchChanges(this.value.projectCategories[projectKey], value)) return;
     return this.update((state) => {
       state.projectCategories[projectKey] = {
         ...state.projectCategories[projectKey],
@@ -410,6 +454,7 @@ export class StateStore {
     if (this.value.subagentThreads[threadId] && !this.value.bindings[threadId]) {
       return this.setSubagentThread(threadId, binding);
     }
+    if (!patchChanges(this.value.bindings[threadId], binding)) return;
     return this.update((state) => {
       state.bindings[threadId] = { ...state.bindings[threadId], ...binding, updatedAt: new Date().toISOString() };
     });
@@ -422,6 +467,7 @@ export class StateStore {
   }
 
   setInfrastructure(infrastructure) {
+    if (!patchChanges(this.value.infrastructure, infrastructure)) return;
     return this.update((state) => {
       state.infrastructure = { ...state.infrastructure, ...infrastructure };
     });

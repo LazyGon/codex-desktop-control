@@ -219,6 +219,10 @@ remain immediately available through the Bridge.
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
 notifications. `/codex sync` forces the same reconciliation immediately.
+Notification/card mutations remain ordered within each task, but different
+tasks are independent. The periodic scan avoids rewriting unchanged bindings
+or project descriptors and reuses cached panel messages so background
+reconciliation does not delay commands or input delivery.
 The bridge uses Desktop's actual local-project ID and name as the Discord
 project-category identity. `thread-project-assignments.projectId` takes
 precedence; unassigned tasks resolve from the most specific saved local-project
