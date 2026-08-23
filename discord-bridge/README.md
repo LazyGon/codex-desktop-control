@@ -171,7 +171,9 @@ outbound connection to Discord.
 - Preserves notification order within one task while allowing different tasks
   to progress independently. Periodic reconciliation skips unchanged durable
   state writes and reuses cached control panels, and Discord input delivery does
-  not wait for its decorative progress reaction.
+  not wait for its decorative progress reaction. Creating a task from an
+  unbound project channel waits only for the in-flight task-list snapshot, not
+  for later Discord or subagent reconciliation.
 - Treats ordinary messages from allowed users in bound task channels as Codex
   `deliver` input. The same input in an unbound channel under a managed project
   category first creates and binds a new task. After app-server accepts the

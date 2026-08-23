@@ -488,6 +488,7 @@ export class DiscordController {
     this.taskSyncTimer = null;
     this.taskSyncInitialTimer = null;
     this.taskSyncPromise = null;
+    this.taskListBarrier = null;
     this.taskSyncDebounceTimer = null;
     this.transcriptSyncPromises = new Map();
     this.transcriptSyncTail = Promise.resolve();
@@ -923,8 +924,9 @@ export class DiscordController {
     const existing = this.stateStore.bindingByChannel(channel.id);
     if (existing) return existing;
 
-    // A sync that already listed tasks must finish before the new task exists.
-    if (this.taskSyncPromise) await this.taskSyncPromise;
+    // Wait only until an in-flight sync has frozen its task list. The remaining
+    // Discord and subagent reconciliation cannot race creation of this new task.
+    if (this.taskListBarrier) await this.taskListBarrier.promise;
 
     const cwd = project.path === '(no project)' ? null : project.path;
     const started = await this.codex.startThread(cwd);
@@ -3741,14 +3743,26 @@ export class DiscordController {
       phaseMs[name] = now - phaseStartedAt;
       phaseStartedAt = now;
     };
-    if (this.pendingChannelBindings.size > 0) {
-      await Promise.allSettled([...this.pendingChannelBindings.values()]);
+    let releaseTaskList;
+    const listBarrier = {
+      promise: new Promise((resolve) => { releaseTaskList = resolve; }),
+    };
+    this.taskListBarrier = listBarrier;
+    let activeThreads;
+    let archivedThreads;
+    try {
+      if (this.pendingChannelBindings.size > 0) {
+        await Promise.allSettled([...this.pendingChannelBindings.values()]);
+      }
+      markPhase('pendingBindings');
+      [activeThreads, archivedThreads] = await Promise.all([
+        this.codex.listAllThreads({ archived: false }),
+        this.codex.listAllThreads({ archived: true }),
+      ]);
+    } finally {
+      releaseTaskList();
+      if (this.taskListBarrier === listBarrier) this.taskListBarrier = null;
     }
-    markPhase('pendingBindings');
-    const [activeThreads, archivedThreads] = await Promise.all([
-      this.codex.listAllThreads({ archived: false }),
-      this.codex.listAllThreads({ archived: true }),
-    ]);
     markPhase('listThreads');
     const syncableActive = activeThreads.filter((thread) => this.#isSyncableThread(thread));
     const syncableArchived = archivedThreads.filter((thread) => this.#isSyncableThread(thread));

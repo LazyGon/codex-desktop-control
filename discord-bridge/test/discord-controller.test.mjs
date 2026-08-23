@@ -3126,6 +3126,12 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   });
   controller.attach();
 
+  let releaseTaskListing;
+  controller.taskSyncPromise = new Promise(() => {});
+  controller.taskListBarrier = {
+    promise: new Promise((resolve) => { releaseTaskListing = resolve; }),
+  };
+
   const makeMessage = (id, content) => {
     const reactions = [];
     const message = {
@@ -3150,6 +3156,11 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   client.emit('messageCreate', first.message);
   client.emit('messageCreate', second.message);
 
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(started.length, 0);
+  releaseTaskListing();
+  controller.taskListBarrier = null;
+
   for (let attempt = 0; attempt < 300 && !second.reactions.includes('✅'); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -3169,6 +3180,7 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   assert.equal(channelMessages.has('user-message-1'), false);
   assert.equal(channelMessages.has('user-message-2'), false);
   assert.equal(sent.filter((message) => message.embeds[0]?.title === 'User message').length, 2);
+  controller.taskSyncPromise = null;
 });
 
 test('renaming a bound task channel renames the Codex task', async (context) => {

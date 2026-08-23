@@ -223,6 +223,9 @@ Notification/card mutations remain ordered within each task, but different
 tasks are independent. The periodic scan avoids rewriting unchanged bindings
 or project descriptors and reuses cached panel messages so background
 reconciliation does not delay commands or input delivery.
+Task creation from an unbound managed-project channel waits only until an
+in-flight task-list read has completed; the longer channel, history, and
+subagent reconciliation phases do not block the new instruction.
 The bridge uses Desktop's actual local-project ID and name as the Discord
 project-category identity. `thread-project-assignments.projectId` takes
 precedence; unassigned tasks resolve from the most specific saved local-project
