@@ -718,6 +718,85 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     ['Codex message', 'Codex turn completed'],
   );
 
+  codex.emit('notification', {
+    method: 'turn/started',
+    params: {
+      threadId: 'thread-1',
+      turn: { id: 'turn-3', status: 'inProgress', startedAt: Date.now() },
+    },
+  });
+  await waitForNotifications();
+  for (const [itemId, delta] of [
+    ['stream-a', 'First delta-only commentary.'],
+    ['stream-b', 'Second delta-only commentary.'],
+  ]) {
+    codex.emit('notification', {
+      method: 'item/agentMessage/delta',
+      params: { threadId: 'thread-1', turnId: 'turn-3', itemId, delta },
+    });
+    await waitForNotifications();
+  }
+  const contaminated = makeMessage({
+    embeds: [{
+      title: 'Codex message',
+      fields: [
+        { name: 'Task', value: '`thread-1`' },
+        { name: 'Turn', value: '`turn-3`' },
+        { name: 'Message', value: '`stream-contaminated`' },
+      ],
+      description: 'First delta-only commentary.Second delta-only commentary.',
+    }],
+  });
+  const contaminatedRecord = stateStore.turnRecord('thread-1', 'turn-3');
+  stateStore.setTurnRecord('thread-1', 'turn-3', {
+    assistantEntries: {
+      ...contaminatedRecord.assistantEntries,
+      'stream-contaminated': {
+        text: 'First delta-only commentary.Second delta-only commentary.',
+        phase: 'commentary',
+        messageIds: [contaminated.id],
+      },
+    },
+    assistantMessageIds: [...new Set([
+      ...(contaminatedRecord.assistantMessageIds ?? []),
+      contaminated.id,
+    ])],
+  });
+  const stableTurnThree = {
+    id: 'turn-3',
+    status: 'completed',
+    items: [
+      { type: 'agentMessage', id: 'item-a', phase: 'commentary', text: 'First delta-only commentary.' },
+      { type: 'agentMessage', id: 'item-b', phase: 'commentary', text: 'Second delta-only commentary.' },
+      { type: 'agentMessage', id: 'final-3', phase: 'final_answer', text: 'Third finish.' },
+    ],
+  };
+  codex.emit('notification', {
+    method: 'turn/completed',
+    params: { threadId: 'thread-1', turn: stableTurnThree },
+  });
+  for (let attempt = 0; attempt < 200
+    && stateStore.binding('thread-1').lastCompletedTurnId !== 'turn-3'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const orderedTurnThreeCards = [...messages.values()]
+    .filter((message) => message.embeds[0]?.fields?.some(
+      (field) => field.name === 'Turn' && field.value === '`turn-3`',
+    ));
+  assert.deepEqual(
+    orderedTurnThreeCards.map((message) => message.embeds[0].title),
+    ['Codex message', 'Codex message', 'Codex turn completed'],
+  );
+  assert.deepEqual(
+    orderedTurnThreeCards.slice(0, 2).map((message) => message.embeds[0].fields
+      .find((field) => field.name === 'Message').value),
+    ['`item-a`', '`item-b`'],
+  );
+  assert.deepEqual(
+    Object.keys(stateStore.turnRecord('thread-1', 'turn-3').assistantEntries).sort(),
+    ['item-a', 'item-b'],
+  );
+
   const staleActiveThread = {
     id: 'thread-1',
     name: 'Compaction task',
@@ -739,6 +818,55 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
   assert.equal(
     [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length,
     0,
+  );
+
+  const startupContaminated = makeMessage({
+    embeds: [{
+      title: 'Codex message',
+      fields: [
+        { name: 'Task', value: '`thread-1`' },
+        { name: 'Turn', value: '`turn-3`' },
+        { name: 'Message', value: '`stream-after-restart`' },
+      ],
+      description: 'Superseded after restart.',
+    }],
+  });
+  const beforeStartupRepair = stateStore.turnRecord('thread-1', 'turn-3');
+  stateStore.setTurnRecord('thread-1', 'turn-3', {
+    assistantEntries: {
+      ...beforeStartupRepair.assistantEntries,
+      'stream-after-restart': {
+        text: 'Superseded after restart.',
+        phase: 'commentary',
+        messageIds: [startupContaminated.id],
+      },
+    },
+    assistantMessageIds: [...new Set([
+      ...(beforeStartupRepair.assistantMessageIds ?? []),
+      startupContaminated.id,
+    ])],
+  });
+  const idleThread = {
+    id: 'thread-1',
+    name: 'Compaction task',
+    cwd: 'C:\\work',
+    path: null,
+    status: { type: 'idle' },
+    turns: [stableTurnThree],
+  };
+  codex.emit('subscriptionRestored', {
+    binding: stateStore.binding('thread-1'),
+    thread: idleThread,
+    runtime: {},
+    missedCompletion: null,
+  });
+  for (let attempt = 0; attempt < 200 && controller.subscriptionSyncPromises.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(messages.has(startupContaminated.id), false);
+  assert.equal(
+    stateStore.turnRecord('thread-1', 'turn-3').assistantEntries['stream-after-restart'],
+    undefined,
   );
   await controller.stop();
 });

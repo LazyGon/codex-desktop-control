@@ -5180,6 +5180,64 @@ export class DiscordController {
       );
       usedMessageIds.add(message.id);
     }
+    await this.#pruneSupersededAssistantEntries(binding, turn, channel, messages);
+  }
+
+  async #pruneSupersededAssistantEntries(
+    binding,
+    turn,
+    channel,
+    messages,
+    { requireStableCoverage = false } = {},
+  ) {
+    if (turn.status === 'inProgress') return 0;
+    const stableItems = (turn.items ?? [])
+      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text);
+    if (stableItems.length === 0) return 0;
+    const stableIds = new Set(stableItems.map((item) => item.id));
+    const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
+    const assistantEntries = { ...(record.assistantEntries ?? {}) };
+    if (requireStableCoverage && stableItems.some((item) => !(assistantEntries[item.id]?.messageIds ?? [])
+      .some((messageId) => messages.has(messageId)))) return 0;
+
+    const supersededEntryIds = Object.keys(assistantEntries)
+      .filter((entryId) => !stableIds.has(entryId));
+    if (supersededEntryIds.length === 0) return 0;
+    const stableMessageIds = new Set(stableItems
+      .flatMap((item) => assistantEntries[item.id]?.messageIds ?? []));
+    const deletedMessageIds = new Set();
+    for (const entryId of supersededEntryIds) {
+      for (const messageId of assistantEntries[entryId]?.messageIds ?? []) {
+        if (stableMessageIds.has(messageId)) continue;
+        const message = await this.#resolveChannelMessage(channel, messages, messageId);
+        const isOwnedTurnCard = message?.author.id === this.client.user.id
+          && this.#embedTaskId(message) === binding.threadId
+          && this.#embedTurnId(message) === turn.id
+          && message.embeds.some((embed) => ['Codex message', 'Codex running'].includes(embed.title));
+        if (isOwnedTurnCard) {
+          await message.delete().catch((error) => {
+            if (error.code !== 10008) throw error;
+          });
+          messages.delete(messageId);
+          deletedMessageIds.add(messageId);
+        }
+      }
+      delete assistantEntries[entryId];
+    }
+    this.stateStore.setTurnRecord(binding.threadId, turn.id, {
+      assistantEntries,
+      assistantMessageIds: [...new Set(Object.values(assistantEntries)
+        .flatMap((entry) => entry.messageIds ?? []))],
+      ...(deletedMessageIds.has(record.cardMessageId) ? { cardMessageId: null } : {}),
+      ...(deletedMessageIds.has(record.liveMessageId) ? { liveMessageId: null } : {}),
+    });
+    this.#log('superseded-assistant-entries-pruned', {
+      threadId: binding.threadId,
+      turnId: turn.id,
+      entryCount: supersededEntryIds.length,
+      messageCount: deletedMessageIds.size,
+    });
+    return supersededEntryIds.length;
   }
 
   #userCardOptions(binding, turn, userItem, sourceMessage = null, existingMessage = null) {
@@ -5950,7 +6008,7 @@ export class DiscordController {
         });
       }
       else if (message.method === 'turn/started') await this.#turnStarted(binding, message.params);
-      else if (message.method === 'item/agentMessage/delta') this.#agentDelta(binding, message.params);
+      else if (message.method === 'item/agentMessage/delta') await this.#agentDelta(binding, message.params);
       else if (message.method === 'item/reasoning/summaryPartAdded') {
         this.#reasoningPartAdded(binding, message.params);
       }
@@ -6251,7 +6309,7 @@ export class DiscordController {
     return message;
   }
 
-  async #startAgentMessage(binding, params, view) {
+  async #startAgentMessage(binding, params, view, { acceptDeltaAlias = true } = {}) {
     const item = params.item;
     if (!item?.id || view.currentMessageId === item.id) return;
     await this.#queueTurnViewMutation(view, async () => {
@@ -6261,6 +6319,8 @@ export class DiscordController {
       await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
       view.currentMessageId = item.id;
       view.currentPhase = item.phase ?? 'commentary';
+      view.deltaMessageId = null;
+      view.acceptDeltaAlias = acceptDeltaAlias;
       view.text = item.text ?? '';
       view.currentItem = itemSummary(item);
       await this.#ensureLiveTurnCard(
@@ -6273,9 +6333,32 @@ export class DiscordController {
     });
   }
 
-  #agentDelta(binding, params) {
+  async #agentDelta(binding, params) {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
-    view.currentMessageId ??= params.itemId ?? null;
+    const deltaMessageId = params.itemId ?? null;
+    if (deltaMessageId && !view.currentMessageId) {
+      view.currentMessageId = deltaMessageId;
+      view.currentPhase = params.phase ?? 'commentary';
+      view.deltaMessageId = deltaMessageId;
+      view.acceptDeltaAlias = false;
+    } else if (deltaMessageId && view.acceptDeltaAlias) {
+      view.deltaMessageId = deltaMessageId;
+      view.acceptDeltaAlias = false;
+    } else if (deltaMessageId && view.deltaMessageId && view.deltaMessageId !== deltaMessageId) {
+      await this.#startAgentMessage(binding, {
+        turnId: params.turnId,
+        item: { id: deltaMessageId, type: 'agentMessage', phase: params.phase ?? 'commentary', text: '' },
+      }, view, { acceptDeltaAlias: false });
+      view.deltaMessageId = deltaMessageId;
+    } else if (deltaMessageId && !view.deltaMessageId && view.currentMessageId !== deltaMessageId) {
+      await this.#startAgentMessage(binding, {
+        turnId: params.turnId,
+        item: { id: deltaMessageId, type: 'agentMessage', phase: params.phase ?? 'commentary', text: '' },
+      }, view, { acceptDeltaAlias: false });
+      view.deltaMessageId = deltaMessageId;
+    } else if (deltaMessageId) {
+      view.deltaMessageId = deltaMessageId;
+    }
     view.currentPhase ??= params.phase ?? 'commentary';
     view.text += params.delta ?? '';
     if (view.text.length > 24_000) view.text = view.text.slice(-24_000);
@@ -6371,7 +6454,7 @@ export class DiscordController {
     }
     if (params.item?.type === 'agentMessage'
       && (!completed || view.currentMessageId !== params.item.id)) {
-      await this.#startAgentMessage(binding, params, view);
+      await this.#startAgentMessage(binding, params, view, { acceptDeltaAlias: !completed });
     }
     const summary = completed ? itemResultSummary(params.item) : itemSummary(params.item);
     view.currentItem = completed ? null : summary;
@@ -6382,6 +6465,8 @@ export class DiscordController {
     if (completed && params.item?.type === 'agentMessage') {
       view.currentMessageId = params.item.id ?? view.currentMessageId;
       view.currentPhase = params.item.phase ?? view.currentPhase;
+      view.deltaMessageId = null;
+      view.acceptDeltaAlias = false;
       view.text = params.item.text ?? view.text;
       await this.#queueTurnViewMutation(view, () => this.#renderTurn(binding, view));
     } else if (userMessageChanged) await this.#moveLiveTurnCardToLatest(binding, view);
@@ -6668,6 +6753,8 @@ export class DiscordController {
         startedAt: record.startedAt ?? uuidV7TimestampMs(turnId) ?? Date.now(),
         currentMessageId: null,
         currentPhase: null,
+        deltaMessageId: null,
+        acceptDeltaAlias: false,
         text: '',
         reasoning: '',
         reasoningItemId: null,
@@ -6796,6 +6883,8 @@ export class DiscordController {
     view.messageId = null;
     view.currentMessageId = null;
     view.currentPhase = null;
+    view.deltaMessageId = null;
+    view.acceptDeltaAlias = false;
     view.text = '';
     view.reasoning = '';
     view.reasoningItemId = null;
@@ -6926,6 +7015,17 @@ export class DiscordController {
         liveMessageId: keepMessageId,
         status: 'inProgress',
       });
+    }
+    const latestCompletedTurn = [...thread.turns].reverse()
+      .find((turn) => turn.status !== 'inProgress') ?? null;
+    if (latestCompletedTurn) {
+      await this.#pruneSupersededAssistantEntries(
+        binding,
+        latestCompletedTurn,
+        channel,
+        messages,
+        { requireStableCoverage: true },
+      );
     }
     if (removed > 0) {
       this.#log('restored-live-card-reconciled', {
