@@ -726,6 +726,17 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     },
   });
   await waitForNotifications();
+  for (const itemId of ['empty-placeholder', 'stream-a']) {
+    codex.emit('notification', {
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-3',
+        item: { id: itemId, type: 'agentMessage', phase: 'commentary', text: '' },
+      },
+    });
+    await waitForNotifications();
+  }
   for (const [itemId, delta] of [
     ['stream-a', 'First delta-only commentary.'],
     ['stream-b', 'Second delta-only commentary.'],
@@ -736,6 +747,52 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     });
     await waitForNotifications();
   }
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const liveBeforeIndividualCompletions = [...messages.values()]
+    .filter((message) => message.embeds[0]?.fields?.some(
+      (field) => field.name === 'Turn' && field.value === '`turn-3`',
+    ));
+  assert.equal(
+    liveBeforeIndividualCompletions.filter(
+      (message) => message.embeds[0]?.title === 'Codex message',
+    ).length,
+    0,
+  );
+  assert.deepEqual(
+    liveBeforeIndividualCompletions
+      .filter((message) => message.embeds[0]?.title === 'Codex running')
+      .map((message) => message.embeds[0].description),
+    ['First delta-only commentary.'],
+  );
+  for (const [itemId, text] of [
+    ['stream-a', 'First delta-only commentary.'],
+    ['stream-b', 'Second delta-only commentary.'],
+  ]) {
+    codex.emit('notification', {
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-3',
+        item: { id: itemId, type: 'agentMessage', phase: 'commentary', text },
+      },
+    });
+    await waitForNotifications();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const liveAfterIndividualCompletions = [...messages.values()]
+    .filter((message) => message.embeds[0]?.fields?.some(
+      (field) => field.name === 'Turn' && field.value === '`turn-3`',
+    ));
+  assert.deepEqual(
+    liveAfterIndividualCompletions.map((message) => [
+      message.embeds[0].title,
+      message.embeds[0].description,
+    ]),
+    [
+      ['Codex message', 'First delta-only commentary.'],
+      ['Codex running', 'Second delta-only commentary.'],
+    ],
+  );
   const contaminated = makeMessage({
     embeds: [{
       title: 'Codex message',

@@ -5815,6 +5815,7 @@ export class DiscordController {
         view.startedAt = restoredStartedAt;
         view.currentMessageId = activeAgentItem?.id ?? null;
         view.currentPhase = activeAgentItem?.phase ?? null;
+        view.currentMessageCompleted = Boolean(activeAgentItem?.text);
         view.text = activeAgentItem?.text ?? '';
         view.reasoningItemId = activeReasoningItem?.id ?? null;
         view.reasoningPartIndex = null;
@@ -6309,18 +6310,107 @@ export class DiscordController {
     return message;
   }
 
-  async #startAgentMessage(binding, params, view, { acceptDeltaAlias = true } = {}) {
+  #deferAgentMessage(view, item, {
+    acceptDeltaAlias = true,
+    deltaMessageId = null,
+    completed = false,
+  } = {}) {
+    const existing = view.pendingAgentMessages.get(item.id);
+    const pending = existing ?? {
+      item: { id: item.id, type: 'agentMessage', phase: item.phase ?? 'commentary', text: '' },
+      deltaMessageId: null,
+      acceptDeltaAlias,
+      completed: false,
+    };
+    const nextText = String(item.text ?? '');
+    pending.item = {
+      ...pending.item,
+      ...item,
+      text: nextText || pending.item.text || '',
+    };
+    pending.deltaMessageId = deltaMessageId ?? pending.deltaMessageId;
+    pending.acceptDeltaAlias = pending.acceptDeltaAlias && acceptDeltaAlias;
+    pending.completed ||= completed;
+    view.pendingAgentMessages.set(item.id, pending);
+    return pending;
+  }
+
+  #pendingAgentMessageForDelta(view, itemId, { claimAlias = false } = {}) {
+    if (!itemId) return null;
+    for (const pending of view.pendingAgentMessages.values()) {
+      if (pending.item.id === itemId || pending.deltaMessageId === itemId) return pending;
+      if (claimAlias && pending.acceptDeltaAlias) {
+        pending.deltaMessageId = itemId;
+        pending.acceptDeltaAlias = false;
+        return pending;
+      }
+    }
+    return null;
+  }
+
+  #removeAssistantEntryIdentity(binding, view, itemId) {
+    if (!itemId) return;
+    const record = this.stateStore.turnRecord(binding.threadId, view.turnId) ?? {};
+    if (!record.assistantEntries?.[itemId]) return;
+    const assistantEntries = { ...record.assistantEntries };
+    delete assistantEntries[itemId];
+    this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
+      assistantEntries,
+      assistantMessageIds: [...new Set(Object.values(assistantEntries)
+        .flatMap((entry) => entry.messageIds ?? []))],
+    });
+  }
+
+  async #promotePendingAgentMessages(binding, view) {
+    while (view.currentMessageCompleted && view.pendingAgentMessages.size > 0) {
+      const [pendingId, pending] = view.pendingAgentMessages.entries().next().value;
+      view.pendingAgentMessages.delete(pendingId);
+      await this.#startAgentMessage(binding, {
+        turnId: view.turnId,
+        item: pending.item,
+      }, view, { acceptDeltaAlias: pending.acceptDeltaAlias, force: true });
+      view.deltaMessageId = pending.deltaMessageId;
+      view.currentMessageCompleted = pending.completed;
+      if (pending.completed) {
+        await this.#queueTurnViewMutation(view, () => this.#renderTurn(binding, view));
+      }
+    }
+  }
+
+  async #startAgentMessage(binding, params, view, {
+    acceptDeltaAlias = true,
+    force = false,
+  } = {}) {
     const item = params.item;
-    if (!item?.id || view.currentMessageId === item.id) return;
+    if (!item?.id || view.currentMessageId === item.id) return true;
+    if (!force
+      && view.currentMessageId
+      && view.currentPhase === 'commentary'
+      && !view.currentMessageCompleted
+      && String(view.text ?? '').length > 0) {
+      this.#deferAgentMessage(view, item, { acceptDeltaAlias });
+      return false;
+    }
+    const replaceIncompleteEmpty = !force
+      && view.currentMessageId
+      && view.currentPhase === 'commentary'
+      && !view.currentMessageCompleted
+      && String(view.text ?? '').length === 0;
+    if (replaceIncompleteEmpty) {
+      this.#removeAssistantEntryIdentity(binding, view, view.currentMessageId);
+    }
     await this.#queueTurnViewMutation(view, async () => {
       if (!this.#isCurrentLiveTurnView(view)) return;
       const channel = await this.client.channels.fetch(binding.channelId);
       const messages = await this.#fetchChannelHistory(channel, 100);
-      await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
+      if (!replaceIncompleteEmpty) {
+        await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
+      }
       view.currentMessageId = item.id;
       view.currentPhase = item.phase ?? 'commentary';
       view.deltaMessageId = null;
       view.acceptDeltaAlias = acceptDeltaAlias;
+      view.currentMessageCompleted = false;
       view.text = item.text ?? '';
       view.currentItem = itemSummary(item);
       await this.#ensureLiveTurnCard(
@@ -6331,30 +6421,82 @@ export class DiscordController {
         messages,
       );
     });
+    return true;
   }
 
   async #agentDelta(binding, params) {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
     const deltaMessageId = params.itemId ?? null;
+    const exactPending = this.#pendingAgentMessageForDelta(view, deltaMessageId);
+    if (exactPending) {
+      exactPending.item.text += params.delta ?? '';
+      if (exactPending.item.text.length > 24_000) {
+        exactPending.item.text = exactPending.item.text.slice(-24_000);
+      }
+      return;
+    }
     if (deltaMessageId && !view.currentMessageId) {
       view.currentMessageId = deltaMessageId;
       view.currentPhase = params.phase ?? 'commentary';
       view.deltaMessageId = deltaMessageId;
       view.acceptDeltaAlias = false;
+      view.currentMessageCompleted = false;
     } else if (deltaMessageId && view.acceptDeltaAlias) {
       view.deltaMessageId = deltaMessageId;
       view.acceptDeltaAlias = false;
     } else if (deltaMessageId && view.deltaMessageId && view.deltaMessageId !== deltaMessageId) {
+      if (!view.currentMessageCompleted) {
+        const pendingAlias = this.#pendingAgentMessageForDelta(
+          view,
+          deltaMessageId,
+          { claimAlias: true },
+        );
+        if (pendingAlias) {
+          pendingAlias.item.text += params.delta ?? '';
+          if (pendingAlias.item.text.length > 24_000) {
+            pendingAlias.item.text = pendingAlias.item.text.slice(-24_000);
+          }
+          return;
+        }
+        this.#deferAgentMessage(view, {
+          id: deltaMessageId,
+          type: 'agentMessage',
+          phase: params.phase ?? 'commentary',
+          text: params.delta ?? '',
+        }, { acceptDeltaAlias: false, deltaMessageId });
+        return;
+      }
       await this.#startAgentMessage(binding, {
         turnId: params.turnId,
         item: { id: deltaMessageId, type: 'agentMessage', phase: params.phase ?? 'commentary', text: '' },
-      }, view, { acceptDeltaAlias: false });
+      }, view, { acceptDeltaAlias: false, force: true });
       view.deltaMessageId = deltaMessageId;
     } else if (deltaMessageId && !view.deltaMessageId && view.currentMessageId !== deltaMessageId) {
+      if (!view.currentMessageCompleted) {
+        const pendingAlias = this.#pendingAgentMessageForDelta(
+          view,
+          deltaMessageId,
+          { claimAlias: true },
+        );
+        if (pendingAlias) {
+          pendingAlias.item.text += params.delta ?? '';
+          if (pendingAlias.item.text.length > 24_000) {
+            pendingAlias.item.text = pendingAlias.item.text.slice(-24_000);
+          }
+          return;
+        }
+        this.#deferAgentMessage(view, {
+          id: deltaMessageId,
+          type: 'agentMessage',
+          phase: params.phase ?? 'commentary',
+          text: params.delta ?? '',
+        }, { acceptDeltaAlias: false, deltaMessageId });
+        return;
+      }
       await this.#startAgentMessage(binding, {
         turnId: params.turnId,
         item: { id: deltaMessageId, type: 'agentMessage', phase: params.phase ?? 'commentary', text: '' },
-      }, view, { acceptDeltaAlias: false });
+      }, view, { acceptDeltaAlias: false, force: true });
       view.deltaMessageId = deltaMessageId;
     } else if (deltaMessageId) {
       view.deltaMessageId = deltaMessageId;
@@ -6452,9 +6594,8 @@ export class DiscordController {
         view.reasoningPartIndex = params.item.summary.length - 1;
       }
     }
-    if (params.item?.type === 'agentMessage'
-      && (!completed || view.currentMessageId !== params.item.id)) {
-      await this.#startAgentMessage(binding, params, view, { acceptDeltaAlias: !completed });
+    if (params.item?.type === 'agentMessage' && !completed) {
+      await this.#startAgentMessage(binding, params, view, { acceptDeltaAlias: true });
     }
     const summary = completed ? itemResultSummary(params.item) : itemSummary(params.item);
     view.currentItem = completed ? null : summary;
@@ -6463,12 +6604,43 @@ export class DiscordController {
       if (view.items.length > 8) view.items.shift();
     }
     if (completed && params.item?.type === 'agentMessage') {
-      view.currentMessageId = params.item.id ?? view.currentMessageId;
+      const itemId = params.item.id ?? view.currentMessageId;
+      const isCurrent = itemId === view.currentMessageId || itemId === view.deltaMessageId;
+      if (!isCurrent) {
+        const pending = view.pendingAgentMessages.get(itemId)
+          ?? [...view.pendingAgentMessages.values()]
+            .find((candidate) => candidate.deltaMessageId === itemId);
+        if (pending) {
+          pending.item = { ...pending.item, ...params.item, text: params.item.text ?? pending.item.text };
+          pending.completed = true;
+          await this.#promotePendingAgentMessages(binding, view);
+          return;
+        }
+        const completedText = String(params.item.text ?? '');
+        if (!view.currentMessageCompleted
+          && view.currentMessageId
+          && view.text
+          && completedText.includes(view.text)) {
+          this.#removeAssistantEntryIdentity(binding, view, view.currentMessageId);
+          view.currentMessageId = itemId;
+        } else if (!view.currentMessageCompleted && view.currentMessageId) {
+          this.#deferAgentMessage(view, params.item, { acceptDeltaAlias: false, completed: true });
+          return;
+        } else {
+          await this.#startAgentMessage(binding, params, view, {
+            acceptDeltaAlias: false,
+            force: true,
+          });
+        }
+      }
+      view.currentMessageId = itemId;
       view.currentPhase = params.item.phase ?? view.currentPhase;
       view.deltaMessageId = null;
       view.acceptDeltaAlias = false;
       view.text = params.item.text ?? view.text;
+      view.currentMessageCompleted = true;
       await this.#queueTurnViewMutation(view, () => this.#renderTurn(binding, view));
+      await this.#promotePendingAgentMessages(binding, view);
     } else if (userMessageChanged) await this.#moveLiveTurnCardToLatest(binding, view);
     else if (binding.watchLevel !== 'quiet') this.#scheduleTurnRender(binding, view);
   }
@@ -6755,6 +6927,8 @@ export class DiscordController {
         currentPhase: null,
         deltaMessageId: null,
         acceptDeltaAlias: false,
+        currentMessageCompleted: false,
+        pendingAgentMessages: new Map(),
         text: '',
         reasoning: '',
         reasoningItemId: null,
@@ -6885,6 +7059,8 @@ export class DiscordController {
     view.currentPhase = null;
     view.deltaMessageId = null;
     view.acceptDeltaAlias = false;
+    view.currentMessageCompleted = false;
+    view.pendingAgentMessages.clear();
     view.text = '';
     view.reasoning = '';
     view.reasoningItemId = null;
