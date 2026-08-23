@@ -5523,6 +5523,7 @@ export class DiscordController {
     messages.set(message.id, message);
     await this.#deleteDuplicateLiveTurnCards(binding, turn.id, messages, message.id);
     view.messageId = message.id;
+    view.message = message;
     const latestRecord = this.stateStore.turnRecord(binding.threadId, turn.id) ?? record;
     const patch = {
       cardMessageId: message.id,
@@ -6307,6 +6308,7 @@ export class DiscordController {
       view.messageId,
     );
     view.messageId = null;
+    view.message = null;
     return message;
   }
 
@@ -6402,7 +6404,12 @@ export class DiscordController {
     await this.#queueTurnViewMutation(view, async () => {
       if (!this.#isCurrentLiveTurnView(view)) return;
       const channel = await this.client.channels.fetch(binding.channelId);
-      const messages = await this.#fetchChannelHistory(channel, 100);
+      const messages = new Map();
+      if (view.message?.id === view.messageId) messages.set(view.message.id, view.message);
+      else if (view.messageId) {
+        const message = await channel.messages.fetch(view.messageId).catch(() => null);
+        if (message) messages.set(message.id, message);
+      }
       if (!replaceIncompleteEmpty) {
         await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
       }
@@ -6922,6 +6929,7 @@ export class DiscordController {
         messageId: record.cardMessageId
           ?? record.liveMessageId
           ?? null,
+        message: null,
         startedAt: record.startedAt ?? uuidV7TimestampMs(turnId) ?? Date.now(),
         currentMessageId: null,
         currentPhase: null,
@@ -6993,9 +7001,12 @@ export class DiscordController {
         messages,
       );
     } else {
-      message = await channel.messages.fetch(view.messageId).catch(() => null);
+      message = view.message?.id === view.messageId
+        ? view.message
+        : await channel.messages.fetch(view.messageId).catch(() => null);
       if (!message) {
         view.messageId = null;
+        view.message = null;
         return this.#renderTurn(binding, view);
       }
       await message.edit({
@@ -7007,6 +7018,7 @@ export class DiscordController {
       });
     }
     view.messageId = message.id;
+    view.message = message;
     const record = this.stateStore.turnRecord(binding.threadId, view.turnId) ?? {};
     const patch = {
       cardMessageId: message.id,
@@ -7055,6 +7067,7 @@ export class DiscordController {
     }
     await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
     view.messageId = null;
+    view.message = null;
     view.currentMessageId = null;
     view.currentPhase = null;
     view.deltaMessageId = null;
@@ -7084,6 +7097,7 @@ export class DiscordController {
         const messages = await this.#fetchChannelHistory(channel, 100);
         await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
         view.messageId = null;
+        view.message = null;
         this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
           cardMessageId: null,
           liveMessageId: null,

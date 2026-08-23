@@ -450,6 +450,7 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
   const messages = new Map();
   const sent = [];
   let nextMessageId = 1;
+  let historyFetchCount = 0;
   let blockNextRunningEdit = false;
   let resolveRunningEditStarted;
   let releaseRunningEdit;
@@ -489,9 +490,11 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
   const channel = {
     id: 'channel-1',
     messages: {
-      fetch: async (value) => (typeof value === 'string'
-        ? messages.get(value) ?? null
-        : collection()),
+      fetch: async (value) => {
+        if (typeof value === 'string') return messages.get(value) ?? null;
+        historyFetchCount += 1;
+        return collection();
+      },
     },
     send: async (options) => makeMessage(options),
   };
@@ -726,6 +729,7 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     },
   });
   await waitForNotifications();
+  const historyFetchesBeforeCommentaryBoundaries = historyFetchCount;
   for (const itemId of ['empty-placeholder', 'stream-a']) {
     codex.emit('notification', {
       method: 'item/started',
@@ -793,6 +797,7 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
       ['Codex running', 'Second delta-only commentary.'],
     ],
   );
+  assert.equal(historyFetchCount, historyFetchesBeforeCommentaryBoundaries);
   const contaminated = makeMessage({
     embeds: [{
       title: 'Codex message',
