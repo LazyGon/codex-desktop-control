@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 
 const IMAGE_MIME_EXTENSIONS = new Map([
   ['image/avif', '.avif'],
@@ -99,6 +100,11 @@ function safeItemName(itemId) {
 export function hasCodexImageContent(item) {
   return imagePayloadsFromItem(item).length > 0
     || (item?.type === 'imageView' && typeof item.path === 'string' && item.path.length > 0);
+}
+
+export function codexImagePathAttachmentName(itemId, targetPath) {
+  const extension = path.win32.extname(String(targetPath ?? '')).toLocaleLowerCase('en-US');
+  return `codex-image-${safeItemName(itemId)}-path${extension}`;
 }
 
 export function codexImageFilesFromItem(item, {

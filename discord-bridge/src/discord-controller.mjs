@@ -119,6 +119,7 @@ import {
 } from './codex-notification-buffer.mjs';
 import {
   codexImageFilesFromItem,
+  codexImagePathAttachmentName,
   hasCodexImageContent,
 } from './codex-image-item.mjs';
 
@@ -1909,7 +1910,10 @@ export class DiscordController {
           throw new Error(`画像がDiscord添付上限を超えています (${resolved.size} > ${maximumBytes})`);
         }
         const transfer = await hashResolvedFile(resolved, maximumBytes);
-        const name = uniqueDiscordAttachmentName(transfer.name, usedNames);
+        const name = uniqueDiscordAttachmentName(
+          codexImagePathAttachmentName(item.id, transfer.name),
+          usedNames,
+        );
         names.push(name);
         metadata.push({
           name,

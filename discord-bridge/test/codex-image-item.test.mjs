@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   codexImageFilesFromItem,
+  codexImagePathAttachmentName,
   hasCodexImageContent,
 } from '../src/codex-image-item.mjs';
 
@@ -50,6 +51,10 @@ test('Codex image extraction accepts data URLs but rejects invalid and oversized
 
 test('imageView paths are recognized without treating arbitrary tool arguments as image output', () => {
   assert.equal(hasCodexImageContent({ type: 'imageView', id: 'view-1', path: 'C:\\work\\image.png' }), true);
+  assert.equal(
+    codexImagePathAttachmentName('exec:日本語/1', 'C:\\work\\日本語の画像.PNG'),
+    'codex-image-exec-1-path.png',
+  );
   assert.equal(hasCodexImageContent({
     type: 'mcpToolCall',
     id: 'tool-3',
