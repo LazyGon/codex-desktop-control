@@ -4,8 +4,36 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { CodexService } from '../src/codex-service.mjs';
+import {
+  CodexService,
+  forEachConcurrent,
+  subscriptionRestoreBindings,
+} from '../src/codex-service.mjs';
 import { StateStore } from '../src/state-store.mjs';
+
+test('subscription restore prioritizes recent active tasks and remains bounded across tasks', async () => {
+  const ordered = subscriptionRestoreBindings([
+    { threadId: 'idle', taskStatus: 'idle', updatedAt: '2026-08-24T12:00:00Z' },
+    { threadId: 'active-old', taskStatus: 'active', updatedAt: '2026-08-24T10:00:00Z' },
+    { threadId: 'archived', taskStatus: 'active', archived: true, updatedAt: '2026-08-24T13:00:00Z' },
+    { threadId: 'active-new', taskStatus: 'active', updatedAt: '2026-08-24T11:00:00Z' },
+  ]);
+  assert.deepEqual(ordered.map((binding) => binding.threadId), [
+    'active-new',
+    'active-old',
+    'idle',
+  ]);
+
+  let active = 0;
+  let maximum = 0;
+  await forEachConcurrent(ordered, 2, async () => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+  });
+  assert.equal(maximum, 2);
+});
 
 test('CodexService restores subscriptions and forwards live notifications', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-service-'));

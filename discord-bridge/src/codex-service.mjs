@@ -53,6 +53,30 @@ function textInput(text, attachments = null) {
   return input;
 }
 
+export function subscriptionRestoreBindings(bindings) {
+  const statusRank = (binding) => binding.taskStatus === 'active' ? 0 : 1;
+  const updatedAtMs = (binding) => Date.parse(binding.updatedAt ?? '') || 0;
+  return [...bindings]
+    .filter((binding) => !binding.archived)
+    .sort((left, right) => statusRank(left) - statusRank(right)
+      || updatedAtMs(right) - updatedAtMs(left));
+}
+
+export async function forEachConcurrent(items, maximum, operation) {
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await operation(items[index], index);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(Math.max(1, maximum), items.length) },
+    () => worker(),
+  ));
+}
+
 export class CodexService extends EventEmitter {
   constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn }) {
     super();
@@ -472,8 +496,8 @@ export class CodexService extends EventEmitter {
   }
 
   async #restoreSubscriptions() {
-    for (const binding of this.stateStore.bindings()) {
-      if (binding.archived) continue;
+    const bindings = subscriptionRestoreBindings(this.stateStore.bindings());
+    await forEachConcurrent(bindings, 4, async (binding) => {
       try {
         const runtime = await this.resumeThread(binding.threadId);
         const result = await this.readThread(binding.threadId);
@@ -503,7 +527,7 @@ export class CodexService extends EventEmitter {
         this.#log('subscription-restore-failed', { threadId: binding.threadId, error: error.message });
         this.emit('subscriptionError', { binding, error });
       }
-    }
+    });
   }
 
   #requireClient() {
