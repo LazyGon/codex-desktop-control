@@ -83,7 +83,7 @@ test('recent history UI offers only one, three, and seven day restore windows', 
   assert.deepEqual(payload.components[0].components[0].options.map((option) => option.value), ['1', '3', '7']);
 });
 
-test('task panel exposes delivery, watch, and completion selects plus safe file actions', () => {
+test('task panel groups delivery, task, notification, and file actions into four menus', () => {
   const thread = {
     id: 'thread-1',
     name: 'Task one',
@@ -100,29 +100,23 @@ test('task panel exposes delivery, watch, and completion selects plus safe file 
   assert.deepEqual(active.components[0].components[0].options.map((option) => option.value), [
     'deliver', 'send', 'steer',
   ]);
-  assert.equal(active.components[1].components[0].custom_id, `cx:ui:task:watch:${thread.id}`);
-  assert.equal(active.components[1].components[0].options.find((option) => option.default).value, 'normal');
+  assert.equal(active.components[0].components[0].placeholder, '💬 指示を送る');
   assert.equal(active.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'ON');
-  assert.deepEqual(active.components[2].components.map((component) => component.custom_id), [
-    `cx:ui:task:refresh:${thread.id}`,
-    `cx:ui:task:pending:${thread.id}`,
-    `cx:ui:task:controls:${thread.id}`,
-    `cx:ui:task:archive:${thread.id}`,
-    `cx:ui:task:interrupt:${thread.id}`,
+  assert.equal(active.components[1].components[0].custom_id, `cx:ui:task:actions:${thread.id}`);
+  assert.equal(active.components[1].components[0].placeholder, '⚙️ タスクを管理');
+  assert.deepEqual(active.components[1].components[0].options.map((option) => option.value), [
+    'refresh', 'pending', 'controls', 'interrupt', 'archive',
   ]);
-  assert.equal(active.components[2].components[2].label, 'Controls');
-  assert.equal(active.components[2].components[3].label, 'Archive');
-  assert.equal(active.components[2].components[4].disabled, false);
-  assert.equal(active.components[3].components[0].custom_id, `cx:ui:task:files:${thread.id}`);
-  assert.equal(active.components[3].components[0].label, 'Project files');
-  assert.equal(active.components[3].components[1].custom_id, `cx:ui:task:project:${thread.id}`);
-  assert.equal(active.components[3].components[1].label, 'Download project');
-  assert.equal(active.components[3].components[1].emoji.name, '📦');
-  assert.equal(active.components[3].components[2].custom_id, `cx:ui:task:git:${thread.id}`);
-  assert.equal(active.components[3].components[2].label, 'Download .git');
-  assert.equal(active.components[3].components[2].emoji.name, '🗃️');
-  assert.equal(active.components[4].components[0].custom_id, `cx:ui:task:completion:${thread.id}`);
-  assert.equal(active.components[4].components[0].options.find((option) => option.default).value, 'enabled');
+  assert.equal(active.components[2].components[0].custom_id, `cx:ui:task:notifications:${thread.id}`);
+  assert.match(active.components[2].components[0].placeholder, /進行: 標準 \/ 完了: ON/);
+  assert.deepEqual(active.components[2].components[0].options.map((option) => option.value), [
+    'watch:quiet', 'watch:normal', 'watch:verbose', 'completion:enabled', 'completion:disabled',
+  ]);
+  assert.equal(active.components[3].components[0].custom_id, `cx:ui:task:file-actions:${thread.id}`);
+  assert.equal(active.components[3].components[0].placeholder, '📁 ファイルを開く・取得');
+  assert.deepEqual(active.components[3].components[0].options.map((option) => option.value), [
+    'files', 'project', 'git',
+  ]);
 
   const archived = json(taskPanelPayload({
     thread: { ...thread, status: { type: 'idle' } },
@@ -135,13 +129,11 @@ test('task panel exposes delivery, watch, and completion selects plus safe file 
   }));
   assert.equal(archived.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(archived.components[0].components[0].disabled, true);
-  assert.equal(archived.components[1].components[0].options.find((option) => option.default).value, 'quiet');
-  assert.equal(archived.components[2].components[2].disabled, true);
-  assert.equal(archived.components[2].components[3].label, 'Restore');
-  assert.equal(archived.components[2].components[4].disabled, true);
+  assert.deepEqual(archived.components[1].components[0].options.map((option) => option.value), [
+    'refresh', 'pending', 'archive',
+  ]);
+  assert.equal(archived.components[1].components[0].options.at(-1).label, 'タスクを復元');
+  assert.match(archived.components[2].components[0].placeholder, /進行: 少なめ \/ 完了: OFF/);
   assert.equal(archived.components[3].components[0].disabled ?? false, false);
-  assert.equal(archived.components[3].components[1].disabled ?? false, false);
-  assert.equal(archived.components[3].components[2].disabled ?? false, false);
   assert.equal(archived.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'OFF');
-  assert.equal(archived.components[4].components[0].options.find((option) => option.default).value, 'disabled');
 });

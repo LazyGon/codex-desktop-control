@@ -34,7 +34,7 @@ discovery or status reconciliation for other channels.
    while the task was live. `🟢` in the channel name means a turn is running;
    `⚫` means stopped. Control cards are purple, while completed result
    cards are blue.
-4. Use the task panel's delivery-mode select, or post an ordinary
+4. Use the task panel's `💬 指示を送る` menu, or post an ordinary
    message for automatic delivery. Slash commands remain available for explicit
    task IDs, search, and attachments.
    With `plainMessageInputEnabled`, an ordinary message in the task channel is
@@ -60,14 +60,14 @@ discovery or status reconciliation for other channels.
    threads. Finished child threads change to `⚫` and archive automatically;
    they do not create `codex-completions` posts.
 6. Respond to approval or input cards when they appear.
-7. Use `Project files` in the task control card to browse the task working
+7. Use `📁 ファイルを開く・取得` -> `プロジェクト内を見る` in the task control card to browse the task working
    directory. Select a directory to open it or a file to post it into the
    private task channel. `/codex-files` opens the same browser with explicit
    task autocomplete. On an assistant card, use `Linked files` to select a
    local file that Codex linked in its message. To retrieve the entire working
-   directory, tap `📦 Download project`, review the secret-exposure warning,
+   directory, choose `プロジェクト全体を取得`, review the secret-exposure warning,
    and confirm `Archiveを作成`. To retrieve only Git metadata, tap
-   `🗃️ Download .git` and confirm `.gitを作成`.
+   `.gitだけを取得` and confirm `.gitを作成`.
 
 ## Ordinary ChatGPT workflow
 
@@ -166,10 +166,12 @@ commentary, final answers, and App Server reasoning summaries. The current
 live turn stays on its single live card. Archived tasks, turns older than the
 selected rolling window, and raw private reasoning content are never included.
 Completion counts are posted back to `codex-remote`, after which the global
-control card returns to the latest position. Each task panel provides delivery mode,
-watch level, a per-task completion-report selector, detailed status, task-scoped
-pending requests, a task control center, archive/restore, and confirmed
-interrupt. The control center uses
+control card returns to the latest position. Each task panel groups its controls
+into four menus for instructions, task management, notifications, and files.
+Task management includes detailed status, task-scoped pending requests, the
+advanced control center, archive/restore, and confirmed interrupt. The
+notification menu combines watch level and per-task completion reports without
+mixing them with execution actions. The advanced control center uses
 dropdowns populated from the shared app-server for model, reasoning effort,
 named permission profile, and Plan/Default mode. Its More menu includes Fast/
 service tier, personality, memory, goal, context compact, fork, review, and

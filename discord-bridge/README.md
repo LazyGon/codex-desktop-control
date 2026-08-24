@@ -60,6 +60,10 @@ outbound connection to Discord.
 - Reposts the unpinned task control panel immediately below each terminal turn
   card. The previous bot-owned task panel is removed only after the replacement
   ID is persisted, so mobile users always find controls at the latest position.
+- Groups the fixed task panel into four mobile-friendly dropdowns: send an
+  instruction, manage the task, configure notifications, and browse or download
+  files. Dangerous and secret-bearing actions keep their existing confirmation
+  steps, and legacy button IDs remain accepted while old panels are replaced.
 - Provides a dropdown-first task control center backed by live app-server
   catalogs for model, reasoning effort, named permission profile, and
   Plan/Default mode. Additional screens expose Fast/service tier, personality,
@@ -106,19 +110,19 @@ outbound connection to Discord.
   `Download all as ZIP`, which packages every downloadable link. Linked PNG,
   JPEG, GIF, and WebP files that fit one Discord attachment are also attached
   directly to the assistant card so Discord renders the image inline.
-- Browses one directory level at a time from a task's project root through the
-  `Project files` panel button or `/codex-files`. Directories are opened in the
+- Browses one directory level at a time from a task's project root through
+  `📁 ファイルを開く・取得` -> `プロジェクト内を見る` or `/codex-files`. Directories are opened in the
   ephemeral browser; selected files are posted to the task channel.
 - Allows explicitly linked artifacts under `.codex/visualizations`,
   `.codex/generated_images`, other task runtime directories, sibling projects,
   and arbitrary local development directories. The Bridge does not expose an
   arbitrary-path input UI.
-- Downloads the complete task working directory from the task panel's
-  `📦 Download project` button. After an explicit secret-exposure confirmation,
+- Downloads the complete task working directory from `📁 ファイルを開く・取得`
+  -> `プロジェクト全体を取得`. After an explicit secret-exposure confirmation,
   the Bridge includes `.git` and protected regular files, skips filesystem
   links and special entries, and posts ordered 7z volumes plus a JSON manifest.
-- Downloads only the task working directory's root `.git` entry from the
-  `🗃️ Download .git` button. The archive preserves `<project>/.git`, excludes
+- Downloads only the task working directory's root `.git` entry from
+  `📁 ファイルを開く・取得` -> `.gitだけを取得`. The archive preserves `<project>/.git`, excludes
   working-tree files and nested repositories, supports normal `.git`
   directories and worktree `.git` files, and uses the same confirmation,
   link-exclusion, volume, and manifest safeguards.

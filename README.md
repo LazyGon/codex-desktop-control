@@ -205,7 +205,9 @@ channel. Linked regular files may be outside managed projects, including under
 directories and filesystem links remain unavailable. The linked-file picker
 can download every eligible link as one ZIP (or numbered ZIP volumes).
 Large files are packaged as numbered 7z volumes with a SHA-256 manifest.
-The task panel's `📦 Download project` action creates a confirmed full working
+The task panel's `📁 ファイルを開く・取得` menu groups individual browsing,
+confirmed whole-project download, and confirmed `.git`-only download. The
+`プロジェクト全体を取得` action creates a confirmed full working
 directory archive, including `.git` and protected regular files, as split 7z
 volumes with a manifest. Project and `.git` archives have no aggregate transfer
 limit; each volume stays within the configured Discord attachment size and is

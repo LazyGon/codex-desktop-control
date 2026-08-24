@@ -2862,6 +2862,83 @@ export class DiscordController {
     await this.#startFileBrowser(interaction, threadId);
   }
 
+  async #handleTaskPanelAction(interaction, action, threadId, binding) {
+    if (action === 'refresh') {
+      await interaction.deferReply({ ephemeral: true });
+      const result = await this.codex.readThread(threadId);
+      const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+      await this.#ensureTaskPanel(result.thread, channel, binding.archived);
+      await this.#showTaskStatus(interaction, threadId);
+      return true;
+    }
+    if (action === 'pending') {
+      await interaction.reply(messageOptions(this.#pendingContent(threadId), { ephemeral: true }));
+      return true;
+    }
+    if (action === 'interrupt') {
+      await this.#showInterruptConfirmation(interaction, threadId);
+      return true;
+    }
+    if (action === 'controls') {
+      await interaction.deferReply({ ephemeral: true });
+      await this.#showTaskControls(interaction, threadId);
+      return true;
+    }
+    if (action === 'files') {
+      await interaction.deferReply({ ephemeral: true });
+      await this.#startFileBrowser(interaction, threadId);
+      return true;
+    }
+    if (action === 'project') {
+      this.#assertFileSharingEnabled();
+      await this.#showConfirmation(
+        interaction,
+        { type: 'projectArchive', threadId },
+        [
+          `プロジェクト全体 \`${truncate(binding.cwd, 1200)}\` をタスクチャンネルへ投稿しますか？`,
+          '`.git`、`.env`、鍵・資格情報など、通常のファイルブラウザでは保護される通常ファイルも含まれます。',
+          projectArchiveVolumeText(this.config),
+          'symlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
+        ].join('\n'),
+        'Archiveを作成',
+      );
+      return true;
+    }
+    if (action === 'git') {
+      this.#assertFileSharingEnabled();
+      if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
+      await this.#showConfirmation(
+        interaction,
+        { type: 'gitArchive', threadId },
+        [
+          `プロジェクト直下の \`${truncate(path.join(binding.cwd, '.git'), 1200)}\` だけをタスクチャンネルへ投稿しますか？`,
+          'Git履歴、remote URL、設定、hooks、資格情報を含む可能性があります。作業ツリーの通常ファイルは含めません。',
+          projectArchiveVolumeText(this.config),
+          '.git内のsymlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
+        ].join('\n'),
+        '.gitを作成',
+      );
+      return true;
+    }
+    if (action === 'archive') {
+      await interaction.deferReply({ ephemeral: true });
+      if (binding.archived) {
+        await this.codex.unarchiveThread(threadId);
+        await this.codex.resumeThread(threadId);
+        this.stateStore.setBinding(threadId, { archived: false });
+      } else {
+        await this.codex.archiveThread(threadId);
+        await this.codex.unsubscribeThread(threadId);
+        this.stateStore.setBinding(threadId, { archived: true });
+      }
+      await this.#syncAllTasks();
+      const updated = this.stateStore.binding(threadId);
+      await interaction.editReply(`${binding.archived ? '復元' : 'アーカイブ'}しました: ${channelMention(updated.channelId)}`);
+      return true;
+    }
+    return false;
+  }
+
   async #handleSelect(interaction) {
     const uiParts = interaction.customId.split(':');
     if (uiParts[0] === 'cx' && uiParts[1] === 'projects' && uiParts[3] === 'select') {
@@ -3114,6 +3191,49 @@ export class DiscordController {
           await this.#showComposeModal(interaction, threadId, interaction.values[0]);
           return;
         }
+        if (action === 'actions' || action === 'file-actions') {
+          const selected = interaction.values[0];
+          const allowed = action === 'actions'
+            ? ['refresh', 'pending', 'controls', 'interrupt', 'archive']
+            : ['files', 'project', 'git'];
+          if (!allowed.includes(selected)) throw new Error(`Unknown task-panel action: ${selected}`);
+          await this.#handleTaskPanelAction(interaction, selected, threadId, binding);
+          return;
+        }
+        if (action === 'notifications') {
+          const [setting, selection] = String(interaction.values[0] ?? '').split(':');
+          if (setting === 'watch') {
+            if (!['quiet', 'normal', 'verbose'].includes(selection)) throw new Error(`Unknown watch level: ${selection}`);
+            await interaction.deferUpdate();
+            this.stateStore.setBinding(threadId, { watchLevel: selection });
+            const result = await this.codex.threadMetadata(threadId).catch(() => null);
+            const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+            await this.#ensureTaskPanel(result?.thread ?? this.#threadFromBinding({ ...binding, watchLevel: selection }), channel, binding.archived);
+            await interaction.followUp(messageOptions(`進行通知を **${selection}** に設定しました。`, { ephemeral: true }));
+            return;
+          }
+          if (setting === 'completion') {
+            if (!['enabled', 'disabled'].includes(selection)) {
+              throw new Error(`Unknown completion-report setting: ${selection}`);
+            }
+            const enabled = selection === 'enabled';
+            await interaction.deferUpdate();
+            this.stateStore.setBinding(threadId, { completionReportsEnabled: enabled });
+            const result = await this.codex.threadMetadata(threadId).catch(() => null);
+            const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
+            await this.#ensureTaskPanel(
+              result?.thread ?? this.#threadFromBinding({ ...binding, completionReportsEnabled: enabled }),
+              channel,
+              binding.archived,
+            );
+            await interaction.followUp(messageOptions(
+              `完了報告への投稿を **${enabled ? 'ON' : 'OFF'}** に設定しました。`,
+              { ephemeral: true },
+            ));
+            return;
+          }
+          throw new Error(`Unknown notification setting: ${interaction.values[0]}`);
+        }
         if (action === 'watch') {
           const level = interaction.values[0];
           if (!['quiet', 'normal', 'verbose'].includes(level)) throw new Error(`Unknown watch level: ${level}`);
@@ -3291,79 +3411,7 @@ export class DiscordController {
       if (surface === 'task') {
         const threadId = parts[4];
         const binding = this.#assertTaskPanelInteraction(interaction, threadId);
-        if (action === 'refresh') {
-          await interaction.deferReply({ ephemeral: true });
-          const result = await this.codex.readThread(threadId);
-          const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
-          await this.#ensureTaskPanel(result.thread, channel, binding.archived);
-          await this.#showTaskStatus(interaction, threadId);
-          return;
-        }
-        if (action === 'pending') {
-          await interaction.reply(messageOptions(this.#pendingContent(threadId), { ephemeral: true }));
-          return;
-        }
-        if (action === 'interrupt') {
-          await this.#showInterruptConfirmation(interaction, threadId);
-          return;
-        }
-        if (action === 'controls') {
-          await interaction.deferReply({ ephemeral: true });
-          await this.#showTaskControls(interaction, threadId);
-          return;
-        }
-        if (action === 'files') {
-          await interaction.deferReply({ ephemeral: true });
-          await this.#startFileBrowser(interaction, threadId);
-          return;
-        }
-        if (action === 'project') {
-          this.#assertFileSharingEnabled();
-          await this.#showConfirmation(
-            interaction,
-            { type: 'projectArchive', threadId },
-            [
-              `プロジェクト全体 \`${truncate(binding.cwd, 1200)}\` をタスクチャンネルへ投稿しますか？`,
-              '`.git`、`.env`、鍵・資格情報など、通常のファイルブラウザでは保護される通常ファイルも含まれます。',
-              projectArchiveVolumeText(this.config),
-              'symlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
-            ].join('\n'),
-            'Archiveを作成',
-          );
-          return;
-        }
-        if (action === 'git') {
-          this.#assertFileSharingEnabled();
-          if (!binding.cwd) throw new Error('このタスクには取得できるプロジェクトフォルダがありません。');
-          await this.#showConfirmation(
-            interaction,
-            { type: 'gitArchive', threadId },
-            [
-              `プロジェクト直下の \`${truncate(path.join(binding.cwd, '.git'), 1200)}\` だけをタスクチャンネルへ投稿しますか？`,
-              'Git履歴、remote URL、設定、hooks、資格情報を含む可能性があります。作業ツリーの通常ファイルは含めません。',
-              projectArchiveVolumeText(this.config),
-              '.git内のsymlink・junction・特殊ファイルはプロジェクト外参照を防ぐため含めません。',
-            ].join('\n'),
-            '.gitを作成',
-          );
-          return;
-        }
-        if (action === 'archive') {
-          await interaction.deferReply({ ephemeral: true });
-          if (binding.archived) {
-            await this.codex.unarchiveThread(threadId);
-            await this.codex.resumeThread(threadId);
-            this.stateStore.setBinding(threadId, { archived: false });
-          } else {
-            await this.codex.archiveThread(threadId);
-            await this.codex.unsubscribeThread(threadId);
-            this.stateStore.setBinding(threadId, { archived: true });
-          }
-          await this.#syncAllTasks();
-          const updated = this.stateStore.binding(threadId);
-          await interaction.editReply(`${binding.archived ? '復元' : 'アーカイブ'}しました: ${channelMention(updated.channelId)}`);
-          return;
-        }
+        await this.#handleTaskPanelAction(interaction, action, threadId, binding);
         return;
       }
       return;

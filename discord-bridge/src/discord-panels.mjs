@@ -170,6 +170,7 @@ export function taskPanelPayload({ thread, binding }) {
   const archived = Boolean(binding.archived);
   const active = thread.status?.type === 'active';
   const watchLevel = binding.watchLevel ?? 'normal';
+  const watchLabel = { quiet: '少なめ', normal: '標準', verbose: '詳しく' }[watchLevel] ?? watchLevel;
   const completionReportsEnabled = binding.completionReportsEnabled !== false;
   const marker = taskPanelMarker(thread.id);
   const embed = new EmbedBuilder()
@@ -186,72 +187,74 @@ export function taskPanelPayload({ thread, binding }) {
 
   const compose = new StringSelectMenuBuilder()
     .setCustomId(`cx:ui:task:compose:${thread.id}`)
-    .setPlaceholder('指示の送信方法を選択')
+    .setPlaceholder('💬 指示を送る')
     .setDisabled(archived)
     .addOptions(
-      new StringSelectMenuOptionBuilder().setLabel('自動').setDescription('稼働中は追加、停止中は新しいターン').setValue('deliver'),
-      new StringSelectMenuOptionBuilder().setLabel('新しいターン').setDescription('停止中のタスクへ送信').setValue('send'),
-      new StringSelectMenuOptionBuilder().setLabel('追加指示').setDescription('現在のターンへ送信').setValue('steer'),
+      new StringSelectMenuOptionBuilder().setLabel('自動で送信').setDescription('稼働中は追加、停止中は新しいターン').setValue('deliver').setEmoji('✨'),
+      new StringSelectMenuOptionBuilder().setLabel('新しいターンとして送信').setDescription('停止中のタスクへ新しい指示を送信').setValue('send').setEmoji('🆕'),
+      new StringSelectMenuOptionBuilder().setLabel('実行中のターンへ追加').setDescription('現在の処理へ追加指示を送信').setValue('steer').setEmoji('↪️'),
     );
-  const watch = new StringSelectMenuBuilder()
-    .setCustomId(`cx:ui:task:watch:${thread.id}`)
-    .setPlaceholder('通知レベル')
-    .addOptions(['quiet', 'normal', 'verbose'].map((level) => new StringSelectMenuOptionBuilder()
-      .setLabel(level)
-      .setValue(level)
-      .setDefault(level === watchLevel)));
-  const completionReports = new StringSelectMenuBuilder()
-    .setCustomId(`cx:ui:task:completion:${thread.id}`)
-    .setPlaceholder('完了報告への投稿')
+  const taskActions = new StringSelectMenuBuilder()
+    .setCustomId(`cx:ui:task:actions:${thread.id}`)
+    .setPlaceholder('⚙️ タスクを管理')
     .addOptions(
       new StringSelectMenuOptionBuilder()
-        .setLabel('投稿する')
-        .setDescription('codex-completionsへ完了報告を投稿')
-        .setValue('enabled')
-        .setDefault(completionReportsEnabled),
+        .setLabel('状態を更新')
+        .setDescription('最新の状態と実行設定を読み直す')
+        .setValue('refresh')
+        .setEmoji('🔄'),
       new StringSelectMenuOptionBuilder()
-        .setLabel('投稿しない')
-        .setDescription('結果はタスクチャンネル内だけに残す')
-        .setValue('disabled')
-        .setDefault(!completionReportsEnabled),
+        .setLabel('確認待ちを表示')
+        .setDescription('承認・質問・入力待ちを確認する')
+        .setValue('pending')
+        .setEmoji('📥'),
     );
-  const actions = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`cx:ui:task:refresh:${thread.id}`).setLabel('Refresh').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`cx:ui:task:pending:${thread.id}`).setLabel('Pending').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`cx:ui:task:controls:${thread.id}`).setLabel('Controls').setStyle(ButtonStyle.Primary).setDisabled(archived),
-    new ButtonBuilder()
-      .setCustomId(`cx:ui:task:archive:${thread.id}`)
-      .setLabel(archived ? 'Restore' : 'Archive')
-      .setStyle(archived ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`cx:ui:task:interrupt:${thread.id}`)
-      .setLabel('Interrupt')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(archived || !active),
-  );
+  if (!archived) {
+    taskActions.addOptions(new StringSelectMenuOptionBuilder()
+      .setLabel('実行設定を開く')
+      .setDescription('モデル・推論・権限などを変更する')
+      .setValue('controls')
+      .setEmoji('🛠️'));
+  }
+  if (!archived && active) {
+    taskActions.addOptions(new StringSelectMenuOptionBuilder()
+      .setLabel('実行を中断')
+      .setDescription('確認してから現在のターンを停止する')
+      .setValue('interrupt')
+      .setEmoji('⏹️'));
+  }
+  taskActions.addOptions(new StringSelectMenuOptionBuilder()
+    .setLabel(archived ? 'タスクを復元' : 'タスクをアーカイブ')
+    .setDescription(archived ? '通常のプロジェクトカテゴリへ戻す' : 'アーカイブカテゴリへ移動する')
+    .setValue('archive')
+    .setEmoji(archived ? '♻️' : '🗄️'));
+
+  const notifications = new StringSelectMenuBuilder()
+    .setCustomId(`cx:ui:task:notifications:${thread.id}`)
+    .setPlaceholder(`🔔 通知を設定（進行: ${watchLabel} / 完了: ${completionReportsEnabled ? 'ON' : 'OFF'}）`)
+    .addOptions(
+      new StringSelectMenuOptionBuilder().setLabel('進行通知: 少なめ').setDescription('重要な進行だけを表示').setValue('watch:quiet').setEmoji('🔕'),
+      new StringSelectMenuOptionBuilder().setLabel('進行通知: 標準').setDescription('通常の進行を表示').setValue('watch:normal').setEmoji('🔔'),
+      new StringSelectMenuOptionBuilder().setLabel('進行通知: 詳しく').setDescription('詳細な進行も表示').setValue('watch:verbose').setEmoji('📣'),
+      new StringSelectMenuOptionBuilder().setLabel('完了通知: 投稿する').setDescription('codex-completionsへ完了報告を投稿').setValue('completion:enabled').setEmoji('✅'),
+      new StringSelectMenuOptionBuilder().setLabel('完了通知: 投稿しない').setDescription('結果はタスクチャンネル内だけに残す').setValue('completion:disabled').setEmoji('🚫'),
+    );
+
+  const fileActions = new StringSelectMenuBuilder()
+    .setCustomId(`cx:ui:task:file-actions:${thread.id}`)
+    .setPlaceholder('📁 ファイルを開く・取得')
+    .addOptions(
+      new StringSelectMenuOptionBuilder().setLabel('プロジェクト内を見る').setDescription('フォルダを移動して個別ファイルを取得').setValue('files').setEmoji('📂'),
+      new StringSelectMenuOptionBuilder().setLabel('プロジェクト全体を取得').setDescription('確認後、分割archiveとして投稿').setValue('project').setEmoji('📦'),
+      new StringSelectMenuOptionBuilder().setLabel('.gitだけを取得').setDescription('確認後、Git metadataだけを投稿').setValue('git').setEmoji('🗃️'),
+    );
   return {
     embeds: [embed],
     components: [
       new ActionRowBuilder().addComponents(compose),
-      new ActionRowBuilder().addComponents(watch),
-      actions,
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`cx:ui:task:files:${thread.id}`)
-          .setLabel('Project files')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(`cx:ui:task:project:${thread.id}`)
-          .setLabel('Download project')
-          .setEmoji('📦')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(`cx:ui:task:git:${thread.id}`)
-          .setLabel('Download .git')
-          .setEmoji('🗃️')
-          .setStyle(ButtonStyle.Secondary),
-      ),
-      new ActionRowBuilder().addComponents(completionReports),
+      new ActionRowBuilder().addComponents(taskActions),
+      new ActionRowBuilder().addComponents(notifications),
+      new ActionRowBuilder().addComponents(fileActions),
     ],
     allowedMentions: { parse: [] },
   };

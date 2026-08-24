@@ -2235,8 +2235,8 @@ test('task panel completion-report selection persists the task setting', async (
     channelId: channel.id,
     channel,
     user: { id: 'user-1' },
-    customId: `cx:ui:task:completion:${thread.id}`,
-    values: ['disabled'],
+    customId: `cx:ui:task:notifications:${thread.id}`,
+    values: ['completion:disabled'],
     deferred: false,
     replied: false,
     isAutocomplete: () => false,
@@ -2261,8 +2261,8 @@ test('task panel completion-report selection persists the task setting', async (
   assert.ok(panel);
   const embed = panel.embeds[0].toJSON();
   assert.equal(embed.fields.find((field) => field.name === 'Completion report').value, 'OFF');
-  const completionSelect = panel.components[4].toJSON().components[0];
-  assert.equal(completionSelect.options.find((option) => option.default).value, 'disabled');
+  const notificationSelect = panel.components[2].toJSON().components[0];
+  assert.match(notificationSelect.placeholder, /完了: OFF/);
 
   codex.emit('subscriptionRestored', {
     binding: structuredClone(binding),
@@ -3277,7 +3277,7 @@ test('task control panel delivery-mode select opens the compose modal', async (c
   assert.equal(shownModal.components[0].components[0].custom_id, 'prompt');
 });
 
-test('task Controls button opens catalog-backed UI and confirms permission changes', async (context) => {
+test('task management menu opens catalog-backed UI and confirms permission changes', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const client = new EventEmitter();
@@ -3349,9 +3349,10 @@ test('task Controls button opens catalog-backed UI and confirms permission chang
 
   const controls = await emitInteraction({
     ...base,
-    customId: `cx:ui:task:controls:${binding.threadId}`,
-    isButton: () => true,
-    isStringSelectMenu: () => false,
+    customId: `cx:ui:task:actions:${binding.threadId}`,
+    values: ['controls'],
+    isButton: () => false,
+    isStringSelectMenu: () => true,
   });
   assert.deepEqual(controls.components.map((row) => row.toJSON().components[0].custom_id), [
     'cx:ctl:model:thread-1',
@@ -3686,19 +3687,20 @@ test('task file UI browses project entries and resolves assistant-linked files o
     },
   };
 
-  const interaction = (customId, message = null) => ({
+  const interaction = (customId, message = null, values = []) => ({
     guildId: 'guild-1',
     channelId: binding.channelId,
     channel: taskChannel,
     user: { id: 'user-1' },
     customId,
     message,
+    values,
     deferred: false,
     replied: false,
     isAutocomplete: () => false,
     isChatInputCommand: () => false,
-    isStringSelectMenu: () => false,
-    isButton: () => true,
+    isStringSelectMenu: () => values.length > 0,
+    isButton: () => values.length === 0,
     isModalSubmit: () => false,
     isRepliable: () => true,
     deferReply: async function deferReply(options) { this.deferred = true; this.deferReplyOptions = options; },
@@ -3708,7 +3710,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
     followUp: async function followUp(payload) { this.lastFollowUp = payload; return payload; },
   });
 
-  const browser = interaction(`cx:ui:task:files:${binding.threadId}`);
+  const browser = interaction(`cx:ui:task:file-actions:${binding.threadId}`, null, ['files']);
   client.emit('interactionCreate', browser);
   for (let attempt = 0; attempt < 100 && !browser.lastReply; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3718,7 +3720,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
   assert.ok(browserOptions.some((option) => option.label.includes('artifact.txt')));
   assert.match(browserOptions.find((option) => option.label.includes('.env')).description, /ダウンロード/);
 
-  const projectDownload = interaction(`cx:ui:task:project:${binding.threadId}`);
+  const projectDownload = interaction(`cx:ui:task:file-actions:${binding.threadId}`, null, ['project']);
   client.emit('interactionCreate', projectDownload);
   for (let attempt = 0; attempt < 100 && !projectDownload.lastReply; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3733,7 +3735,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
   assert.match(projectConfirm.custom_id, /^cx:confirm:[^:]+:yes$/);
   assert.equal(projectConfirm.label, 'Archiveを作成');
 
-  const gitDownload = interaction(`cx:ui:task:git:${binding.threadId}`);
+  const gitDownload = interaction(`cx:ui:task:file-actions:${binding.threadId}`, null, ['git']);
   client.emit('interactionCreate', gitDownload);
   for (let attempt = 0; attempt < 100 && !gitDownload.lastReply; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
