@@ -64,6 +64,9 @@ outbound connection to Discord.
   instruction, manage the task, configure notifications, and browse or download
   files. Dangerous and secret-bearing actions keep their existing confirmation
   steps, and legacy button IDs remain accepted while old panels are replaced.
+  The first synchronization after Bridge startup also reconciles every stored
+  visible task panel, including archived tasks outside the normal bounded
+  history-sync window.
 - Provides a dropdown-first task control center backed by live app-server
   catalogs for model, reasoning effort, named permission profile, and
   Plan/Default mode. Additional screens expose Fast/service tier, personality,

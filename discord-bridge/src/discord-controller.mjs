@@ -3752,9 +3752,15 @@ export class DiscordController {
 
   #startTaskSyncPolling() {
     if (this.stopping || this.taskSyncTimer) return;
+    let initialPanelLayoutRefreshPending = true;
     const run = () => {
       if (this.stopping || !this.codex.connected) return;
-      this.#syncAllTasks().then((result) => {
+      this.#syncAllTasks().then(async (result) => {
+        if (initialPanelLayoutRefreshPending) {
+          initialPanelLayoutRefreshPending = false;
+          const panelRefresh = await this.#refreshStoredTaskPanelLayouts();
+          this.#log('task-panel-layout-refresh', panelRefresh);
+        }
         if (result.created > 0 || result.moved > 0) {
           postTaskSyncSummary(this.client, this.stateStore, result).catch(() => {});
         }
@@ -3770,6 +3776,38 @@ export class DiscordController {
       run();
     }, 5_000);
     this.taskSyncInitialTimer.unref?.();
+  }
+
+  async #refreshStoredTaskPanelLayouts() {
+    const bindings = stateBindingSummaries(this.stateStore)
+      .filter((binding) => binding.channelId && !this.#isBindingHidden(binding));
+    const result = { checked: 0, failed: 0 };
+    let nextIndex = 0;
+    const worker = async () => {
+      while (!this.stopping && nextIndex < bindings.length) {
+        const binding = bindings[nextIndex];
+        nextIndex += 1;
+        try {
+          const channel = await this.client.channels.fetch(binding.channelId);
+          if (channel?.type !== ChannelType.GuildText) continue;
+          await this.#ensureTaskPanel(
+            this.#threadFromBinding(binding),
+            channel,
+            Boolean(binding.archived),
+          );
+          result.checked += 1;
+        } catch (error) {
+          result.failed += 1;
+          this.#log('task-panel-layout-refresh-failed', {
+            threadId: binding.threadId,
+            channelId: binding.channelId,
+            error: error.stack ?? error.message,
+          });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, bindings.length) }, () => worker()));
+    return result;
   }
 
   async #syncAllTasks() {

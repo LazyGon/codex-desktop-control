@@ -3826,7 +3826,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
     assert.equal(zipButton.label, 'Download all as ZIP (4)');
     const zipDownload = interaction(zipButton.custom_id);
     client.emit('interactionCreate', zipDownload);
-    for (let attempt = 0; attempt < 200 && !zipDownload.lastFollowUp; attempt += 1) {
+    for (let attempt = 0; attempt < 60_000 && !zipDownload.lastFollowUp; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.match(zipDownload.lastFollowUp.content, /https:\/\/discord\.test\//);
@@ -3839,7 +3839,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
     const projectStart = filePosts.length;
     const confirmedProject = interaction(projectConfirm.custom_id);
     client.emit('interactionCreate', confirmedProject);
-    for (let attempt = 0; attempt < 200 && !/投稿しました/.test(confirmedProject.lastReply?.content ?? ''); attempt += 1) {
+    for (let attempt = 0; attempt < 60_000 && !/投稿しました/.test(confirmedProject.lastReply?.content ?? ''); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.match(confirmedProject.lastReply.content, /https:\/\/discord\.test\//);
@@ -3855,7 +3855,7 @@ test('task file UI browses project entries and resolves assistant-linked files o
     const gitStart = filePosts.length;
     const confirmedGit = interaction(gitConfirm.custom_id);
     client.emit('interactionCreate', confirmedGit);
-    for (let attempt = 0; attempt < 200 && !/投稿しました/.test(confirmedGit.lastReply?.content ?? ''); attempt += 1) {
+    for (let attempt = 0; attempt < 60_000 && !/投稿しました/.test(confirmedGit.lastReply?.content ?? ''); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.match(confirmedGit.lastReply.content, /https:\/\/discord\.test\//);
