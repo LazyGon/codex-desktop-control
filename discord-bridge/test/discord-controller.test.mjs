@@ -11,6 +11,7 @@ import {
   completionRecoveryCandidate,
   DiscordController,
   emptyDuplicateUserEntryIds,
+  forkOwnTurns,
   isActiveSubagentThread,
   isSubagentCodexThread,
   managedProjectCategoryCleanupPlan,
@@ -296,6 +297,16 @@ test('session card ordering keeps steer messages inside the active instruction s
       'user:user-steer',
       'detail:assistant-after',
     ],
+  );
+});
+
+test('fork transcript keeps only turns created at or after the fork', () => {
+  const inherited = { id: 'inherited-turn', completedAt: 100 };
+  const own = { id: 'own-turn', startedAt: 200 };
+  const unknown = { id: 'legacy-unknown-turn' };
+  assert.deepEqual(
+    forkOwnTurns({ id: 'forked-thread', turns: [inherited, own, unknown] }, 150_000),
+    [own, unknown],
   );
 });
 

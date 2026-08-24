@@ -102,6 +102,7 @@ test('task panel groups delivery, task, notification, and file actions into four
   ]);
   assert.equal(active.components[0].components[0].placeholder, '💬 指示を送る');
   assert.equal(active.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'ON');
+  assert.equal(active.embeds[0].fields.some((field) => field.name === 'Forked from'), false);
   assert.equal(active.components[1].components[0].custom_id, `cx:ui:task:actions:${thread.id}`);
   assert.equal(active.components[1].components[0].placeholder, '⚙️ タスクを管理');
   assert.deepEqual(active.components[1].components[0].options.map((option) => option.value), [
@@ -136,4 +137,24 @@ test('task panel groups delivery, task, notification, and file actions into four
   assert.match(archived.components[2].components[0].placeholder, /進行: 少なめ \/ 完了: OFF/);
   assert.equal(archived.components[3].components[0].disabled ?? false, false);
   assert.equal(archived.embeds[0].fields.find((field) => field.name === 'Completion report').value, 'OFF');
+});
+
+test('forked task panel links its source channel without duplicating source history', () => {
+  const payload = json(taskPanelPayload({
+    thread: {
+      id: 'forked-thread',
+      name: 'Forked task',
+      cwd: 'C:\\work',
+      status: { type: 'idle' },
+    },
+    binding: {
+      threadId: 'forked-thread',
+      forkedFromThreadId: 'source-thread',
+      forkedFromChannelId: '123456789012345678',
+    },
+  }));
+  assert.equal(
+    payload.embeds[0].fields.find((field) => field.name === 'Forked from').value,
+    '<#123456789012345678> / task `source-thread`',
+  );
 });

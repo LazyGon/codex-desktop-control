@@ -173,6 +173,12 @@ export function taskPanelPayload({ thread, binding }) {
   const watchLabel = { quiet: '少なめ', normal: '標準', verbose: '詳しく' }[watchLevel] ?? watchLevel;
   const completionReportsEnabled = binding.completionReportsEnabled !== false;
   const marker = taskPanelMarker(thread.id);
+  const forkSource = binding.forkedFromThreadId
+    ? [
+      binding.forkedFromChannelId ? `<#${binding.forkedFromChannelId}>` : null,
+      `task \`${binding.forkedFromThreadId}\``,
+    ].filter(Boolean).join(' / ')
+    : null;
   const embed = new EmbedBuilder()
     .setTitle(truncate(thread.name ?? thread.preview ?? 'Codex task', 256, ''))
     .setColor(CONTROL_PANEL_COLOR)
@@ -181,6 +187,7 @@ export function taskPanelPayload({ thread, binding }) {
       { name: 'Watch', value: watchLevel, inline: true },
       { name: 'Completion report', value: completionReportsEnabled ? 'ON' : 'OFF', inline: true },
       { name: 'Task ID', value: `\`${thread.id}\`` },
+      ...(forkSource ? [{ name: 'Forked from', value: forkSource }] : []),
       { name: 'Project', value: `\`${truncate(thread.cwd ?? binding.cwd ?? '(none)', 1000)}\`` },
     )
     .setFooter({ text: marker });

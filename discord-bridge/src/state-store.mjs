@@ -162,6 +162,10 @@ export class StateStore {
       cwd: binding.cwd ?? null,
       sessionPath: binding.sessionPath ?? null,
       name: binding.name ?? null,
+      forkedFromThreadId: binding.forkedFromThreadId ?? null,
+      forkedFromChannelId: binding.forkedFromChannelId ?? null,
+      forkedAtMs: Number.isFinite(binding.forkedAtMs) ? binding.forkedAtMs : null,
+      forkTranscriptVersion: binding.forkTranscriptVersion ?? 0,
       taskStatus: binding.taskStatus ?? 'unknown',
       archived: Boolean(binding.archived),
       hidden: Boolean(binding.hidden),
@@ -289,6 +293,19 @@ export class StateStore {
       state.subagentThreads[threadId].turnMessages ??= {};
       for (const turnId of Object.keys(state.subagentThreads[threadId].turnMessages)) {
         if (!retained.has(turnId)) delete state.subagentThreads[threadId].turnMessages[turnId];
+      }
+    });
+  }
+
+  retainBindingTurnRecords(threadId, turnIds) {
+    if (!this.value.bindings[threadId]) {
+      throw new Error(`Unknown task binding: ${threadId}`);
+    }
+    const retained = new Set(turnIds ?? []);
+    return this.update((state) => {
+      state.bindings[threadId].turnMessages ??= {};
+      for (const turnId of Object.keys(state.bindings[threadId].turnMessages)) {
+        if (!retained.has(turnId)) delete state.bindings[threadId].turnMessages[turnId];
       }
     });
   }

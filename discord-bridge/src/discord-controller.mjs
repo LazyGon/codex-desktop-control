@@ -52,6 +52,7 @@ import {
   uuidV7TimestampMs,
 } from './recent-history.mjs';
 import { readSessionTurnCardOrder } from './session-message-order.mjs';
+import { readSessionForkInfo } from './session-fork-info.mjs';
 import {
   contentCardComponents,
   fileBrowserPayload,
@@ -256,6 +257,17 @@ export function subagentOwnTurns(thread) {
     if (timestamp === null || timestamp < childTimestamp) return false;
     if (timestamp > childTimestamp) return true;
     return String(turn.id ?? '').localeCompare(String(thread.id)) >= 0;
+  });
+}
+
+export function forkOwnTurns(thread, forkedAtMs = null) {
+  const cutoffMs = Number.isFinite(forkedAtMs)
+    ? forkedAtMs
+    : uuidV7TimestampMs(thread?.id);
+  if (cutoffMs === null) return thread?.turns ?? [];
+  return (thread?.turns ?? []).filter((turn) => {
+    const timestamp = turnTimestampMs(turn);
+    return timestamp === null || timestamp >= cutoffMs;
   });
 }
 
@@ -510,6 +522,7 @@ export class DiscordController {
     this.projectCategoryPromises = new Map();
     this.subagentSyncPromises = new Map();
     this.nonSubagentThreadIds = new Map();
+    this.forkMetadataCheckedThreadIds = new Set();
     this.internalChannelMoves = new Map();
     this.internalChannelNames = new Map();
     this.taskChannelMetadataUpdates = new LatestUpdateQueue({
@@ -4790,7 +4803,11 @@ export class DiscordController {
         0,
       );
     }
-    if (created || (existingBinding?.transcriptVersion ?? 0) < 11) {
+    const forkTranscriptPending = Boolean(
+      recoveryBinding?.forkedFromThreadId
+      && (recoveryBinding.forkTranscriptVersion ?? 0) < 1,
+    );
+    if (created || (existingBinding?.transcriptVersion ?? 0) < 11 || forkTranscriptPending) {
       if (!this.transcriptSyncPromises.has(thread.id)) {
         this.#log('task-transcript-sync-scheduled', {
           threadId: thread.id,
@@ -5142,6 +5159,29 @@ export class DiscordController {
     const colliding = this.stateStore.bindingByChannel(channel.id);
     if (colliding && colliding.threadId !== thread.id) this.stateStore.removeBinding(colliding.threadId);
     const existing = stateBindingSummary(this.stateStore, thread.id);
+    const sessionPath = thread.path ?? existing?.sessionPath ?? null;
+    let forkPatch = {};
+    if (sessionPath
+      && !existing?.forkedFromThreadId
+      && !this.forkMetadataCheckedThreadIds.has(thread.id)) {
+      const forkInfo = await readSessionForkInfo(sessionPath, thread.id);
+      if (forkInfo) {
+        this.forkMetadataCheckedThreadIds.add(thread.id);
+        if (forkInfo.forkedFromThreadId) {
+          forkPatch = {
+            forkedFromThreadId: forkInfo.forkedFromThreadId,
+            forkedAtMs: forkInfo.forkedAtMs,
+          };
+        }
+      }
+    }
+    const forkedFromThreadId = forkPatch.forkedFromThreadId ?? existing?.forkedFromThreadId ?? null;
+    const forkedFromChannelId = forkedFromThreadId
+      ? stateBindingSummary(this.stateStore, forkedFromThreadId)?.channelId
+        ?? existing?.forkedFromChannelId
+        ?? null
+      : null;
+    const forkChannelPatch = forkedFromThreadId ? { forkedFromChannelId } : {};
     this.stateStore.setBinding(thread.id, {
       channelId: channel.id,
       categoryId,
@@ -5152,7 +5192,9 @@ export class DiscordController {
       name: thread.name ?? thread.preview ?? null,
       taskStatus: thread.status?.type ?? 'unknown',
       cwd: thread.cwd ?? null,
-      sessionPath: thread.path ?? existing?.sessionPath ?? null,
+      sessionPath,
+      ...forkPatch,
+      ...forkChannelPatch,
       watchLevel: existing?.watchLevel ?? this.config.defaultWatchLevel,
       completionReportsEnabled: existing?.completionReportsEnabled ?? true,
       lastCompletedTurnId: existing?.lastCompletedTurnId ?? null,
@@ -5964,7 +6006,7 @@ export class DiscordController {
     }
   }
 
-  async #cleanupInheritedSubagentMessages(binding, channel, messages, ownTurnIds) {
+  async #cleanupInheritedTurnMessages(binding, channel, messages, ownTurnIds, reason) {
     const stale = [];
     for (const message of [...messages.values()]) {
       if (message.author.id !== this.client.user.id) continue;
@@ -5979,7 +6021,7 @@ export class DiscordController {
         const deleted = await channel.bulkDelete(
           batch.map((message) => message.id),
           true,
-          `Remove inherited Codex turns from subagent ${binding.threadId}`,
+          reason,
         );
         for (const id of deleted.keys()) messages.delete(id);
       }
@@ -6044,12 +6086,18 @@ export class DiscordController {
     // thread/list entries can omit historical turns and items. Reconciliation
     // must only prune Discord messages against a fully hydrated transcript.
     const hydratedThread = (await this.codex.readThread(threadId)).thread;
+    const forked = !binding.isSubagent && binding.forkedFromThreadId;
     const thread = binding.isSubagent
       ? { ...hydratedThread, turns: subagentOwnTurns(hydratedThread) }
+      : forked
+        ? { ...hydratedThread, turns: forkOwnTurns(hydratedThread, binding.forkedAtMs) }
       : hydratedThread;
     const ownTurnIds = new Set((thread.turns ?? []).map((turn) => turn.id));
     if (binding.isSubagent && typeof this.stateStore.retainSubagentTurnRecords === 'function') {
       this.stateStore.retainSubagentTurnRecords(threadId, ownTurnIds);
+    }
+    if (forked && typeof this.stateStore.retainBindingTurnRecords === 'function') {
+      this.stateStore.retainBindingTurnRecords(threadId, ownTurnIds);
     }
     const messages = await this.#fetchChannelHistory(channel);
     const sessionOrderRepairTurnIds = recentSinceMs === null
@@ -6077,7 +6125,22 @@ export class DiscordController {
       });
     }
     if (binding.isSubagent) {
-      await this.#cleanupInheritedSubagentMessages(binding, channel, messages, ownTurnIds);
+      await this.#cleanupInheritedTurnMessages(
+        binding,
+        channel,
+        messages,
+        ownTurnIds,
+        `Remove inherited Codex turns from subagent ${binding.threadId}`,
+      );
+    }
+    if (forked) {
+      await this.#cleanupInheritedTurnMessages(
+        binding,
+        channel,
+        messages,
+        ownTurnIds,
+        `Remove inherited Codex turns from fork ${binding.threadId}`,
+      );
     }
     const completedTurns = recentSinceMs === null
       ? (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress')
@@ -6268,12 +6331,13 @@ export class DiscordController {
     const latestUsers = latestCompleted ? this.#userMessagesFromThread({ turns: [latestCompleted] }) : [];
     this.stateStore.setBinding(threadId, {
       transcriptVersion: 11,
+      ...(forked ? { forkTranscriptVersion: 1 } : {}),
       snapshotInitialized: true,
-      lastCompletedTurnId: latestCompleted?.id ?? binding.lastCompletedTurnId ?? null,
+      lastCompletedTurnId: latestCompleted?.id ?? (forked ? null : binding.lastCompletedTurnId ?? null),
       lastCompletionMessageId: this.stateStore.turnRecord(threadId, latestCompleted?.id)?.finalMessageIds?.[0]
-        ?? binding.lastCompletionMessageId
-        ?? null,
-      lastMirroredUserItemId: latestUsers.at(-1)?.id ?? binding.lastMirroredUserItemId ?? null,
+        ?? (forked ? null : binding.lastCompletionMessageId ?? null),
+      lastMirroredUserItemId: latestUsers.at(-1)?.id
+        ?? (forked ? null : binding.lastMirroredUserItemId ?? null),
     });
     return { thread, latestCompleted };
   }

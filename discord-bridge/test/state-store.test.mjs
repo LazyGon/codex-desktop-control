@@ -102,8 +102,13 @@ test('StateStore persists bindings atomically', () => {
       liveMessageId: null,
       finalMessageIds: ['message-final'],
     });
+    second.setTurnRecord('thread-1', 'inherited-fork-turn', {
+      cardMessageId: 'inherited-card',
+    });
+    second.retainBindingTurnRecords('thread-1', new Set(['turn-1']));
     assert.equal(second.turnRecord('thread-1', 'turn-1').liveMessageId, null);
     assert.deepEqual(second.turnRecord('thread-1', 'turn-1').finalMessageIds, ['message-final']);
+    assert.equal(second.turnRecord('thread-1', 'inherited-fork-turn'), null);
     second.setSubagentThread('child-thread-1', {
       channelId: 'discord-thread-1',
       parentThreadId: 'thread-1',
