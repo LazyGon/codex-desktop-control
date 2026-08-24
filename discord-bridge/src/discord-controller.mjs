@@ -271,6 +271,18 @@ export function forkOwnTurns(thread, forkedAtMs = null) {
   });
 }
 
+export function shouldCleanupOnlyExistingFork({
+  created,
+  transcriptVersion,
+  forkedFromThreadId,
+  forkTranscriptVersion,
+}) {
+  return !created
+    && (transcriptVersion ?? 0) >= 11
+    && Boolean(forkedFromThreadId)
+    && (forkTranscriptVersion ?? 0) < 1;
+}
+
 export function subagentDiscordThreadName(thread) {
   const metadata = subagentMetadata(thread);
   const pathName = String(metadata.agentPath ?? '')
@@ -4807,6 +4819,12 @@ export class DiscordController {
       recoveryBinding?.forkedFromThreadId
       && (recoveryBinding.forkTranscriptVersion ?? 0) < 1,
     );
+    const forkCleanupOnly = shouldCleanupOnlyExistingFork({
+      created,
+      transcriptVersion: existingBinding?.transcriptVersion,
+      forkedFromThreadId: recoveryBinding?.forkedFromThreadId,
+      forkTranscriptVersion: recoveryBinding?.forkTranscriptVersion,
+    });
     if (created || (existingBinding?.transcriptVersion ?? 0) < 11 || forkTranscriptPending) {
       if (!this.transcriptSyncPromises.has(thread.id)) {
         this.#log('task-transcript-sync-scheduled', {
@@ -4814,7 +4832,7 @@ export class DiscordController {
           channelId: channel.id,
           created,
         });
-        this.#reconcileThreadTranscript(thread.id, { channel, archived })
+        this.#reconcileThreadTranscript(thread.id, { channel, archived, forkCleanupOnly })
           .then(() => this.#repostTaskPanelAfterTranscript(thread, channel, archived))
           .catch(() => {});
       }
@@ -6049,6 +6067,7 @@ export class DiscordController {
         threadId,
         activeOnly: Boolean(options.activeOnly),
         boundedHistory: Number.isFinite(options.recentSinceMs),
+        forkCleanupOnly: Boolean(options.forkCleanupOnly),
       });
       try {
         const result = await this.#performTranscriptReconciliation(threadId, options);
@@ -6056,6 +6075,7 @@ export class DiscordController {
           threadId,
           activeOnly: Boolean(options.activeOnly),
           boundedHistory: Number.isFinite(options.recentSinceMs),
+          forkCleanupOnly: Boolean(options.forkCleanupOnly),
         });
         return result;
       } catch (error) {
@@ -6078,6 +6098,7 @@ export class DiscordController {
     activeOnly = false,
     recentSinceMs = null,
     includeHistoricalDetails = false,
+    forkCleanupOnly = false,
   } = {}) {
     if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
     const binding = this.stateStore.binding(threadId);
@@ -6141,6 +6162,10 @@ export class DiscordController {
         ownTurnIds,
         `Remove inherited Codex turns from fork ${binding.threadId}`,
       );
+    }
+    if (forked && forkCleanupOnly) {
+      this.stateStore.setBinding(threadId, { forkTranscriptVersion: 1 });
+      return { thread, latestCompleted: null, forkCleanupOnly: true };
     }
     const completedTurns = recentSinceMs === null
       ? (thread.turns ?? []).filter((turn) => turn.status !== 'inProgress')

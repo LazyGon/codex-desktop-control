@@ -21,6 +21,7 @@ import {
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
+  shouldCleanupOnlyExistingFork,
   shouldPeriodicallySyncSubagent,
   subagentDiscordThreadName,
   subagentIdsFromThread,
@@ -308,6 +309,20 @@ test('fork transcript keeps only turns created at or after the fork', () => {
     forkOwnTurns({ id: 'forked-thread', turns: [inherited, own, unknown] }, 150_000),
     [own, unknown],
   );
+});
+
+test('existing fork migration cleans inherited cards without backfilling old child turns', () => {
+  const base = {
+    created: false,
+    transcriptVersion: 11,
+    forkedFromThreadId: 'source-thread',
+    forkTranscriptVersion: 0,
+  };
+  assert.equal(shouldCleanupOnlyExistingFork(base), true);
+  assert.equal(shouldCleanupOnlyExistingFork({ ...base, created: true }), false);
+  assert.equal(shouldCleanupOnlyExistingFork({ ...base, transcriptVersion: 10 }), false);
+  assert.equal(shouldCleanupOnlyExistingFork({ ...base, forkTranscriptVersion: 1 }), false);
+  assert.equal(shouldCleanupOnlyExistingFork({ ...base, forkedFromThreadId: null }), false);
 });
 
 test('session JSONL restores synthetic user item IDs around steer chronology', async (context) => {
