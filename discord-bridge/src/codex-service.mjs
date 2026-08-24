@@ -14,6 +14,7 @@ import {
   threadStatusLabel,
 } from './util.mjs';
 import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
+import { forkOwnTurns } from './session-fork-info.mjs';
 
 function attachmentValues(attachments) {
   if (!attachments) return [];
@@ -75,6 +76,11 @@ export async function forEachConcurrent(items, maximum, operation) {
     { length: Math.min(Math.max(1, maximum), items.length) },
     () => worker(),
   ));
+}
+
+export function threadForSubscriptionRestore(binding, thread) {
+  if (!binding?.forkedFromThreadId) return thread;
+  return { ...thread, turns: forkOwnTurns(thread, binding.forkedAtMs) };
 }
 
 export class CodexService extends EventEmitter {
@@ -501,7 +507,7 @@ export class CodexService extends EventEmitter {
       try {
         const runtime = await this.resumeThread(binding.threadId);
         const result = await this.readThread(binding.threadId);
-        const thread = result.thread;
+        const thread = threadForSubscriptionRestore(binding, result.thread);
         const completed = [...(thread.turns ?? [])].reverse().find((turn) => turn.status !== 'inProgress');
         const finalText = finalTextFromTurn(
           completed,

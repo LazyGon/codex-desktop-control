@@ -1,5 +1,17 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
+import { turnTimestampMs, uuidV7TimestampMs } from './recent-history.mjs';
+
+export function forkOwnTurns(thread, forkedAtMs = null) {
+  const cutoffMs = Number.isFinite(forkedAtMs)
+    ? forkedAtMs
+    : uuidV7TimestampMs(thread?.id);
+  if (cutoffMs === null) return thread?.turns ?? [];
+  return (thread?.turns ?? []).filter((turn) => {
+    const timestamp = turnTimestampMs(turn);
+    return timestamp === null || timestamp >= cutoffMs;
+  });
+}
 
 export async function readSessionForkInfo(sessionPath, threadId) {
   if (!sessionPath || !threadId) return null;

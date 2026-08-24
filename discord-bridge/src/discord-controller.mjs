@@ -52,7 +52,8 @@ import {
   uuidV7TimestampMs,
 } from './recent-history.mjs';
 import { readSessionTurnCardOrder } from './session-message-order.mjs';
-import { readSessionForkInfo } from './session-fork-info.mjs';
+import { forkOwnTurns, readSessionForkInfo } from './session-fork-info.mjs';
+export { forkOwnTurns } from './session-fork-info.mjs';
 import {
   contentCardComponents,
   fileBrowserPayload,
@@ -257,17 +258,6 @@ export function subagentOwnTurns(thread) {
     if (timestamp === null || timestamp < childTimestamp) return false;
     if (timestamp > childTimestamp) return true;
     return String(turn.id ?? '').localeCompare(String(thread.id)) >= 0;
-  });
-}
-
-export function forkOwnTurns(thread, forkedAtMs = null) {
-  const cutoffMs = Number.isFinite(forkedAtMs)
-    ? forkedAtMs
-    : uuidV7TimestampMs(thread?.id);
-  if (cutoffMs === null) return thread?.turns ?? [];
-  return (thread?.turns ?? []).filter((turn) => {
-    const timestamp = turnTimestampMs(turn);
-    return timestamp === null || timestamp >= cutoffMs;
   });
 }
 

@@ -8,6 +8,7 @@ import {
   CodexService,
   forEachConcurrent,
   subscriptionRestoreBindings,
+  threadForSubscriptionRestore,
 } from '../src/codex-service.mjs';
 import { StateStore } from '../src/state-store.mjs';
 
@@ -33,6 +34,17 @@ test('subscription restore prioritizes recent active tasks and remains bounded a
     active -= 1;
   });
   assert.equal(maximum, 2);
+});
+
+test('subscription restore excludes completed history inherited from a fork source', () => {
+  const inherited = { id: 'inherited', completedAt: 100 };
+  const own = { id: 'own', startedAt: 200 };
+  const thread = { id: 'forked-thread', turns: [inherited, own] };
+  assert.deepEqual(threadForSubscriptionRestore({
+    forkedFromThreadId: 'source-thread',
+    forkedAtMs: 150_000,
+  }, thread).turns, [own]);
+  assert.equal(threadForSubscriptionRestore({}, thread), thread);
 });
 
 test('CodexService restores subscriptions and forwards live notifications', async (context) => {
