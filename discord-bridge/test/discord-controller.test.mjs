@@ -13,7 +13,9 @@ import {
   emptyDuplicateUserEntryIds,
   forkOwnTurns,
   isActiveSubagentThread,
+  isManagedProjectCategoryName,
   isSubagentCodexThread,
+  managedArchiveCategoryCleanupPlan,
   managedProjectCategoryCleanupPlan,
   managedProjectCategoryNames,
   orderedSessionCardItems,
@@ -62,6 +64,33 @@ test('managed project category cleanup removes empty overflow categories but pre
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
   );
+});
+
+test('managed archive category cleanup removes empty overflow and preserves one empty base', () => {
+  const category = (id, children) => ({
+    id,
+    children: { cache: { size: children } },
+  });
+  const base = category('base', 50);
+  const occupiedOverflow = category('occupied-overflow', 2);
+  const emptyOverflow = category('empty-overflow', 0);
+
+  assert.deepEqual(
+    managedArchiveCategoryCleanupPlan([base, occupiedOverflow, emptyOverflow]),
+    { keep: [base, occupiedOverflow], remove: [emptyOverflow] },
+  );
+  assert.deepEqual(
+    managedArchiveCategoryCleanupPlan([category('empty-base', 0), emptyOverflow]),
+    { keep: [{ id: 'empty-base', children: { cache: { size: 0 } } }], remove: [emptyOverflow] },
+  );
+});
+
+test('managed project category namespace includes orphaned overflow names only', () => {
+  assert.equal(isManagedProjectCategoryName('Codex - economic-support (2)', 'Codex - '), true);
+  assert.equal(isManagedProjectCategoryName('Codex - other (2)', 'Codex - '), true);
+  assert.equal(isManagedProjectCategoryName('Codex Archived (3)', 'Codex - '), false);
+  assert.equal(isManagedProjectCategoryName('Codex - ', 'Codex - '), false);
+  assert.equal(isManagedProjectCategoryName('Personal category', 'Codex - '), false);
 });
 
 test('managed project category names drop stale collision suffixes once the Desktop name is unique', () => {

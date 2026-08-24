@@ -306,6 +306,24 @@ export function managedProjectCategoryCleanupPlan(categories, active) {
   };
 }
 
+export function managedArchiveCategoryCleanupPlan(categories) {
+  const occupied = categories.filter((category) => category.children.cache.size > 0);
+  const keep = occupied.length > 0 ? occupied : categories.slice(0, 1);
+  const keepIds = new Set(keep.map((category) => category.id));
+  return {
+    keep,
+    remove: categories.filter((category) => !keepIds.has(category.id)),
+  };
+}
+
+export function isManagedProjectCategoryName(name, prefix) {
+  return typeof name === 'string'
+    && typeof prefix === 'string'
+    && prefix.length > 0
+    && name.startsWith(prefix)
+    && name.length > prefix.length;
+}
+
 export function managedProjectCategoryNames(descriptor, projectCategories = [], count = 1) {
   const collision = projectCategories
     .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
@@ -4708,15 +4726,34 @@ export class DiscordController {
     }
 
     state = this.stateStore.snapshot();
+    const storedArchiveIds = state.infrastructure.archiveCategoryIds ?? [];
+    const archiveCategories = storedArchiveIds
+      .map((categoryId) => context.channels.get(categoryId))
+      .filter((category) => category?.type === ChannelType.GuildCategory);
+    const archivePlan = managedArchiveCategoryCleanupPlan(archiveCategories);
+    for (const category of archivePlan.remove) {
+      await category.delete('Remove unused Codex archive category after task synchronization');
+      context.channels.delete(category.id);
+      removed += 1;
+    }
+    if (archivePlan.keep.length !== storedArchiveIds.length) {
+      this.stateStore.setInfrastructure({
+        archiveCategoryIds: archivePlan.keep.map((category) => category.id),
+      });
+    }
+
+    state = this.stateStore.snapshot();
     const referencedIds = new Set([
       state.infrastructure.controlCategoryId,
       ...(state.infrastructure.archiveCategoryIds ?? []),
       ...Object.values(state.projectCategories ?? {}).flatMap((project) => project.categoryIds ?? []),
     ].filter(Boolean));
-    const projectNames = new Set(Object.values(state.projectCategories ?? {}).map((project) => project.name));
     for (const category of context.channels.values()) {
       if (category?.type !== ChannelType.GuildCategory || referencedIds.has(category.id)) continue;
-      const isDuplicateProject = projectNames.has(category.name);
+      const isDuplicateProject = isManagedProjectCategoryName(
+        category.name,
+        this.config.projectCategoryPrefix,
+      );
       const isDuplicateArchive = category.name === this.config.archiveCategoryName
         || category.name.startsWith(`${this.config.archiveCategoryName} (`);
       if ((!isDuplicateProject && !isDuplicateArchive) || category.children.cache.size > 0) continue;
