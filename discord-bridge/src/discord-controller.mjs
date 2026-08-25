@@ -306,11 +306,35 @@ export function managedProjectCategoryCleanupPlan(categories, active) {
   };
 }
 
-export function managedArchiveCategoryCleanupPlan(categories) {
-  const occupied = categories.filter((category) => category.children.cache.size > 0);
+export function managedArchiveCategoryCleanupPlan(categories, capacity = 50) {
+  const childrenByCategory = categories.map((category) => [
+    ...(category.children?.cache?.values?.() ?? []),
+  ]);
+  const moves = [];
+  for (let targetIndex = 0; targetIndex < categories.length; targetIndex += 1) {
+    let available = Math.max(0, capacity - childrenByCategory[targetIndex].length);
+    for (
+      let sourceIndex = targetIndex + 1;
+      sourceIndex < categories.length && available > 0;
+      sourceIndex += 1
+    ) {
+      while (childrenByCategory[sourceIndex].length > 0 && available > 0) {
+        const channel = childrenByCategory[sourceIndex].shift();
+        childrenByCategory[targetIndex].push(channel);
+        moves.push({
+          channel,
+          source: categories[sourceIndex],
+          target: categories[targetIndex],
+        });
+        available -= 1;
+      }
+    }
+  }
+  const occupied = categories.filter((category, index) => childrenByCategory[index].length > 0);
   const keep = occupied.length > 0 ? occupied : categories.slice(0, 1);
   const keepIds = new Set(keep.map((category) => category.id));
   return {
+    moves,
     keep,
     remove: categories.filter((category) => !keepIds.has(category.id)),
   };
@@ -4044,7 +4068,9 @@ export class DiscordController {
     markPhase('subagents');
     context.channels = await guild.channels.fetch();
     markPhase('channelRefresh');
-    result.removedEmptyCategories = await this.#cleanupEmptyManagedCategories(context);
+    const categoryCleanup = await this.#cleanupEmptyManagedCategories(context);
+    result.moved += categoryCleanup.moved;
+    result.removedEmptyCategories = categoryCleanup.removed;
     markPhase('categoryCleanup');
     await this.#ensureControlPanel();
     markPhase('controlPanel');
@@ -4795,6 +4821,31 @@ export class DiscordController {
       .map((categoryId) => context.channels.get(categoryId))
       .filter((category) => category?.type === ChannelType.GuildCategory);
     const archivePlan = managedArchiveCategoryCleanupPlan(archiveCategories);
+    const threadIdByChannelId = new Map(Object.entries(state.bindings ?? {})
+      .filter(([, binding]) => binding.channelId)
+      .map(([threadId, binding]) => [binding.channelId, threadId]));
+    const bindingCategoryUpdates = [];
+    let moved = 0;
+    for (const move of archivePlan.moves) {
+      await this.#moveTaskChannel(
+        move.channel,
+        move.target.id,
+        'Compact Codex archive categories after task synchronization',
+      );
+      const threadId = threadIdByChannelId.get(move.channel.id);
+      if (threadId) bindingCategoryUpdates.push([threadId, move.target.id]);
+      moved += 1;
+    }
+    if (bindingCategoryUpdates.length > 0) {
+      const updatedAt = new Date().toISOString();
+      this.stateStore.update((value) => {
+        for (const [threadId, categoryId] of bindingCategoryUpdates) {
+          if (!value.bindings[threadId]) continue;
+          value.bindings[threadId].categoryId = categoryId;
+          value.bindings[threadId].updatedAt = updatedAt;
+        }
+      });
+    }
     for (const category of archivePlan.remove) {
       await category.delete('Remove unused Codex archive category after task synchronization');
       context.channels.delete(category.id);
@@ -4825,7 +4876,7 @@ export class DiscordController {
       context.channels.delete(category.id);
       removed += 1;
     }
-    return removed;
+    return { moved, removed };
   }
 
   async #syncTaskChannel(thread, archived, context) {

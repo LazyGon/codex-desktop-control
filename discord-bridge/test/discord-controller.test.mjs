@@ -66,22 +66,57 @@ test('managed project category cleanup removes empty overflow categories but pre
   );
 });
 
-test('managed archive category cleanup removes empty overflow and preserves one empty base', () => {
+test('managed archive category cleanup compacts occupied overflow and preserves one empty base', () => {
   const category = (id, children) => ({
     id,
-    children: { cache: { size: children } },
+    children: {
+      cache: new Map(Array.from({ length: children }, (_, index) => [
+        `${id}-${index}`,
+        { id: `${id}-${index}` },
+      ])),
+    },
   });
   const base = category('base', 50);
   const occupiedOverflow = category('occupied-overflow', 2);
   const emptyOverflow = category('empty-overflow', 0);
 
+  const fullPlan = managedArchiveCategoryCleanupPlan([base, occupiedOverflow, emptyOverflow]);
+  assert.deepEqual(fullPlan.moves, []);
+  assert.deepEqual(fullPlan.keep, [base, occupiedOverflow]);
+  assert.deepEqual(fullPlan.remove, [emptyOverflow]);
+
+  const partialBase = category('partial-base', 21);
+  const compactedOverflow = category('compacted-overflow', 11);
+  const compactedPlan = managedArchiveCategoryCleanupPlan([partialBase, compactedOverflow]);
+  assert.equal(compactedPlan.moves.length, 11);
+  assert.ok(compactedPlan.moves.every((move) => (
+    move.source === compactedOverflow && move.target === partialBase
+  )));
+  assert.deepEqual(compactedPlan.keep, [partialBase]);
+  assert.deepEqual(compactedPlan.remove, [compactedOverflow]);
+
+  const nearlyFullBase = category('nearly-full-base', 49);
+  const fullMiddle = category('full-middle', 50);
+  const finalOverflow = category('final-overflow', 3);
+  const cascadingPlan = managedArchiveCategoryCleanupPlan([
+    nearlyFullBase,
+    fullMiddle,
+    finalOverflow,
+  ]);
+  assert.deepEqual(cascadingPlan.moves.map((move) => [
+    move.source.id,
+    move.target.id,
+  ]), [
+    ['full-middle', 'nearly-full-base'],
+    ['final-overflow', 'full-middle'],
+  ]);
+  assert.deepEqual(cascadingPlan.keep, [nearlyFullBase, fullMiddle, finalOverflow]);
+  assert.deepEqual(cascadingPlan.remove, []);
+
+  const emptyBase = category('empty-base', 0);
   assert.deepEqual(
-    managedArchiveCategoryCleanupPlan([base, occupiedOverflow, emptyOverflow]),
-    { keep: [base, occupiedOverflow], remove: [emptyOverflow] },
-  );
-  assert.deepEqual(
-    managedArchiveCategoryCleanupPlan([category('empty-base', 0), emptyOverflow]),
-    { keep: [{ id: 'empty-base', children: { cache: { size: 0 } } }], remove: [emptyOverflow] },
+    managedArchiveCategoryCleanupPlan([emptyBase, emptyOverflow]),
+    { moves: [], keep: [emptyBase], remove: [emptyOverflow] },
   );
 });
 
