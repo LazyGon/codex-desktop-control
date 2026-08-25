@@ -1643,6 +1643,17 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     completionNoticeMessageId: 'notice-2',
     finalMessageIds: ['final-2'],
   });
+  stateStore.setBinding('thread-hidden-stale', {
+    channelId: 'stale-task-channel',
+    categoryId: 'archive-category',
+    projectKey: 'c:\\git\\hidden-runs\\RUN-DELETED\\workspace',
+    projectId: 'prj_old_cwd_identity',
+    cwd: 'C:\\git\\hidden-runs\\RUN-DELETED\\workspace',
+    name: 'Deleted hidden task',
+    archived: true,
+    deleted: true,
+    taskStatus: 'unknown',
+  });
   stateStore.setHiddenProject(hiddenProjectId, {
     projectId: hiddenProjectId,
     path: 'C:\\git\\hidden-runs',
@@ -1673,6 +1684,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   const categoryChildren = new Map();
   let taskDeleted = false;
   let archivedTaskDeleted = false;
+  let staleTaskDeleted = false;
   let categoryDeleted = false;
   const taskChannel = {
     id: 'task-channel',
@@ -1713,8 +1725,20 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     name: 'Codex Archived',
     children: { cache: archiveChildren },
   };
+  const staleTaskChannel = {
+    id: 'stale-task-channel',
+    type: ChannelType.GuildText,
+    parentId: 'archive-category',
+    topic: 'Codex task: thread-hidden-stale',
+    delete: async () => {
+      staleTaskDeleted = true;
+      channels.delete('stale-task-channel');
+      archiveChildren.delete('stale-task-channel');
+    },
+  };
   categoryChildren.set(taskChannel.id, taskChannel);
   archiveChildren.set(archivedTaskChannel.id, archivedTaskChannel);
+  archiveChildren.set(staleTaskChannel.id, staleTaskChannel);
   const controlCategory = {
     id: 'control-category',
     type: ChannelType.GuildCategory,
@@ -1787,6 +1811,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   channels.set(taskChannel.id, taskChannel);
   channels.set(archiveCategory.id, archiveCategory);
   channels.set(archivedTaskChannel.id, archivedTaskChannel);
+  channels.set(staleTaskChannel.id, staleTaskChannel);
   const guild = {
     channels: {
       fetch: async () => discordCollection(channels),
@@ -1830,9 +1855,10 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
-  assert.match(interaction.lastReply, /Discord削除 3/);
+  assert.match(interaction.lastReply, /Discord削除 4/);
   assert.equal(taskDeleted, true);
   assert.equal(archivedTaskDeleted, true);
+  assert.equal(staleTaskDeleted, true);
   assert.equal(categoryDeleted, true);
   assert.equal(noticeDeleted, true);
   assert.equal(archivedNoticeDeleted, true);
@@ -1844,6 +1870,10 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   assert.equal(stateStore.binding('thread-hidden-archived').archived, true);
   assert.equal(stateStore.binding('thread-hidden-archived').channelId, null);
   assert.equal(stateStore.binding('thread-hidden-archived').projectKey, hiddenProjectId);
+  assert.equal(stateStore.binding('thread-hidden-stale').hidden, true);
+  assert.equal(stateStore.binding('thread-hidden-stale').channelId, null);
+  assert.equal(stateStore.binding('thread-hidden-stale').projectKey, hiddenProjectId);
+  assert.equal(stateStore.binding('thread-hidden-stale').projectId, hiddenProjectId);
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 
   const settledState = fs.readFileSync(stateStore.filePath, 'utf8');
@@ -1859,6 +1889,95 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   }
   assert.match(repeatInteraction.lastReply, /Discord削除 0/);
   assert.equal(fs.readFileSync(stateStore.filePath, 'utf8'), settledState);
+});
+
+test('Codex task deletion removes its Discord mirror instead of archiving it', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-deleted-task-mirror-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({
+    controlCategoryId: 'control-category',
+    controlChannelId: 'control-channel',
+    completionsChannelId: 'completions-channel',
+    archiveCategoryIds: ['archive-category'],
+  });
+  stateStore.setBinding('thread-deleted', {
+    channelId: 'task-channel',
+    categoryId: 'project-category',
+    projectKey: 'local-project',
+    projectId: 'local-project',
+    cwd: 'C:\\git\\project',
+    name: 'Deleted task',
+    archived: false,
+    taskStatus: 'idle',
+  });
+  stateStore.setTurnRecord('thread-deleted', 'turn-1', {
+    completionNoticeMessageId: 'notice-1',
+    finalMessageIds: ['final-1'],
+  });
+
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user', tag: 'bot#0001' };
+  const codex = new EventEmitter();
+  codex.connected = true;
+  const channels = new Map();
+  const discordCollection = (source) => Object.assign(new Map(source), {
+    find: (predicate) => [...source.values()].find(predicate),
+    last: () => [...source.values()].at(-1) ?? null,
+  });
+  let channelDeleted = false;
+  const taskChannel = {
+    id: 'task-channel',
+    type: ChannelType.GuildText,
+    topic: 'Codex task: thread-deleted',
+    delete: async () => {
+      channelDeleted = true;
+      channels.delete('task-channel');
+    },
+  };
+  channels.set(taskChannel.id, taskChannel);
+  const completionMessages = new Map();
+  let noticeDeleted = false;
+  completionMessages.set('notice-1', {
+    id: 'notice-1',
+    author: { id: 'bot-user' },
+    content: 'https://discord.com/channels/guild-1/task-channel/final-1',
+    delete: async () => {
+      noticeDeleted = true;
+      completionMessages.delete('notice-1');
+    },
+  });
+  const completions = {
+    id: 'completions-channel',
+    messages: {
+      fetch: async (value) => (typeof value === 'string'
+        ? completionMessages.get(value) ?? null
+        : discordCollection(completionMessages)),
+    },
+  };
+  const guild = { channels: { fetch: async () => discordCollection(channels) } };
+  client.channels = { fetch: async (channelId) => channels.get(channelId) ?? null };
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1', authorizedUserIds: ['user-1'], projectCategoryPrefix: 'Codex - ' },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({ guild, completions });
+  controller.attach();
+
+  codex.emit('notification', {
+    method: 'thread/deleted',
+    params: { threadId: 'thread-deleted' },
+  });
+  for (let attempt = 0; attempt < 200 && stateStore.binding('thread-deleted'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(channelDeleted, true);
+  assert.equal(noticeDeleted, true);
+  assert.equal(stateStore.binding('thread-deleted'), null);
 });
 
 test('completed turns retry transient delivery failure, do not backfill commentary after finalization, and replace the unpinned task panel exactly once', async (context) => {
