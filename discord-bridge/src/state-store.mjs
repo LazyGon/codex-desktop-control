@@ -229,6 +229,7 @@ export class StateStore {
         name: binding.name ?? null,
         taskStatus: binding.taskStatus ?? 'unknown',
         archived: Boolean(binding.archived),
+        deleted: Boolean(binding.deleted),
         hidden: Boolean(binding.hidden),
         completionReportsEnabled: binding.completionReportsEnabled !== false,
       }));

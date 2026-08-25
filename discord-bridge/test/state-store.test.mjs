@@ -53,6 +53,7 @@ test('StateStore persists bindings atomically', () => {
       name: null,
       taskStatus: 'unknown',
       archived: false,
+      deleted: false,
       hidden: false,
       completionReportsEnabled: true,
     }]);

@@ -1651,6 +1651,16 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     cwd: 'C:\\git\\hidden-runs\\RUN-DELETED\\workspace',
     name: 'Deleted hidden task',
     archived: true,
+    taskStatus: 'unknown',
+  });
+  stateStore.setBinding('thread-deleted-stale', {
+    channelId: 'deleted-task-channel',
+    categoryId: 'archive-category',
+    projectKey: 'c:\\git\\visible',
+    projectId: 'prj_visible',
+    cwd: 'C:\\git\\visible',
+    name: 'Deleted visible task',
+    archived: true,
     deleted: true,
     taskStatus: 'unknown',
   });
@@ -1685,6 +1695,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   let taskDeleted = false;
   let archivedTaskDeleted = false;
   let staleTaskDeleted = false;
+  let deletedTaskDeleted = false;
   let categoryDeleted = false;
   const taskChannel = {
     id: 'task-channel',
@@ -1736,9 +1747,21 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
       archiveChildren.delete('stale-task-channel');
     },
   };
+  const deletedTaskChannel = {
+    id: 'deleted-task-channel',
+    type: ChannelType.GuildText,
+    parentId: 'archive-category',
+    topic: 'Codex task: thread-deleted-stale',
+    delete: async () => {
+      deletedTaskDeleted = true;
+      channels.delete('deleted-task-channel');
+      archiveChildren.delete('deleted-task-channel');
+    },
+  };
   categoryChildren.set(taskChannel.id, taskChannel);
   archiveChildren.set(archivedTaskChannel.id, archivedTaskChannel);
   archiveChildren.set(staleTaskChannel.id, staleTaskChannel);
+  archiveChildren.set(deletedTaskChannel.id, deletedTaskChannel);
   const controlCategory = {
     id: 'control-category',
     type: ChannelType.GuildCategory,
@@ -1812,6 +1835,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   channels.set(archiveCategory.id, archiveCategory);
   channels.set(archivedTaskChannel.id, archivedTaskChannel);
   channels.set(staleTaskChannel.id, staleTaskChannel);
+  channels.set(deletedTaskChannel.id, deletedTaskChannel);
   const guild = {
     channels: {
       fetch: async () => discordCollection(channels),
@@ -1855,10 +1879,11 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
-  assert.match(interaction.lastReply, /Discord削除 4/);
+  assert.match(interaction.lastReply, /Discord削除 5/);
   assert.equal(taskDeleted, true);
   assert.equal(archivedTaskDeleted, true);
   assert.equal(staleTaskDeleted, true);
+  assert.equal(deletedTaskDeleted, true);
   assert.equal(categoryDeleted, true);
   assert.equal(noticeDeleted, true);
   assert.equal(archivedNoticeDeleted, true);
@@ -1874,6 +1899,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   assert.equal(stateStore.binding('thread-hidden-stale').channelId, null);
   assert.equal(stateStore.binding('thread-hidden-stale').projectKey, hiddenProjectId);
   assert.equal(stateStore.binding('thread-hidden-stale').projectId, hiddenProjectId);
+  assert.equal(stateStore.binding('thread-deleted-stale'), null);
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 
   const settledState = fs.readFileSync(stateStore.filePath, 'utf8');
