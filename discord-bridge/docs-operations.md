@@ -231,18 +231,19 @@ subagent reconciliation phases do not block the new instruction.
 The bridge synchronizes both App Server native Projects and Desktop local
 projects. It pages `project/list`, then unions the global task inventory with
 active and archived `thread/list(projectId)` results for every native Project.
-An App Server `thread.projectId` is authoritative when present. Native identity
-uses the durable key `app-server:<projectId>`; Desktop local-project IDs retain
+An explicit Desktop `thread-project-assignments.projectId` is authoritative.
+For tasks without an explicit assignment, App Server `thread.projectId` is
+preferred over Desktop root containment. Native identity uses the durable key
+`app-server:<projectId>`; Desktop local-project IDs retain
 their existing keys, so matching names or IDs across the two namespaces remain
 distinct. Native Project names drive their Discord category names and native
 Projects remain visible in `プロジェクト表示` even when they currently have no
 active task channel.
 
-For tasks without a native Project identity,
-`thread-project-assignments.projectId` takes precedence; otherwise the most
-specific saved Desktop local-project root containing the cwd is used. Multiple
-roots and scratch cwds belonging to one local project therefore share one
-category. Empty superseded project categories are removed after migration.
+For tasks without either explicit assignment or native Project identity, the
+most specific saved Desktop local-project root containing the cwd is used.
+Multiple roots and scratch cwds belonging to one local project therefore share
+one category. Empty superseded project categories are removed after migration.
 Project category names are refreshed from their authoritative Project name on
 every synchronization. A deterministic suffix is kept only while another
 managed project category has the same name; it is removed automatically once

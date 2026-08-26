@@ -129,17 +129,17 @@ test('falls back to App Server cwd when Desktop state cannot be read', (context)
   );
 });
 
-test('App Server native project identity takes precedence over Desktop assignment and remains namespaced', () => {
+test('explicit Desktop assignment takes precedence over conflicting App Server native project identity', () => {
   const nativeProjectId = '01a037d8-e412-7af3-8b8f-36c3cf4e338c';
   const snapshot = withAppServerProjects(desktopProjectSnapshot({
     'local-projects': {
-      'local-automation': {
-        name: 'economic-support-automation',
-        rootPaths: ['C:\\git\\other\\economic-support-supervisor-runtime\\runs'],
+      'local-economic-support': {
+        name: 'economic-support',
+        rootPaths: ['C:\\git\\other\\economic-support'],
       },
     },
     'thread-project-assignments': {
-      native: { projectKind: 'local', projectId: 'local-automation' },
+      target: { projectKind: 'local', projectId: 'local-economic-support' },
     },
   }), [{
     id: nativeProjectId,
@@ -147,18 +147,40 @@ test('App Server native project identity takes precedence over Desktop assignmen
     roots: [{ path: 'C:\\Users\\example\\AppData\\Local\\EconomicSupport\\instances\\default' }],
   }]);
   const thread = {
-    id: 'native',
+    id: 'target',
     projectId: nativeProjectId,
-    cwd: 'C:\\runtime\\scratch',
+    cwd: 'C:\\git\\other\\economic-support',
   };
 
   assert.equal(appServerProjectForThread(thread, snapshot).projectId, nativeProjectId);
+  assert.equal(projectForThread(thread, snapshot).resolution, 'assignment');
+  assert.deepEqual(projectDescriptorForThread(thread, snapshot), {
+    id: 'local-economic-support',
+    key: 'local-economic-support',
+    path: 'C:\\git\\other\\economic-support',
+    name: 'Codex - economic-support',
+  });
+});
+
+test('App Server native project identity takes precedence over Desktop root containment when unassigned', () => {
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': {
+      'local-root': { name: 'root-fallback', rootPaths: ['C:\\runtime'] },
+    },
+    'thread-project-assignments': {},
+  }), [{
+    id: 'native',
+    name: 'native-project',
+    roots: [{ path: 'C:\\native' }],
+  }]);
+  const thread = { id: 'unassigned', projectId: 'native', cwd: 'C:\\runtime\\scratch' };
+
   assert.equal(projectForThread(thread, snapshot).resolution, 'app-server-project-id');
   assert.deepEqual(projectDescriptorForThread(thread, snapshot), {
-    id: nativeProjectId,
-    key: appServerProjectKey(nativeProjectId),
-    path: 'C:\\Users\\example\\AppData\\Local\\EconomicSupport\\instances\\default',
-    name: 'Codex - economic-support-automation',
+    id: 'native',
+    key: appServerProjectKey('native'),
+    path: 'C:\\native',
+    name: 'Codex - native-project',
   });
 });
 

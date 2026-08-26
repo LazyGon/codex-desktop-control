@@ -150,15 +150,18 @@ export function appServerProjectForThread(thread, snapshot) {
   return project ? { ...project, resolution: 'app-server-project-id', matchedRootPath: null } : null;
 }
 
-export function desktopProjectForThread(thread, snapshot) {
+export function desktopProjectAssignmentForThread(thread, snapshot) {
   if (!snapshot?.available) return null;
   const assignment = snapshot.assignments?.get(thread?.id);
   const assignedProjectId = typeof assignment?.projectId === 'string'
     ? assignment.projectId
     : null;
   const assigned = assignedProjectId ? snapshot.projects?.get(assignedProjectId) : null;
-  if (assigned) return { ...assigned, resolution: 'assignment', matchedRootPath: null };
+  return assigned ? { ...assigned, resolution: 'assignment', matchedRootPath: null } : null;
+}
 
+export function desktopProjectRootForThread(thread, snapshot) {
+  if (!snapshot?.available) return null;
   const cwd = normalizedProjectPathIfValid(thread?.cwd);
   if (!cwd) return null;
   const match = (snapshot.roots ?? [])
@@ -170,38 +173,35 @@ export function desktopProjectForThread(thread, snapshot) {
     : null;
 }
 
+export function desktopProjectForThread(thread, snapshot) {
+  return desktopProjectAssignmentForThread(thread, snapshot)
+    ?? desktopProjectRootForThread(thread, snapshot);
+}
+
 export function projectForThread(thread, snapshot) {
-  return appServerProjectForThread(thread, snapshot)
-    ?? desktopProjectForThread(thread, snapshot);
+  return desktopProjectAssignmentForThread(thread, snapshot)
+    ?? appServerProjectForThread(thread, snapshot)
+    ?? desktopProjectRootForThread(thread, snapshot);
 }
 
 export function projectCwdForThread(thread, snapshot) {
-  const nativeProject = appServerProjectForThread(thread, snapshot);
-  if (nativeProject) return thread?.cwd ?? nativeProject.rootPaths[0] ?? null;
-  if (!snapshot?.available) return thread?.cwd ?? null;
-  const project = desktopProjectForThread(thread, snapshot);
-  return project ? (thread?.cwd ?? project.rootPaths[0] ?? null) : null;
+  const project = projectForThread(thread, snapshot);
+  if (project) return thread?.cwd ?? project.rootPaths[0] ?? null;
+  return snapshot?.available ? null : thread?.cwd ?? null;
 }
 
 export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ') {
-  const nativeProject = appServerProjectForThread(thread, snapshot);
-  if (nativeProject) {
-    const descriptor = projectDescriptor(nativeProject.rootPaths[0] ?? thread?.cwd, categoryPrefix);
-    return {
-      ...descriptor,
-      id: nativeProject.projectId,
-      key: appServerProjectKey(nativeProject.projectId),
-      name: truncate(`${categoryPrefix}${nativeProject.name}`, 100, ''),
-    };
+  const project = projectForThread(thread, snapshot);
+  if (!project) {
+    return projectDescriptor(snapshot?.available ? null : thread?.cwd, categoryPrefix);
   }
-  if (!snapshot?.available) return projectDescriptor(thread?.cwd, categoryPrefix);
-  const project = desktopProjectForThread(thread, snapshot);
-  if (!project) return projectDescriptor(null, categoryPrefix);
   const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd, categoryPrefix);
   return {
     ...descriptor,
     id: project.projectId,
-    key: project.projectId,
+    key: project.resolution === 'app-server-project-id'
+      ? appServerProjectKey(project.projectId)
+      : project.projectId,
     name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
   };
 }
