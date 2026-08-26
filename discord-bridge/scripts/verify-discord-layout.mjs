@@ -7,7 +7,7 @@ import {
   GatewayIntentBits,
   PermissionFlagsBits,
 } from 'discord.js';
-import { dataDir, loadConfig } from '../src/config.mjs';
+import { dataDir, discoverEndpoint, loadConfig } from '../src/config.mjs';
 import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
 import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
 import {
@@ -18,7 +18,9 @@ import {
 import {
   projectDescriptorForThread,
   readDesktopProjectSnapshot,
+  withAppServerProjects,
 } from '../src/desktop-project-state.mjs';
+import { AppServerClient } from '../src/app-server-client.mjs';
 
 const config = loadConfig();
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -26,6 +28,7 @@ if (!token) throw new Error('DISCORD_BOT_TOKEN is not set.');
 
 const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
 const desktopProjects = readDesktopProjectSnapshot(config.desktopGlobalStatePath);
+const appServerClient = new AppServerClient(discoverEndpoint(config).url);
 const discordRestAgent = createDiscordRestAgent(config);
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
@@ -43,6 +46,26 @@ try {
   clearTimeout(timeout);
 
   const guild = await client.guilds.fetch(config.guildId);
+  let projectState = desktopProjects;
+  let appServerProjectError = null;
+  let appServerProjects = [];
+  try {
+    await appServerClient.connect();
+    const seenCursors = new Set();
+    let cursor = null;
+    do {
+      const params = { limit: 100 };
+      if (cursor) params.cursor = cursor;
+      const result = await appServerClient.call('project/list', params);
+      appServerProjects.push(...(result.data ?? []));
+      cursor = result.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) throw new Error(`project/list repeated cursor: ${cursor}`);
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    projectState = withAppServerProjects(desktopProjects, appServerProjects);
+  } catch (error) {
+    appServerProjectError = error;
+  }
   const channels = await guild.channels.fetch();
   const commands = await guild.commands.fetch();
   const categories = channels.filter((channel) => channel?.type === ChannelType.GuildCategory);
@@ -86,8 +109,8 @@ try {
     .filter(([, binding]) => !binding.archived);
   const expectedProjectlessBindings = activeBindings.filter(([threadId, binding]) => (
     projectDescriptorForThread(
-      { id: threadId, cwd: binding.cwd },
-      desktopProjects,
+      { id: threadId, cwd: binding.cwd, projectId: binding.projectId },
+      projectState,
       config.projectCategoryPrefix,
     ).key === '__no_project__'
   ));
@@ -105,6 +128,9 @@ try {
   ));
   const removedCommands = ['autocatchup', 'catchup', 'bind', 'unbind'].filter((name) => commandNames.includes(name));
   const errors = [];
+  if (appServerProjectError) {
+    errors.push(`App Server native project state is unavailable: ${appServerProjectError.message}`);
+  }
   let taskPanels = 0;
   const privateCategories = [
     ...(controlCategory ? [controlCategory] : []),
@@ -361,6 +387,7 @@ try {
     projects: [...projectCategories.values()].map((category) => ({ name: category.name, children: category.children.cache.size })),
     projectless: {
       desktopStateAvailable: desktopProjects.available,
+      appServerProjects: appServerProjects.length,
       tasks: expectedProjectlessBindings.length,
       categories: noProjectRecord?.categoryIds?.length ?? 0,
     },
@@ -382,6 +409,7 @@ try {
   if (errors.length) process.exitCode = 1;
 } finally {
   clearTimeout(timeout);
+  appServerClient.close();
   client.destroy();
   await discordRestAgent.close();
 }
