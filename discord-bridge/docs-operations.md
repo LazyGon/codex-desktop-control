@@ -153,7 +153,7 @@ project mirror. Hiding requires confirmation and deletes that project's
 Discord categories and all child channels (including task channels and
 subagent threads), plus tracked completion notices. It does not delete Codex
 task/thread data or local project files. If one of those tasks is archived
-while the project remains hidden, its saved Desktop project identity keeps it
+while the project remains hidden, its saved native or Desktop project identity keeps it
 out of `Codex Archived` even when its current cwd no longer resolves to that
 project.
 Restoring recreates the mirror from App Server history; Discord-only live cards
@@ -228,15 +228,27 @@ reconciliation does not delay commands or input delivery.
 Task creation from an unbound managed-project channel waits only until an
 in-flight task-list read has completed; the longer channel, history, and
 subagent reconciliation phases do not block the new instruction.
-The bridge uses Desktop's actual local-project ID and name as the Discord
-project-category identity. `thread-project-assignments.projectId` takes
-precedence; unassigned tasks resolve from the most specific saved local-project
-root that contains their cwd. Multiple roots and scratch cwds belonging to one
-local project therefore share one category. Empty superseded project categories
-are removed after migration. Project category names are refreshed from the
-Desktop project name on every synchronization. A deterministic suffix is kept
-only while another managed project category has the same name; it is removed
-automatically once that collision is gone.
+The bridge synchronizes both App Server native Projects and Desktop local
+projects. It pages `project/list`, then unions the global task inventory with
+active and archived `thread/list(projectId)` results for every native Project.
+An App Server `thread.projectId` is authoritative when present. Native identity
+uses the durable key `app-server:<projectId>`; Desktop local-project IDs retain
+their existing keys, so matching names or IDs across the two namespaces remain
+distinct. Native Project names drive their Discord category names and native
+Projects remain visible in `プロジェクト表示` even when they currently have no
+active task channel.
+
+For tasks without a native Project identity,
+`thread-project-assignments.projectId` takes precedence; otherwise the most
+specific saved Desktop local-project root containing the cwd is used. Multiple
+roots and scratch cwds belonging to one local project therefore share one
+category. Empty superseded project categories are removed after migration.
+Project category names are refreshed from their authoritative Project name on
+every synchronization. A deterministic suffix is kept only while another
+managed project category has the same name; it is removed automatically once
+that collision is gone. Hiding applies independently to both native and local
+identity keys, and project-scoped enumeration prevents a hidden native task
+omitted from the global list from reappearing in Discord or `Codex Archived`.
 Moving a task channel into `Codex Archived` archives the matching Codex task.
 Moving an archived channel back to its own project category unarchives it.
 Moving it to any unrelated category is rejected and immediately rolled back to

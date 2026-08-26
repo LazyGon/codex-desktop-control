@@ -5,6 +5,29 @@ import os from 'node:os';
 import path from 'node:path';
 import { StateStore } from '../src/state-store.mjs';
 
+test('StateStore hides bindings in one bounded batch', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-hidden-batch-'));
+  try {
+    const store = new StateStore(directory, '123456789012345');
+    store.setBinding('one', { channelId: 'channel-one' });
+    store.setBinding('two', { channelId: 'channel-two' });
+    store.hideBindings([
+      { threadId: 'one', patch: { projectKey: 'app-server:native', projectId: 'native' } },
+      { threadId: 'two', patch: { projectKey: 'app-server:native', projectId: 'native' } },
+    ]);
+    assert.equal(store.binding('one').channelId, null);
+    assert.equal(store.binding('one').hidden, true);
+    assert.equal(store.binding('two').projectKey, 'app-server:native');
+    assert.equal(store.binding('one').updatedAt, store.binding('two').updatedAt);
+    assert.throws(
+      () => store.hideBindings(Array.from({ length: 51 }, (_, index) => ({ threadId: `t-${index}` }))),
+      /At most 50/,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('StateStore persists bindings atomically', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-'));
   try {

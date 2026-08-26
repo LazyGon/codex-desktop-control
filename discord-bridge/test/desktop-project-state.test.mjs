@@ -4,11 +4,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  appServerProjectForThread,
+  appServerProjectKey,
   desktopProjectForThread,
   desktopProjectSnapshot,
   projectCwdForThread,
   projectDescriptorForThread,
+  projectDescriptorsFromSnapshot,
+  projectForThread,
   readDesktopProjectSnapshot,
+  withAppServerProjects,
 } from '../src/desktop-project-state.mjs';
 import { projectIdFromKey } from '../src/util.mjs';
 
@@ -122,4 +127,50 @@ test('falls back to App Server cwd when Desktop state cannot be read', (context)
     projectCwdForThread({ id: 'thread', cwd: 'C:\\git\\work' }, snapshot),
     'C:\\git\\work',
   );
+});
+
+test('App Server native project identity takes precedence over Desktop assignment and remains namespaced', () => {
+  const nativeProjectId = '01a037d8-e412-7af3-8b8f-36c3cf4e338c';
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': {
+      'local-automation': {
+        name: 'economic-support-automation',
+        rootPaths: ['C:\\git\\other\\economic-support-supervisor-runtime\\runs'],
+      },
+    },
+    'thread-project-assignments': {
+      native: { projectKind: 'local', projectId: 'local-automation' },
+    },
+  }), [{
+    id: nativeProjectId,
+    name: 'economic-support-automation',
+    roots: [{ path: 'C:\\Users\\example\\AppData\\Local\\EconomicSupport\\instances\\default' }],
+  }]);
+  const thread = {
+    id: 'native',
+    projectId: nativeProjectId,
+    cwd: 'C:\\runtime\\scratch',
+  };
+
+  assert.equal(appServerProjectForThread(thread, snapshot).projectId, nativeProjectId);
+  assert.equal(projectForThread(thread, snapshot).resolution, 'app-server-project-id');
+  assert.deepEqual(projectDescriptorForThread(thread, snapshot), {
+    id: nativeProjectId,
+    key: appServerProjectKey(nativeProjectId),
+    path: 'C:\\Users\\example\\AppData\\Local\\EconomicSupport\\instances\\default',
+    name: 'Codex - economic-support-automation',
+  });
+});
+
+test('same-name Desktop and App Server projects keep separate durable category identities', () => {
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': {
+      shared: { name: 'same-name', rootPaths: ['C:\\local'] },
+    },
+  }), [{ id: 'native', name: 'same-name', roots: [{ path: 'C:\\native' }] }]);
+
+  assert.deepEqual(projectDescriptorsFromSnapshot(snapshot).map(({ key, name }) => ({ key, name })), [
+    { key: 'shared', name: 'Codex - same-name' },
+    { key: 'app-server:native', name: 'Codex - same-name' },
+  ]);
 });

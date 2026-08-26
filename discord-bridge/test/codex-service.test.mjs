@@ -67,6 +67,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   let peer;
   const resumedThreads = [];
   const listArchivedFilters = [];
+  const listProjectFilters = [];
   const startedThreads = [];
   const namedThreads = [];
   const controlCalls = [];
@@ -95,6 +96,9 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
         result = {};
       }
       if (request.method === 'model/list') result = { data: [{ model: 'gpt-test' }], nextCursor: null };
+      if (request.method === 'project/list') result = request.params.cursor === 'project-page-2'
+        ? { data: [{ id: 'project-2' }], nextCursor: null }
+        : { data: [{ id: 'project-1' }], nextCursor: 'project-page-2' };
       if (request.method === 'permissionProfile/list') result = { data: [{ id: ':workspace', allowed: true }], nextCursor: null };
       if (request.method === 'collaborationMode/list') result = { data: [{ name: 'Default', mode: 'default' }] };
       if (request.method === 'thread/goal/get') result = { goal: null };
@@ -130,6 +134,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
       }
       if (request.method === 'thread/list') {
         listArchivedFilters.push(request.params.archived);
+        listProjectFilters.push(request.params.projectId ?? null);
         result = request.params.cursor === 'page-2'
           ? { data: [{ id: 'thread-2', cwd: 'C:/work' }], nextCursor: null }
           : { data: [{ id: 'thread-1', cwd: 'C:/work' }], nextCursor: 'page-2' };
@@ -174,6 +179,11 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const allThreads = await service.listAllThreads({ archived: true });
   assert.deepEqual(allThreads.map((thread) => thread.id), ['thread-1', 'thread-2']);
   assert.deepEqual(listArchivedFilters, [true, true]);
+  assert.deepEqual(listProjectFilters, [null, null]);
+  const projectThreads = await service.listAllThreads({ projectId: 'project-1' });
+  assert.deepEqual(projectThreads.map((thread) => thread.id), ['thread-1', 'thread-2']);
+  assert.deepEqual(listProjectFilters.slice(-2), ['project-1', 'project-1']);
+  assert.deepEqual(await service.listAllProjects(), [{ id: 'project-1' }, { id: 'project-2' }]);
   assert.deepEqual(resumedThreads, ['thread-1']);
 
   const started = await service.startThread('C:\\new-work');

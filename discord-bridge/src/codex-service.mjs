@@ -161,13 +161,14 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
-  async listAllThreads({ archived = false } = {}) {
+  async listAllThreads({ archived = false, projectId = null } = {}) {
     this.#requireClient();
     const threads = [];
     const seenCursors = new Set();
     let cursor = null;
     do {
       const params = { limit: 100, archived, sortKey: 'recency_at', sortDirection: 'desc' };
+      if (projectId) params.projectId = projectId;
       if (cursor) params.cursor = cursor;
       const result = await this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
       threads.push(...(result.data ?? []));
@@ -176,6 +177,11 @@ export class CodexService extends EventEmitter {
       if (cursor) seenCursors.add(cursor);
     } while (cursor);
     return threads;
+  }
+
+  async listAllProjects() {
+    this.#requireClient();
+    return this.#collectPages('project/list', {}, 100);
   }
 
   async readThread(threadId) {

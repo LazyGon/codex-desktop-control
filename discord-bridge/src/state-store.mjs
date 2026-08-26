@@ -489,31 +489,40 @@ export class StateStore {
   }
 
   hideBinding(threadId, patch = {}) {
-    if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
-      throw new Error('A valid threadId is required for a hidden Discord binding.');
-    }
-    const existing = this.value.bindings[threadId] ?? {};
-    const normalized = {
-      ...existing,
-      ...patch,
-      channelId: null,
-      categoryId: null,
-      controlPanelMessageId: null,
-      lastCompletionMessageId: null,
-      lastPanelCompletionTurnId: null,
-      lastMirroredUserItemId: null,
-      snapshotInitialized: false,
-      transcriptVersion: 0,
-      turnMessages: {},
-      hidden: true,
-    };
-    delete normalized.updatedAt;
-    if (!patchChanges(existing, normalized)) return;
-    return this.update((state) => {
-      state.bindings[threadId] = {
-        ...normalized,
-        updatedAt: new Date().toISOString(),
+    return this.hideBindings([{ threadId, patch }]);
+  }
+
+  hideBindings(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    if (entries.length > 50) throw new Error('At most 50 hidden Discord bindings may be persisted per batch.');
+    const normalizedEntries = entries.map(({ threadId, patch = {} }) => {
+      if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
+        throw new Error('A valid threadId is required for a hidden Discord binding.');
+      }
+      const existing = this.value.bindings[threadId] ?? {};
+      const normalized = {
+        ...existing,
+        ...patch,
+        channelId: null,
+        categoryId: null,
+        controlPanelMessageId: null,
+        lastCompletionMessageId: null,
+        lastPanelCompletionTurnId: null,
+        lastMirroredUserItemId: null,
+        snapshotInitialized: false,
+        transcriptVersion: 0,
+        turnMessages: {},
+        hidden: true,
       };
+      delete normalized.updatedAt;
+      return { threadId, existing, normalized };
+    }).filter(({ existing, normalized }) => patchChanges(existing, normalized));
+    if (normalizedEntries.length === 0) return;
+    const updatedAt = new Date().toISOString();
+    return this.update((state) => {
+      for (const { threadId, normalized } of normalizedEntries) {
+        state.bindings[threadId] = { ...normalized, updatedAt };
+      }
     });
   }
 

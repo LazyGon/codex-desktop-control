@@ -262,8 +262,16 @@ message identity markers. A restart after Discord accepted a post but before
 local state was written therefore converges on the existing post instead of
 creating a second copy.
 
-No project registration is required. The bridge follows every page of both the
-active and archived `thread/list` views. User-owned top-level tasks are synced;
+No project registration is required. The bridge follows every page of
+`project/list`, the global active and archived `thread/list` views, and the
+active and archived `thread/list(projectId)` views for every App Server native
+Project. The project-scoped inventory is merged by task ID because native
+Project tasks are not guaranteed to appear in the global list. App Server
+`thread.projectId` takes precedence over Desktop local-project assignment, and
+native keys use an `app-server:` namespace so same-name or same-ID local and
+native Projects cannot collapse into one Discord category identity. Both
+identity namespaces appear in `プロジェクト表示` and can be hidden independently.
+User-owned top-level tasks are synced;
 ephemeral tasks remain inside their parent representation. A Codex subagent is
 mirrored as a Discord thread under its top-level parent task channel. Its agent
 path, nickname, depth, commentary, App Server reasoning summaries, tool progress,
@@ -274,9 +282,10 @@ kept read-only; Discord posts inside a subagent thread are not delivered to
 Codex. Finished subagent threads use the stopped marker and are archived without
 posting to `codex-completions`. Discord category overflow is sharded automatically
 when a category reaches 50 channels.
-Folder selection is read from Codex Desktop's `.codex-global-state.json`.
-If that file cannot be read, the bridge fails safe to the App Server `cwd`
-category behavior instead of treating every task as projectless.
+Desktop local-project fallback and folder containment are read from Codex
+Desktop's `.codex-global-state.json`. If that file cannot be read and a task has
+no native App Server Project identity, the bridge falls back to the App Server
+`cwd` category behavior instead of treating every task as projectless.
 
 ## One-time installation
 

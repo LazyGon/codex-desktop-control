@@ -18,6 +18,7 @@ import {
   managedArchiveCategoryCleanupPlan,
   managedProjectCategoryCleanupPlan,
   managedProjectCategoryNames,
+  mergeProjectScopedThreads,
   orderedSessionCardItems,
   postTaskSyncSummary,
   projectVisibilityCatalog,
@@ -334,7 +335,43 @@ test('project visibility catalog merges active and hidden projects without losin
   ]);
 });
 
-test('current Desktop project assignment overrides a stale hidden binding fallback', () => {
+test('project visibility catalog includes App Server native projects without conflating same-name Desktop projects', () => {
+  const projects = projectVisibilityCatalog({
+    projectDescriptors: [{
+      id: 'native-id',
+      key: 'app-server:native-id',
+      path: 'C:\\native',
+      name: 'Codex - automation',
+    }, {
+      id: 'local-id',
+      key: 'local-id',
+      path: 'C:\\local',
+      name: 'Codex - automation',
+    }],
+    hiddenProjects: [{
+      projectKey: 'app-server:native-id',
+      projectId: 'native-id',
+      path: 'C:\\native',
+      name: 'Codex - automation',
+    }],
+  });
+
+  assert.deepEqual(projects.map(({ projectKey, projectId, hidden }) => ({
+    projectKey,
+    projectId,
+    hidden,
+  })), [{
+    projectKey: 'local-id',
+    projectId: 'local-id',
+    hidden: false,
+  }, {
+    projectKey: 'app-server:native-id',
+    projectId: 'native-id',
+    hidden: true,
+  }]);
+});
+
+test('current resolved project identity overrides a stale hidden binding fallback', () => {
   assert.equal(shouldUseHiddenBindingFallback(true, {
     projectId: 'local-visible',
     resolution: 'assignment',
@@ -345,6 +382,23 @@ test('current Desktop project assignment overrides a stale hidden binding fallba
   }), false);
   assert.equal(shouldUseHiddenBindingFallback(true, null), true);
   assert.equal(shouldUseHiddenBindingFallback(false, null), false);
+});
+
+test('project-scoped task inventory restores native tasks omitted from the global list', () => {
+  assert.deepEqual(mergeProjectScopedThreads([
+    { id: 'global', name: 'global task' },
+    { id: 'shared', name: 'stale global value' },
+  ], [{
+    projectId: 'native-project',
+    threads: [
+      { id: 'native-only', name: 'native task' },
+      { id: 'shared', name: 'project value' },
+    ],
+  }]), [
+    { id: 'global', name: 'global task' },
+    { id: 'shared', name: 'project value', projectId: 'native-project' },
+    { id: 'native-only', name: 'native task', projectId: 'native-project' },
+  ]);
 });
 
 test('session card ordering keeps steer messages inside the active instruction sequence', () => {
@@ -1641,6 +1695,8 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const desktopStatePath = path.join(directory, '.codex-global-state.json');
   const hiddenProjectId = 'local-hidden';
+  const nativeProjectId = 'native-hidden';
+  const nativeProjectKey = `app-server:${nativeProjectId}`;
   fs.writeFileSync(desktopStatePath, JSON.stringify({
     'local-projects': {
       [hiddenProjectId]: {
@@ -1718,6 +1774,11 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     path: 'C:\\git\\hidden-runs',
     name: 'Codex - hidden-project',
   });
+  stateStore.setHiddenProject(nativeProjectKey, {
+    projectId: nativeProjectId,
+    path: 'C:\\native-hidden',
+    name: 'Codex - native-hidden',
+  });
 
   const client = new EventEmitter();
   client.user = { id: 'bot-user', tag: 'bot#0001' };
@@ -1737,12 +1798,27 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     status: { type: 'idle' },
     turns: [],
   }];
-  codex.listAllThreads = async ({ archived }) => structuredClone(archived ? archivedCodexThreads : codexThreads);
+  const nativeCodexThreads = [{
+    id: 'thread-native-hidden',
+    cwd: 'C:\\native-hidden\\scratch',
+    name: 'Native hidden task omitted globally',
+    status: { type: 'idle' },
+    turns: [],
+  }];
+  codex.listAllProjects = async () => [{
+    id: nativeProjectId,
+    name: 'native-hidden',
+    roots: [{ path: 'C:\\native-hidden' }],
+  }];
+  codex.listAllThreads = async ({ archived, projectId = null }) => structuredClone(projectId
+    ? (archived ? [] : nativeCodexThreads)
+    : (archived ? archivedCodexThreads : codexThreads));
 
   const channels = new Map();
   const categoryChildren = new Map();
   let taskDeleted = false;
   let archivedTaskDeleted = false;
+  let nativeTaskDeleted = false;
   let staleTaskDeleted = false;
   let deletedTaskDeleted = false;
   let categoryDeleted = false;
@@ -1779,6 +1855,17 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
       archiveChildren.delete('archived-task-channel');
     },
   };
+  const nativeTaskChannel = {
+    id: 'native-task-channel',
+    type: ChannelType.GuildText,
+    parentId: 'archive-category',
+    topic: 'Codex task: thread-native-hidden',
+    delete: async () => {
+      nativeTaskDeleted = true;
+      channels.delete('native-task-channel');
+      archiveChildren.delete('native-task-channel');
+    },
+  };
   const archiveCategory = {
     id: 'archive-category',
     type: ChannelType.GuildCategory,
@@ -1809,6 +1896,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   };
   categoryChildren.set(taskChannel.id, taskChannel);
   archiveChildren.set(archivedTaskChannel.id, archivedTaskChannel);
+  archiveChildren.set(nativeTaskChannel.id, nativeTaskChannel);
   archiveChildren.set(staleTaskChannel.id, staleTaskChannel);
   archiveChildren.set(deletedTaskChannel.id, deletedTaskChannel);
   const controlCategory = {
@@ -1883,6 +1971,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   channels.set(taskChannel.id, taskChannel);
   channels.set(archiveCategory.id, archiveCategory);
   channels.set(archivedTaskChannel.id, archivedTaskChannel);
+  channels.set(nativeTaskChannel.id, nativeTaskChannel);
   channels.set(staleTaskChannel.id, staleTaskChannel);
   channels.set(deletedTaskChannel.id, deletedTaskChannel);
   const guild = {
@@ -1928,9 +2017,10 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
-  assert.match(interaction.lastReply, /Discord削除 5/);
+  assert.match(interaction.lastReply, /Discord削除 6/);
   assert.equal(taskDeleted, true);
   assert.equal(archivedTaskDeleted, true);
+  assert.equal(nativeTaskDeleted, true);
   assert.equal(staleTaskDeleted, true);
   assert.equal(deletedTaskDeleted, true);
   assert.equal(categoryDeleted, true);
@@ -1948,6 +2038,10 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   assert.equal(stateStore.binding('thread-hidden-stale').channelId, null);
   assert.equal(stateStore.binding('thread-hidden-stale').projectKey, hiddenProjectId);
   assert.equal(stateStore.binding('thread-hidden-stale').projectId, hiddenProjectId);
+  assert.equal(stateStore.binding('thread-native-hidden').hidden, true);
+  assert.equal(stateStore.binding('thread-native-hidden').projectKey, nativeProjectKey);
+  assert.equal(stateStore.binding('thread-native-hidden').projectId, nativeProjectId);
+  assert.equal(stateStore.binding('thread-native-hidden').channelId, null);
   assert.equal(stateStore.binding('thread-deleted-stale'), null);
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 

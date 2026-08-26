@@ -48,6 +48,31 @@ function localProjectRecord(projectId, value) {
   };
 }
 
+function appServerProjectRecord(value) {
+  const projectId = typeof value?.id === 'string' ? value.id.trim() : '';
+  if (!projectId) return null;
+  const roots = new Map();
+  for (const root of arrayValue(value?.roots)) {
+    const normalized = normalizedProjectPathIfValid(root?.path);
+    const key = projectPathKeyIfValid(normalized);
+    if (key && !roots.has(key)) roots.set(key, normalized);
+  }
+  const rootPaths = [...roots.values()];
+  const configuredName = typeof value?.name === 'string' ? value.name.trim() : '';
+  return {
+    projectId,
+    name: configuredName || path.win32.basename(rootPaths[0] ?? '') || projectId,
+    rootPaths,
+  };
+}
+
+export function appServerProjectKey(projectId) {
+  if (typeof projectId !== 'string' || !projectId.trim()) {
+    throw new Error('An App Server project id is required.');
+  }
+  return `app-server:${projectId.trim()}`;
+}
+
 export function desktopProjectSnapshot(value, source = null) {
   const state = objectValue(value);
   const projects = new Map();
@@ -106,6 +131,25 @@ export function readDesktopProjectSnapshot(statePath) {
   }
 }
 
+export function withAppServerProjects(snapshot, values) {
+  const projects = new Map();
+  for (const value of arrayValue(values)) {
+    const project = appServerProjectRecord(value);
+    if (project) projects.set(project.projectId, project);
+  }
+  return {
+    ...snapshot,
+    appServerProjectsAvailable: true,
+    appServerProjects: projects,
+  };
+}
+
+export function appServerProjectForThread(thread, snapshot) {
+  const projectId = typeof thread?.projectId === 'string' ? thread.projectId.trim() : '';
+  const project = projectId ? snapshot?.appServerProjects?.get(projectId) : null;
+  return project ? { ...project, resolution: 'app-server-project-id', matchedRootPath: null } : null;
+}
+
 export function desktopProjectForThread(thread, snapshot) {
   if (!snapshot?.available) return null;
   const assignment = snapshot.assignments?.get(thread?.id);
@@ -126,13 +170,30 @@ export function desktopProjectForThread(thread, snapshot) {
     : null;
 }
 
+export function projectForThread(thread, snapshot) {
+  return appServerProjectForThread(thread, snapshot)
+    ?? desktopProjectForThread(thread, snapshot);
+}
+
 export function projectCwdForThread(thread, snapshot) {
+  const nativeProject = appServerProjectForThread(thread, snapshot);
+  if (nativeProject) return thread?.cwd ?? nativeProject.rootPaths[0] ?? null;
   if (!snapshot?.available) return thread?.cwd ?? null;
   const project = desktopProjectForThread(thread, snapshot);
   return project ? (thread?.cwd ?? project.rootPaths[0] ?? null) : null;
 }
 
 export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ') {
+  const nativeProject = appServerProjectForThread(thread, snapshot);
+  if (nativeProject) {
+    const descriptor = projectDescriptor(nativeProject.rootPaths[0] ?? thread?.cwd, categoryPrefix);
+    return {
+      ...descriptor,
+      id: nativeProject.projectId,
+      key: appServerProjectKey(nativeProject.projectId),
+      name: truncate(`${categoryPrefix}${nativeProject.name}`, 100, ''),
+    };
+  }
   if (!snapshot?.available) return projectDescriptor(thread?.cwd, categoryPrefix);
   const project = desktopProjectForThread(thread, snapshot);
   if (!project) return projectDescriptor(null, categoryPrefix);
@@ -143,4 +204,25 @@ export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'C
     key: project.projectId,
     name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
   };
+}
+
+export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ') {
+  const descriptors = [];
+  for (const project of snapshot?.projects?.values?.() ?? []) {
+    descriptors.push({
+      id: project.projectId,
+      key: project.projectId,
+      path: project.rootPaths[0] ?? '(no project)',
+      name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+    });
+  }
+  for (const project of snapshot?.appServerProjects?.values?.() ?? []) {
+    descriptors.push({
+      id: project.projectId,
+      key: appServerProjectKey(project.projectId),
+      path: project.rootPaths[0] ?? '(no project)',
+      name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+    });
+  }
+  return descriptors;
 }
