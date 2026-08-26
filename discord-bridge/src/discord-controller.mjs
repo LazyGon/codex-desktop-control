@@ -107,6 +107,7 @@ import {
 } from './client-tool-ownership.mjs';
 import { TextTransferStore } from './text-transfer-store.mjs';
 import {
+  desktopProjectForThread,
   projectDescriptorForThread,
   readDesktopProjectSnapshot,
 } from './desktop-project-state.mjs';
@@ -398,6 +399,10 @@ export function projectVisibilityCatalog({
   return [...projects.values()]
     .sort((left, right) => Number(left.hidden) - Number(right.hidden)
       || String(left.path).localeCompare(String(right.path)));
+}
+
+export function shouldUseHiddenBindingFallback(bindingProjectIsHidden, currentDesktopProject) {
+  return Boolean(bindingProjectIsHidden && !currentDesktopProject?.projectId);
 }
 
 export function completionRecoveryCandidate(binding) {
@@ -1459,7 +1464,7 @@ export class DiscordController {
         desktopProjects,
         this.config.projectCategoryPrefix,
       );
-      return !this.#hiddenProjectDescriptorForThread(thread, descriptor);
+      return !this.#hiddenProjectDescriptorForThread(thread, descriptor, desktopProjects);
     });
     const visibleThreads = this.#isAuthorizedUser(interaction.user.id)
       ? projectVisibleThreads
@@ -1511,10 +1516,13 @@ export class DiscordController {
     return Boolean(binding?.hidden || this.#isProjectHidden(binding?.projectKey));
   }
 
-  #hiddenProjectDescriptorForThread(thread, descriptor) {
+  #hiddenProjectDescriptorForThread(thread, descriptor, desktopProjects = null) {
     if (this.#isProjectHidden(descriptor?.key)) return descriptor;
     const binding = stateBindingSummary(this.stateStore, thread?.id);
-    if (!binding?.projectKey || !this.#isProjectHidden(binding.projectKey)) return null;
+    const bindingProjectIsHidden = Boolean(binding?.projectKey
+      && this.#isProjectHidden(binding.projectKey));
+    const currentDesktopProject = desktopProjectForThread(thread, desktopProjects);
+    if (!shouldUseHiddenBindingFallback(bindingProjectIsHidden, currentDesktopProject)) return null;
     const hiddenProject = this.stateStore.hiddenProject?.(binding.projectKey) ?? null;
     return {
       ...descriptor,
@@ -1579,7 +1587,7 @@ export class DiscordController {
       desktopProjects,
       this.config.projectCategoryPrefix,
     );
-    if (this.#hiddenProjectDescriptorForThread(thread, descriptor)) {
+    if (this.#hiddenProjectDescriptorForThread(thread, descriptor, desktopProjects)) {
       throw new Error('このプロジェクトはDiscordで非表示です。Codex Remoteの「プロジェクト表示」から再表示してください。');
     }
   }
@@ -2630,7 +2638,7 @@ export class DiscordController {
           desktopProjects,
           this.config.projectCategoryPrefix,
         );
-        return !this.#hiddenProjectDescriptorForThread(thread, descriptor);
+        return !this.#hiddenProjectDescriptorForThread(thread, descriptor, desktopProjects);
       });
       if (!threads.length) {
         await interaction.editReply('タスクが見つかりませんでした。');
@@ -3928,7 +3936,11 @@ export class DiscordController {
       return {
         thread,
         project,
-        hiddenProject: this.#hiddenProjectDescriptorForThread(thread, project),
+        hiddenProject: this.#hiddenProjectDescriptorForThread(
+          thread,
+          project,
+          context.desktopProjects,
+        ),
       };
     });
     const activeEntries = classified(syncableActive);
@@ -4005,7 +4017,11 @@ export class DiscordController {
         context.desktopProjects,
         this.config.projectCategoryPrefix,
       );
-      const hiddenProject = this.#hiddenProjectDescriptorForThread(staleThread, staleProject);
+      const hiddenProject = this.#hiddenProjectDescriptorForThread(
+        staleThread,
+        staleProject,
+        context.desktopProjects,
+      );
       if (!hiddenProject) continue;
       try {
         const removed = await this.#removeStaleHiddenBindingMirror(binding, context, hiddenProject);
@@ -4537,7 +4553,11 @@ export class DiscordController {
       context.desktopProjects,
       this.config.projectCategoryPrefix,
     );
-    const hiddenProject = this.#hiddenProjectDescriptorForThread(thread, descriptor);
+    const hiddenProject = this.#hiddenProjectDescriptorForThread(
+      thread,
+      descriptor,
+      context.desktopProjects,
+    );
     if (hiddenProject) {
       throw new Error(`Project is hidden from Discord: ${hiddenProject.path}`);
     }
@@ -4629,6 +4649,7 @@ export class DiscordController {
         context.desktopProjects,
         this.config.projectCategoryPrefix,
       ),
+      context.desktopProjects,
     );
     if (!descriptor) throw new Error(`No hidden project identity is available for task ${thread.id}.`);
     const existing = stateBindingSummary(this.stateStore, thread.id);

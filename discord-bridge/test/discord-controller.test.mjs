@@ -23,6 +23,7 @@ import {
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
+  shouldUseHiddenBindingFallback,
   shouldCleanupOnlyExistingFork,
   shouldPeriodicallySyncSubagent,
   subagentDiscordThreadName,
@@ -331,6 +332,19 @@ test('project visibility catalog merges active and hidden projects without losin
     { key: 'c:\\git\\visible', hidden: false, tasks: 2 },
     { key: 'c:\\git\\hidden', hidden: true, tasks: 1 },
   ]);
+});
+
+test('current Desktop project assignment overrides a stale hidden binding fallback', () => {
+  assert.equal(shouldUseHiddenBindingFallback(true, {
+    projectId: 'local-visible',
+    resolution: 'assignment',
+  }), false);
+  assert.equal(shouldUseHiddenBindingFallback(true, {
+    projectId: 'local-visible',
+    resolution: 'root',
+  }), false);
+  assert.equal(shouldUseHiddenBindingFallback(true, null), true);
+  assert.equal(shouldUseHiddenBindingFallback(false, null), false);
 });
 
 test('session card ordering keeps steer messages inside the active instruction sequence', () => {
