@@ -5,8 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   loadBridgeProjects,
+  projectSyncThreadId,
   reconcileDesktopProjectState,
 } from './sync-desktop-projects.mjs';
+
+test('only a native thread-start notification triggers continuing Project sync', () => {
+  assert.equal(projectSyncThreadId({
+    method: 'thread/started',
+    params: { thread: { id: 'new-luna-summary', projectId: 'native-automation' } },
+  }), 'new-luna-summary');
+  assert.equal(projectSyncThreadId({ method: 'turn/started', params: { threadId: 'ignored' } }), null);
+  assert.equal(projectSyncThreadId({ method: 'thread/started', params: { thread: {} } }), null);
+});
 
 test('creates missing projects and assigns active and archived threads by cwd', () => {
   const ids = ['local-attendance', 'local-economic'];

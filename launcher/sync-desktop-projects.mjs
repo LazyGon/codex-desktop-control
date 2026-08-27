@@ -7,6 +7,8 @@ import { AppServerClient } from '../discord-bridge/src/app-server-client.mjs';
 function parseArguments(argv) {
   const options = {
     dryRun: false,
+    watch: false,
+    serverProcessId: null,
     endpoint: null,
     globalStatePath: null,
     bridgeStatePath: null,
@@ -20,10 +22,15 @@ function parseArguments(argv) {
       options.dryRun = true;
       continue;
     }
+    if (argument === '--watch') {
+      options.watch = true;
+      continue;
+    }
     const value = argv[index + 1];
     if (!value) throw new Error(`Missing value for ${argument}.`);
     index += 1;
     if (argument === '--endpoint') options.endpoint = value;
+    else if (argument === '--server-pid') options.serverProcessId = Number.parseInt(value, 10);
     else if (argument === '--global-state') options.globalStatePath = value;
     else if (argument === '--bridge-state') options.bridgeStatePath = value;
     else if (argument === '--result') options.resultPath = value;
@@ -37,6 +44,9 @@ function parseArguments(argv) {
     bridgeState: options.bridgeStatePath,
   })) {
     if (!value) throw new Error(`Required option is missing: ${name}`);
+  }
+  if (options.watch && (!Number.isInteger(options.serverProcessId) || options.serverProcessId <= 0)) {
+    throw new Error('Watch mode requires a positive --server-pid.');
   }
   return options;
 }
@@ -259,6 +269,12 @@ async function listAllThreads(client, archived) {
   return threads;
 }
 
+export function projectSyncThreadId(message) {
+  if (message?.method !== 'thread/started') return null;
+  const threadId = message?.params?.thread?.id;
+  return typeof threadId === 'string' && threadId ? threadId : null;
+}
+
 export function loadBridgeProjects(bridgeStatePath) {
   const bridgeState = JSON.parse(fs.readFileSync(bridgeStatePath, 'utf8'));
   const projectRoots = [];
@@ -311,8 +327,159 @@ function writeResult(resultPath, result) {
   atomicWriteJson(resultPath, result);
 }
 
-async function run() {
-  const options = parseArguments(process.argv.slice(2));
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function processExists(processId) {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function reconcileStateFiles(options, threads, {
+  mode,
+  trigger,
+  backupState = { path: null },
+  activeThreads = null,
+  archivedThreads = null,
+} = {}) {
+  const globalStatePath = path.resolve(options.globalStatePath);
+  const bridgeStatePath = path.resolve(options.bridgeStatePath);
+  const { projectRoots, boundThreads, projectAliases } = loadBridgeProjects(bridgeStatePath);
+  const originalText = fs.readFileSync(globalStatePath, 'utf8');
+  const originalState = JSON.parse(originalText);
+  const { state, stats } = reconcileDesktopProjectState(originalState, {
+    projectRoots,
+    projectAliases,
+    // Bridge bindings do not carry native Project identity. Put them first so the
+    // canonical App Server observation wins for duplicate thread identities.
+    threads: [...boundThreads, ...threads],
+  });
+  const changed = JSON.stringify(state) !== JSON.stringify(originalState);
+  const verifiedThread = verifiedThreadAssignment(state, options.verifyThreadId);
+  if (changed && !options.dryRun) {
+    if (fs.readFileSync(globalStatePath, 'utf8') !== originalText) {
+      throw new Error('Desktop state changed during Project reconciliation; retrying is required.');
+    }
+    if (!backupState.path) {
+      const backupDirectory = path.resolve(
+        options.backupDirectory ?? path.join(path.dirname(globalStatePath), 'desktop-project-sync-backups'),
+      );
+      fs.mkdirSync(backupDirectory, { recursive: true });
+      backupState.path = path.join(
+        backupDirectory,
+        `${path.basename(globalStatePath)}.${timestampForPath()}.bak`,
+      );
+      fs.writeFileSync(backupState.path, originalText, { encoding: 'utf8', flag: 'wx' });
+    }
+    atomicWriteJson(globalStatePath, state);
+    JSON.parse(fs.readFileSync(globalStatePath, 'utf8'));
+  }
+  const result = {
+    ok: true,
+    mode,
+    trigger,
+    dryRun: options.dryRun,
+    changed,
+    endpoint: options.endpoint,
+    activeThreads,
+    archivedThreads,
+    bridgeProjects: projectRoots.length,
+    projectAliases: projectAliases.length,
+    backupPath: backupState.path,
+    stats,
+    verifiedThread,
+    completedAt: new Date().toISOString(),
+  };
+  writeResult(options.resultPath, result);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  return result;
+}
+
+async function runWatch(options) {
+  const globalStatePath = path.resolve(options.globalStatePath);
+  const bridgeStatePath = path.resolve(options.bridgeStatePath);
+  if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
+  if (!fs.existsSync(bridgeStatePath)) throw new Error(`Bridge state is missing: ${bridgeStatePath}`);
+
+  let stopping = false;
+  let activeClient = null;
+  const backupState = { path: null };
+  const stop = () => {
+    stopping = true;
+    activeClient?.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  let reconnectAttempt = 0;
+  while (!stopping) {
+    if (!processExists(options.serverProcessId)) break;
+    const client = new AppServerClient(options.endpoint);
+    activeClient = client;
+    try {
+      await client.connect();
+      reconnectAttempt = 0;
+      let queue = Promise.resolve();
+      client.on('notification', (message) => {
+        const threadId = projectSyncThreadId(message);
+        if (!threadId) return;
+        queue = queue.then(async () => {
+          const read = await client.call('thread/read', { threadId, includeTurns: false }, 60_000);
+          const thread = read?.thread ?? read;
+          if (!thread || thread.id !== threadId) {
+            throw new Error(`thread/read returned the wrong identity for Project sync: ${threadId}`);
+          }
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              reconcileStateFiles(options, [thread], {
+                mode: 'watch',
+                trigger: `thread/started:${threadId}`,
+                backupState,
+              });
+              return;
+            } catch (error) {
+              const conflict = error.message.includes('Desktop state changed during Project reconciliation');
+              if (!conflict || attempt === 3) throw error;
+              await delay(50 * attempt);
+            }
+          }
+        }).catch((error) => {
+          process.stderr.write(`Project sync notification failed: ${error.stack ?? error.message}\n`);
+        });
+      });
+      const [activeThreads, archivedThreads] = await Promise.all([
+        listAllThreads(client, false),
+        listAllThreads(client, true),
+      ]);
+      reconcileStateFiles(options, [...activeThreads, ...archivedThreads], {
+        mode: 'watch',
+        trigger: 'connected',
+        backupState,
+        activeThreads: activeThreads.length,
+        archivedThreads: archivedThreads.length,
+      });
+      await new Promise((resolve) => client.once('disconnected', resolve));
+      await queue;
+    } catch (error) {
+      if (!stopping) process.stderr.write(`Project sync connection failed: ${error.stack ?? error.message}\n`);
+    } finally {
+      client.close();
+      if (activeClient === client) activeClient = null;
+    }
+    if (!stopping) {
+      if (!processExists(options.serverProcessId)) break;
+      reconnectAttempt += 1;
+      await delay(Math.min(1_000 * (2 ** Math.min(reconnectAttempt - 1, 5)), 30_000));
+    }
+  }
+}
+
+async function run(options = parseArguments(process.argv.slice(2))) {
   const globalStatePath = path.resolve(options.globalStatePath);
   const bridgeStatePath = path.resolve(options.bridgeStatePath);
   if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
@@ -378,7 +545,9 @@ async function run() {
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (invokedPath === import.meta.url) {
-  run().catch((error) => {
+  const options = parseArguments(process.argv.slice(2));
+  const operation = options.watch ? runWatch(options) : run(options);
+  operation.catch((error) => {
     const resultPathIndex = process.argv.indexOf('--result');
     const resultPath = resultPathIndex >= 0 ? process.argv[resultPathIndex + 1] : null;
     const result = {
