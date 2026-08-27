@@ -47,8 +47,6 @@ $stateFileName = if ($SelfTest) { "selftest-$Port-current.json" } else { 'curren
 $statePath = Join-Path $stateRoot $stateFileName
 $projectSyncResultPath = Join-Path $stateRoot 'project-sync-last.json'
 $projectSyncBackupRoot = Join-Path $stateRoot 'project-sync-backups'
-$projectSyncWatcherStdoutPath = Join-Path $logRoot "$runStamp-project-sync.stdout.log"
-$projectSyncWatcherStderrPath = Join-Path $logRoot "$runStamp-project-sync.stderr.log"
 
 function Write-LauncherLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -358,85 +356,6 @@ function Invoke-DesktopProjectSync {
     Write-LauncherLog "Desktop project sync completed. $($syncOutput -join ' ')"
 }
 
-function Start-DesktopProjectSyncWatcher {
-    param(
-        [Parameter(Mandatory)][string]$WebSocketUrl,
-        [Parameter(Mandatory)][int]$ServerProcessId,
-        [Parameter()][AllowNull()][object]$JobObject
-    )
-
-    $syncScript = Join-Path $launcherRoot 'sync-desktop-projects.mjs'
-    $bridgeStatePath = Join-Path (Split-Path -Parent $launcherRoot) 'discord-bridge\data\state.json'
-    $codexStateRoot = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-        Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'
-    }
-    else {
-        [IO.Path]::GetFullPath($env:CODEX_HOME)
-    }
-    $globalStatePath = Join-Path $codexStateRoot '.codex-global-state.json'
-    $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
-    $arguments = @(
-        $syncScript,
-        '--watch',
-        '--endpoint', $WebSocketUrl,
-        '--server-pid', ([string]$ServerProcessId),
-        '--global-state', $globalStatePath,
-        '--bridge-state', $bridgeStatePath,
-        '--result', $projectSyncResultPath,
-        '--backup-directory', $projectSyncBackupRoot
-    )
-    $watcher = Start-Process `
-        -FilePath $nodeExecutable `
-        -ArgumentList $arguments `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $projectSyncWatcherStdoutPath `
-        -RedirectStandardError $projectSyncWatcherStderrPath `
-        -PassThru
-    if ($null -ne $JobObject) {
-        $JobObject.AddProcess($watcher)
-    }
-    Start-Sleep -Milliseconds 250
-    if ($watcher.HasExited) {
-        $stderrTail = if (Test-Path -LiteralPath $projectSyncWatcherStderrPath) {
-            (Get-Content -LiteralPath $projectSyncWatcherStderrPath -Tail 20 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
-        }
-        else {
-            ''
-        }
-        throw "Desktop Project sync watcher exited during startup (exit $($watcher.ExitCode)). $stderrTail"
-    }
-    Write-LauncherLog "Desktop Project sync watcher started. pid=$($watcher.Id)"
-    $watcher
-}
-
-function Get-ReusableDesktopProjectSyncWatcher {
-    param([Parameter(Mandatory)][object]$RuntimeState)
-
-    $property = $RuntimeState.PSObject.Properties['projectSyncWatcherProcessId']
-    if ($null -eq $property -or [int]$property.Value -le 0) {
-        return $null
-    }
-    try {
-        $processId = [int]$property.Value
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
-        $syncScript = Join-Path $launcherRoot 'sync-desktop-projects.mjs'
-        if (
-            $null -eq $process -or
-            $process.Name -ne 'node.exe' -or
-            -not $process.CommandLine -or
-            $process.CommandLine -notmatch [regex]::Escape($syncScript) -or
-            $process.CommandLine -notmatch '(?:^|\s)--watch(?:\s|$)' -or
-            $process.CommandLine -notmatch [regex]::Escape($RuntimeState.websocketUrl)
-        ) {
-            return $null
-        }
-        Get-Process -Id $processId -ErrorAction Stop
-    }
-    catch {
-        $null
-    }
-}
-
 function Get-ReusableRuntimeState {
     param(
         [Parameter(Mandatory)][object]$PackageInfo,
@@ -725,7 +644,6 @@ $ownsMutex = $false
 $jobObject = $null
 $serverProcess = $null
 $serverProcessId = 0
-$projectSyncWatcherProcess = $null
 $exitCode = 1
 $packageInfo = $null
 $registeredWebSocketUrl = $null
@@ -747,18 +665,6 @@ try {
         $reusableRuntime = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port
         if ($null -ne $reusableRuntime) {
             Write-LauncherLog "Reusing healthy owned app-server. pid=$($reusableRuntime.serverProcessId)"
-            $projectSyncWatcherProcess = Get-ReusableDesktopProjectSyncWatcher -RuntimeState $reusableRuntime
-            if ($null -eq $projectSyncWatcherProcess) {
-                $projectSyncWatcherProcess = Start-DesktopProjectSyncWatcher `
-                    -WebSocketUrl $reusableRuntime.websocketUrl `
-                    -ServerProcessId ([int]$reusableRuntime.serverProcessId) `
-                    -JobObject $null
-                Set-RuntimeStateValue `
-                    -State $reusableRuntime `
-                    -Name 'projectSyncWatcherProcessId' `
-                    -Value ([int]$projectSyncWatcherProcess.Id)
-                Write-RuntimeState -State $reusableRuntime
-            }
             $null = Start-DesktopOnRuntime `
                 -PackageInfo $packageInfo `
                 -RuntimeState $reusableRuntime `
@@ -849,15 +755,6 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $runtimeState `
                 -PortNumber $Port
-            $projectSyncWatcherProcess = Start-DesktopProjectSyncWatcher `
-                -WebSocketUrl $runtimeState.websocketUrl `
-                -ServerProcessId $serverProcessId `
-                -JobObject $jobObject
-            Set-RuntimeStateValue `
-                -State $runtimeState `
-                -Name 'projectSyncWatcherProcessId' `
-                -Value ([int]$projectSyncWatcherProcess.Id)
-            Write-RuntimeState -State $runtimeState
             Invoke-LauncherSignal -Kind Ready
 
             $monitoredDesktopVersion = $packageInfo.Version

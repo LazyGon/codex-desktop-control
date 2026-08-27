@@ -7,8 +7,6 @@ import { AppServerClient } from '../discord-bridge/src/app-server-client.mjs';
 function parseArguments(argv) {
   const options = {
     dryRun: false,
-    watch: false,
-    serverProcessId: null,
     endpoint: null,
     globalStatePath: null,
     bridgeStatePath: null,
@@ -22,15 +20,10 @@ function parseArguments(argv) {
       options.dryRun = true;
       continue;
     }
-    if (argument === '--watch') {
-      options.watch = true;
-      continue;
-    }
     const value = argv[index + 1];
     if (!value) throw new Error(`Missing value for ${argument}.`);
     index += 1;
     if (argument === '--endpoint') options.endpoint = value;
-    else if (argument === '--server-pid') options.serverProcessId = Number.parseInt(value, 10);
     else if (argument === '--global-state') options.globalStatePath = value;
     else if (argument === '--bridge-state') options.bridgeStatePath = value;
     else if (argument === '--result') options.resultPath = value;
@@ -44,9 +37,6 @@ function parseArguments(argv) {
     bridgeState: options.bridgeStatePath,
   })) {
     if (!value) throw new Error(`Required option is missing: ${name}`);
-  }
-  if (options.watch && (!Number.isInteger(options.serverProcessId) || options.serverProcessId <= 0)) {
-    throw new Error('Watch mode requires a positive --server-pid.');
   }
   return options;
 }
@@ -117,7 +107,6 @@ export function reconcileDesktopProjectState(
   originalState,
   {
     projectRoots,
-    projectAliases = [],
     threads,
     now = Date.now(),
     createProjectId = defaultProjectId,
@@ -145,23 +134,6 @@ export function reconcileDesktopProjectState(
     }
   }
 
-  const aliasesByRemoteProject = new Map();
-  for (const alias of projectAliases) {
-    const remoteProjectId = typeof alias?.remoteProjectId === 'string'
-      ? alias.remoteProjectId : null;
-    const localProjectId = typeof alias?.localProjectId === 'string'
-      ? alias.localProjectId : null;
-    const project = localProjectId ? state['local-projects'][localProjectId] : null;
-    if (!remoteProjectId || !localProjectId || !project
-        || project.id !== localProjectId || project.name !== alias.projectName) {
-      throw new Error(`Project alias is inconsistent: ${remoteProjectId ?? 'missing'}`);
-    }
-    if (aliasesByRemoteProject.has(remoteProjectId)) {
-      throw new Error(`Project alias is duplicated: ${remoteProjectId}`);
-    }
-    aliasesByRemoteProject.set(remoteProjectId, { projectId: localProjectId, project });
-  }
-
   const stats = {
     projectsConsidered: rootsByKey.size,
     projectsCreated: 0,
@@ -171,8 +143,8 @@ export function reconcileDesktopProjectState(
     assignmentsCreated: 0,
     assignmentsUpdated: 0,
     assignmentsUnchanged: 0,
+    assignmentsRemoved: 0,
     assignmentsSkipped: 0,
-    aliasAssignments: 0,
   };
 
   for (const [key, rootPath] of rootsByKey) {
@@ -208,17 +180,23 @@ export function reconcileDesktopProjectState(
     if (typeof thread?.id === 'string' && thread.id) threadsById.set(thread.id, thread);
   }
   for (const thread of threadsById.values()) {
+    const existing = state['thread-project-assignments'][thread.id];
+    if (typeof thread.projectId === 'string' && thread.projectId.trim()) {
+      if (existing?.projectKind === 'local') {
+        delete state['thread-project-assignments'][thread.id];
+        stats.assignmentsRemoved += 1;
+      } else {
+        stats.assignmentsUnchanged += 1;
+      }
+      continue;
+    }
     const cwd = normalizeLocalPath(thread.cwd);
-    const aliasEntry = aliasesByRemoteProject.get(thread.projectId);
-    const entry = aliasEntry ?? projectsByRoot.get(localPathKey(cwd));
-    const assignmentCwd = aliasEntry
-      ? normalizeLocalPath(arrayValue(aliasEntry.project.rootPaths)[0]) : cwd;
-    if (!assignmentCwd || !entry) {
+    const entry = projectsByRoot.get(localPathKey(cwd));
+    if (!cwd || !entry) {
       stats.assignmentsSkipped += 1;
       continue;
     }
 
-    const existing = state['thread-project-assignments'][thread.id];
     if (existing?.projectKind && existing.projectKind !== 'local') {
       stats.assignmentsSkipped += 1;
       continue;
@@ -227,7 +205,7 @@ export function reconcileDesktopProjectState(
       ...objectValue(existing),
       projectKind: 'local',
       projectId: entry.projectId,
-      cwd: assignmentCwd,
+      cwd,
       pendingCoreUpdate: existing?.pendingCoreUpdate ?? false,
     };
     const unchanged = existing
@@ -240,7 +218,6 @@ export function reconcileDesktopProjectState(
       continue;
     }
     state['thread-project-assignments'][thread.id] = next;
-    if (aliasEntry) stats.aliasAssignments += 1;
     if (existing) stats.assignmentsUpdated += 1;
     else stats.assignmentsCreated += 1;
   }
@@ -248,7 +225,7 @@ export function reconcileDesktopProjectState(
   return { state, stats };
 }
 
-async function listAllThreads(client, archived) {
+async function listAllThreads(client, archived, projectId = null) {
   const threads = [];
   const cursors = new Set();
   let cursor = null;
@@ -259,6 +236,7 @@ async function listAllThreads(client, archived) {
       sortKey: 'recency_at',
       sortDirection: 'desc',
     };
+    if (projectId) params.projectId = projectId;
     if (cursor) params.cursor = cursor;
     const result = await client.call('thread/list', params, 60_000);
     threads.push(...arrayValue(result?.data));
@@ -269,10 +247,40 @@ async function listAllThreads(client, archived) {
   return threads;
 }
 
-export function projectSyncThreadId(message) {
-  if (message?.method !== 'thread/started') return null;
-  const threadId = message?.params?.thread?.id;
-  return typeof threadId === 'string' && threadId ? threadId : null;
+async function listAllProjects(client) {
+  const projects = [];
+  const cursors = new Set();
+  let cursor = null;
+  do {
+    const params = { limit: 100 };
+    if (cursor) params.cursor = cursor;
+    const result = await client.call('project/list', params, 60_000);
+    projects.push(...arrayValue(result?.data));
+    cursor = result?.nextCursor ?? null;
+    if (cursor && cursors.has(cursor)) throw new Error(`project/list repeated cursor: ${cursor}`);
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return projects.filter((project) => typeof project?.id === 'string' && project.id);
+}
+
+async function listThreadsWithNativeProjects(client, archived, projects) {
+  const groups = await Promise.all([
+    listAllThreads(client, archived),
+    ...projects.map((project) => listAllThreads(client, archived, project.id)),
+  ]);
+  const threads = new Map();
+  for (const thread of groups[0]) {
+    if (typeof thread?.id === 'string' && thread.id) threads.set(thread.id, thread);
+  }
+  for (let index = 1; index < groups.length; index += 1) {
+    const projectId = projects[index - 1].id;
+    for (const thread of groups[index]) {
+      if (typeof thread?.id === 'string' && thread.id) {
+        threads.set(thread.id, { ...threads.get(thread.id), ...thread, projectId });
+      }
+    }
+  }
+  return [...threads.values()];
 }
 
 export function loadBridgeProjects(bridgeStatePath) {
@@ -288,23 +296,7 @@ export function loadBridgeProjects(bridgeStatePath) {
   for (const [threadId, binding] of Object.entries(objectValue(bridgeState.bindings))) {
     if (typeof binding?.cwd === 'string') boundThreads.push({ id: threadId, cwd: binding.cwd });
   }
-  const hiddenProjects = Object.values(objectValue(bridgeState.hiddenProjects));
-  const projectAliases = [];
-  for (const remote of hiddenProjects.filter(item => item?.namespace === 'app-server')) {
-    const matches = hiddenProjects.filter(item => item?.namespace !== 'app-server'
-      && item?.name === remote.name && typeof item?.projectId === 'string');
-    if (matches.length > 1) {
-      throw new Error(`Hidden Project alias is ambiguous: ${remote.projectId}`);
-    }
-    if (matches.length === 1) {
-      projectAliases.push({
-        remoteProjectId: remote.projectId,
-        localProjectId: matches[0].projectId,
-        projectName: String(remote.name).replace(/^Codex - /, ''),
-      });
-    }
-  }
-  return { projectRoots, boundThreads, projectAliases };
+  return { projectRoots, boundThreads };
 }
 
 function timestampForPath(date = new Date()) {
@@ -327,173 +319,23 @@ function writeResult(resultPath, result) {
   atomicWriteJson(resultPath, result);
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function processExists(processId) {
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function reconcileStateFiles(options, threads, {
-  mode,
-  trigger,
-  backupState = { path: null },
-  activeThreads = null,
-  archivedThreads = null,
-} = {}) {
-  const globalStatePath = path.resolve(options.globalStatePath);
-  const bridgeStatePath = path.resolve(options.bridgeStatePath);
-  const { projectRoots, boundThreads, projectAliases } = loadBridgeProjects(bridgeStatePath);
-  const originalText = fs.readFileSync(globalStatePath, 'utf8');
-  const originalState = JSON.parse(originalText);
-  const { state, stats } = reconcileDesktopProjectState(originalState, {
-    projectRoots,
-    projectAliases,
-    // Bridge bindings do not carry native Project identity. Put them first so the
-    // canonical App Server observation wins for duplicate thread identities.
-    threads: [...boundThreads, ...threads],
-  });
-  const changed = JSON.stringify(state) !== JSON.stringify(originalState);
-  const verifiedThread = verifiedThreadAssignment(state, options.verifyThreadId);
-  if (changed && !options.dryRun) {
-    if (fs.readFileSync(globalStatePath, 'utf8') !== originalText) {
-      throw new Error('Desktop state changed during Project reconciliation; retrying is required.');
-    }
-    if (!backupState.path) {
-      const backupDirectory = path.resolve(
-        options.backupDirectory ?? path.join(path.dirname(globalStatePath), 'desktop-project-sync-backups'),
-      );
-      fs.mkdirSync(backupDirectory, { recursive: true });
-      backupState.path = path.join(
-        backupDirectory,
-        `${path.basename(globalStatePath)}.${timestampForPath()}.bak`,
-      );
-      fs.writeFileSync(backupState.path, originalText, { encoding: 'utf8', flag: 'wx' });
-    }
-    atomicWriteJson(globalStatePath, state);
-    JSON.parse(fs.readFileSync(globalStatePath, 'utf8'));
-  }
-  const result = {
-    ok: true,
-    mode,
-    trigger,
-    dryRun: options.dryRun,
-    changed,
-    endpoint: options.endpoint,
-    activeThreads,
-    archivedThreads,
-    bridgeProjects: projectRoots.length,
-    projectAliases: projectAliases.length,
-    backupPath: backupState.path,
-    stats,
-    verifiedThread,
-    completedAt: new Date().toISOString(),
-  };
-  writeResult(options.resultPath, result);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-  return result;
-}
-
-async function runWatch(options) {
-  const globalStatePath = path.resolve(options.globalStatePath);
-  const bridgeStatePath = path.resolve(options.bridgeStatePath);
-  if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
-  if (!fs.existsSync(bridgeStatePath)) throw new Error(`Bridge state is missing: ${bridgeStatePath}`);
-
-  let stopping = false;
-  let activeClient = null;
-  const backupState = { path: null };
-  const stop = () => {
-    stopping = true;
-    activeClient?.close();
-  };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-
-  let reconnectAttempt = 0;
-  while (!stopping) {
-    if (!processExists(options.serverProcessId)) break;
-    const client = new AppServerClient(options.endpoint);
-    activeClient = client;
-    try {
-      await client.connect();
-      reconnectAttempt = 0;
-      let queue = Promise.resolve();
-      client.on('notification', (message) => {
-        const threadId = projectSyncThreadId(message);
-        if (!threadId) return;
-        queue = queue.then(async () => {
-          const read = await client.call('thread/read', { threadId, includeTurns: false }, 60_000);
-          const thread = read?.thread ?? read;
-          if (!thread || thread.id !== threadId) {
-            throw new Error(`thread/read returned the wrong identity for Project sync: ${threadId}`);
-          }
-          for (let attempt = 1; attempt <= 3; attempt += 1) {
-            try {
-              reconcileStateFiles(options, [thread], {
-                mode: 'watch',
-                trigger: `thread/started:${threadId}`,
-                backupState,
-              });
-              return;
-            } catch (error) {
-              const conflict = error.message.includes('Desktop state changed during Project reconciliation');
-              if (!conflict || attempt === 3) throw error;
-              await delay(50 * attempt);
-            }
-          }
-        }).catch((error) => {
-          process.stderr.write(`Project sync notification failed: ${error.stack ?? error.message}\n`);
-        });
-      });
-      const [activeThreads, archivedThreads] = await Promise.all([
-        listAllThreads(client, false),
-        listAllThreads(client, true),
-      ]);
-      reconcileStateFiles(options, [...activeThreads, ...archivedThreads], {
-        mode: 'watch',
-        trigger: 'connected',
-        backupState,
-        activeThreads: activeThreads.length,
-        archivedThreads: archivedThreads.length,
-      });
-      await new Promise((resolve) => client.once('disconnected', resolve));
-      await queue;
-    } catch (error) {
-      if (!stopping) process.stderr.write(`Project sync connection failed: ${error.stack ?? error.message}\n`);
-    } finally {
-      client.close();
-      if (activeClient === client) activeClient = null;
-    }
-    if (!stopping) {
-      if (!processExists(options.serverProcessId)) break;
-      reconnectAttempt += 1;
-      await delay(Math.min(1_000 * (2 ** Math.min(reconnectAttempt - 1, 5)), 30_000));
-    }
-  }
-}
-
 async function run(options = parseArguments(process.argv.slice(2))) {
   const globalStatePath = path.resolve(options.globalStatePath);
   const bridgeStatePath = path.resolve(options.bridgeStatePath);
   if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
   if (!fs.existsSync(bridgeStatePath)) throw new Error(`Bridge state is missing: ${bridgeStatePath}`);
 
-  const { projectRoots, boundThreads, projectAliases } = loadBridgeProjects(bridgeStatePath);
+  const { projectRoots, boundThreads } = loadBridgeProjects(bridgeStatePath);
   const client = new AppServerClient(options.endpoint);
   let activeThreads;
   let archivedThreads;
+  let projects;
   try {
     await client.connect();
+    projects = await listAllProjects(client);
     [activeThreads, archivedThreads] = await Promise.all([
-      listAllThreads(client, false),
-      listAllThreads(client, true),
+      listThreadsWithNativeProjects(client, false, projects),
+      listThreadsWithNativeProjects(client, true, projects),
     ]);
   } finally {
     client.close();
@@ -503,9 +345,8 @@ async function run(options = parseArguments(process.argv.slice(2))) {
   const originalState = JSON.parse(originalText);
   const { state, stats } = reconcileDesktopProjectState(originalState, {
     projectRoots,
-    projectAliases,
     // Bridge bindings do not carry native Project identity. Put them first so the
-    // canonical App Server observation wins for duplicate thread identities.
+    // canonical App Server observation can remove any stale local assignment.
     threads: [...boundThreads, ...activeThreads, ...archivedThreads],
   });
   const changed = JSON.stringify(state) !== JSON.stringify(originalState);
@@ -532,8 +373,8 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     endpoint: options.endpoint,
     activeThreads: activeThreads.length,
     archivedThreads: archivedThreads.length,
+    appServerProjects: projects.length,
     bridgeProjects: projectRoots.length,
-    projectAliases: projectAliases.length,
     backupPath,
     stats,
     verifiedThread,
@@ -546,8 +387,7 @@ async function run(options = parseArguments(process.argv.slice(2))) {
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (invokedPath === import.meta.url) {
   const options = parseArguments(process.argv.slice(2));
-  const operation = options.watch ? runWatch(options) : run(options);
-  operation.catch((error) => {
+  run(options).catch((error) => {
     const resultPathIndex = process.argv.indexOf('--result');
     const resultPath = resultPathIndex >= 0 ? process.argv[resultPathIndex + 1] : null;
     const result = {

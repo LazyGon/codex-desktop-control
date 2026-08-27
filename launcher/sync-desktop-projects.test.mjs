@@ -5,18 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   loadBridgeProjects,
-  projectSyncThreadId,
   reconcileDesktopProjectState,
 } from './sync-desktop-projects.mjs';
-
-test('only a native thread-start notification triggers continuing Project sync', () => {
-  assert.equal(projectSyncThreadId({
-    method: 'thread/started',
-    params: { thread: { id: 'new-luna-summary', projectId: 'native-automation' } },
-  }), 'new-luna-summary');
-  assert.equal(projectSyncThreadId({ method: 'turn/started', params: { threadId: 'ignored' } }), null);
-  assert.equal(projectSyncThreadId({ method: 'thread/started', params: { thread: {} } }), null);
-});
 
 test('creates missing projects and assigns active and archived threads by cwd', () => {
   const ids = ['local-attendance', 'local-economic'];
@@ -115,7 +105,7 @@ test('is idempotent and preserves non-local assignments', () => {
   assert.equal(result.stats.assignmentsSkipped, 1);
 });
 
-test('aliases a hidden native App Server Project to the existing local Project', () => {
+test('native App Server Project identity removes a stale local assignment', () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-alias-'));
   const bridgeState = path.join(temporary, 'state.json');
   fs.writeFileSync(bridgeState, JSON.stringify({
@@ -150,9 +140,14 @@ test('aliases a hidden native App Server Project to the existing local Project',
     'thread-project-assignments': {},
   };
 
+  original['thread-project-assignments']['luna-summary'] = {
+    projectKind: 'local',
+    projectId: 'local-automation',
+    cwd: 'C:\\legacy-root',
+    pendingCoreUpdate: false,
+  };
   const result = reconcileDesktopProjectState(original, {
     projectRoots: bridge.projectRoots,
-    projectAliases: bridge.projectAliases,
     threads: [
       ...bridge.boundThreads,
       {
@@ -163,12 +158,7 @@ test('aliases a hidden native App Server Project to the existing local Project',
     ],
   });
 
-  assert.deepEqual(result.state['thread-project-assignments']['luna-summary'], {
-    projectKind: 'local',
-    projectId: 'local-automation',
-    cwd: 'C:\\legacy-root',
-    pendingCoreUpdate: false,
-  });
-  assert.equal(result.stats.aliasAssignments, 1);
+  assert.equal(result.state['thread-project-assignments']['luna-summary'], undefined);
+  assert.equal(result.stats.assignmentsRemoved, 1);
   fs.rmSync(temporary, { recursive: true, force: true });
 });
