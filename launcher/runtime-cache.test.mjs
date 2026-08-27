@@ -42,6 +42,19 @@ function resolvePowerShellExecutable() {
   return executable;
 }
 
+function resolveWindowsPowerShellExecutable() {
+  const windowsRoot = process.env.WINDIR ?? String.raw`C:\Windows`;
+  const executable = path.join(
+    windowsRoot,
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  assert.ok(fs.existsSync(executable), 'Windows PowerShell 5.1 must be available.');
+  return executable;
+}
+
 function cleanPowerShellEnvironment() {
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) {
@@ -100,4 +113,33 @@ test('runtime cache keeps app-server and Code Mode host together per package ver
   assert.equal(fs.readFileSync(first.CodeModeHostExecutable, 'utf8'), 'host-v1-repaired');
   assert.equal(fs.readFileSync(second.ServerExecutable, 'utf8'), 'server-v2');
   assert.equal(fs.readFileSync(second.CodeModeHostExecutable, 'utf8'), 'host-v2');
+});
+
+test('SHA-256 helper does not depend on PowerShell module auto-loading', (context) => {
+  if (process.platform !== 'win32') {
+    context.skip('The shared launcher is Windows-only.');
+    return;
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-runtime-hash-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fixture = path.join(directory, 'fixture.bin');
+  fs.writeFileSync(fixture, 'module-independent-hash');
+  const command = [
+    `$ErrorActionPreference = 'Stop'`,
+    `. ${psLiteral(helperPath)}`,
+    `Get-CodexFileSha256 -Path ${psLiteral(fixture)}`,
+  ].join('\n');
+  const environment = {
+    ...process.env,
+    PSModulePath: path.join(directory, 'missing-modules'),
+  };
+  const output = execFileSync(resolveWindowsPowerShellExecutable(), [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    command,
+  ], { encoding: 'utf8', env: environment }).trim();
+  assert.equal(output, sha256('module-independent-hash'));
+  assert.doesNotMatch(fs.readFileSync(helperPath, 'utf8'), /Get-FileHash/);
 });

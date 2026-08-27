@@ -1,5 +1,27 @@
 Set-StrictMode -Version Latest
 
+function Get-CodexFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "File was not found for SHA-256 calculation: $Path"
+    }
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Copy-VerifiedCodexRuntimeFile {
     param(
         [Parameter(Mandatory)][string]$SourcePath,
@@ -11,10 +33,10 @@ function Copy-VerifiedCodexRuntimeFile {
         throw "$Description was not found: $SourcePath"
     }
 
-    $sourceHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
+    $sourceHash = Get-CodexFileSha256 -Path $SourcePath
     $cacheIsCurrent = $false
     if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
-        $cachedHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash
+        $cachedHash = Get-CodexFileSha256 -Path $DestinationPath
         $cacheIsCurrent = $cachedHash -eq $sourceHash
     }
 
@@ -22,7 +44,7 @@ function Copy-VerifiedCodexRuntimeFile {
         $temporaryPath = "$DestinationPath.$PID.tmp"
         try {
             Copy-Item -LiteralPath $SourcePath -Destination $temporaryPath -Force
-            $temporaryHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash
+            $temporaryHash = Get-CodexFileSha256 -Path $temporaryPath
             if ($temporaryHash -ne $sourceHash) {
                 throw "The cached $Description hash does not match the Desktop package."
             }

@@ -32,6 +32,7 @@ $resultPath = Join-Path $launcherRoot 'state\runtime-refresh-last.json'
 $logPath = Join-Path $launcherRoot 'logs\runtime-refresh-last.log'
 $drainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
 $launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
+$runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
 $controlScript = Join-Path $repositoryRoot 'control\codex-control.mjs'
 $bridgeStopScript = Join-Path $repositoryRoot 'discord-bridge\Stop-DiscordBridge.ps1'
 $bridgeStartScript = Join-Path $repositoryRoot 'discord-bridge\Start-DiscordBridge.ps1'
@@ -39,6 +40,11 @@ $bridgeStatusScript = Join-Path $repositoryRoot 'discord-bridge\Get-DiscordBridg
 $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
 $bridgeWasRunning = $false
 $bridgeWasStopped = $false
+
+if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
+    throw "Codex runtime cache helper was not found: $runtimeCacheScript"
+}
+. $runtimeCacheScript
 
 function Write-RefreshLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -134,7 +140,7 @@ function Get-VerifiedRuntimeState {
     if (-not (Test-ReadyEndpoint -ReadyUrl $state.readyUrl)) {
         throw 'The shared server ready endpoint is not healthy.'
     }
-    $actualServerHash = (Get-FileHash -LiteralPath $state.serverExecutable -Algorithm SHA256).Hash
+    $actualServerHash = Get-CodexFileSha256 -Path $state.serverExecutable
     if ($actualServerHash -ne $state.serverSha256) {
         throw 'The live shared server hash does not match runtime state.'
     }
