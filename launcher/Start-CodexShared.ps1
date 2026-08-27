@@ -20,6 +20,9 @@ $cacheRoot = Join-Path $launcherRoot 'cache'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
 $desktopPackageScript = Join-Path $launcherRoot 'CodexDesktopPackage.ps1'
 $processEnvironmentScript = Join-Path $launcherRoot 'CodexProcessEnvironment.ps1'
+$runtimeUpdateDrainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
+$runtimeUpdateStatePath = Join-Path $stateRoot 'package-update-drain.json'
+$launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
@@ -31,6 +34,9 @@ if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $processEnvironmentScript -PathType Leaf)) {
     throw "Codex process environment helper was not found: $processEnvironmentScript"
+}
+if (-not (Test-Path -LiteralPath $runtimeUpdateDrainScript -PathType Leaf)) {
+    throw "Runtime update drain helper was not found: $runtimeUpdateDrainScript"
 }
 . $runtimeCacheScript
 . $desktopPackageScript
@@ -53,6 +59,119 @@ function Write-LauncherLog {
 
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss.fffK'), $Message
     Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+}
+
+function Invoke-RuntimeUpdateDrain {
+    param(
+        [Parameter(Mandatory)][ValidateSet('pause-active', 'active', 'resume-paused')][string]$Command,
+        [Parameter(Mandatory)][string]$WebSocketUrl,
+        [AllowNull()][string]$FromVersion,
+        [AllowNull()][string]$ToVersion
+    )
+
+    $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
+    $arguments = @($runtimeUpdateDrainScript, $Command, '--endpoint', $WebSocketUrl)
+    if ($Command -in @('pause-active', 'resume-paused')) {
+        $arguments += @('--state', $runtimeUpdateStatePath)
+    }
+    if ($Command -eq 'pause-active') {
+        $arguments += @('--from-version', $FromVersion, '--to-version', $ToVersion)
+    }
+
+    $output = @(& $nodeExecutable @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime update drain command failed ($Command): $($output -join [Environment]::NewLine)"
+    }
+    if ($output.Count -eq 0) {
+        throw "Runtime update drain command returned no result: $Command"
+    }
+    $output[-1] | ConvertFrom-Json
+}
+
+function Wait-RuntimeUpdateQuiescence {
+    param(
+        [Parameter(Mandatory)][string]$WebSocketUrl,
+        [Parameter(Mandatory)][string]$FromVersion,
+        [Parameter(Mandatory)][string]$ToVersion
+    )
+
+    $consecutiveIdleChecks = 0
+    $lastActiveSet = $null
+    while ($consecutiveIdleChecks -lt 5) {
+        try {
+            $drain = Invoke-RuntimeUpdateDrain `
+                -Command 'pause-active' `
+                -WebSocketUrl $WebSocketUrl `
+                -FromVersion $FromVersion `
+                -ToVersion $ToVersion
+            $activeThreadIds = @($drain.activeThreadIds)
+            $activeSet = $activeThreadIds -join ','
+            if ($activeSet -ne $lastActiveSet) {
+                Write-LauncherLog (
+                    "Runtime update drain observed active threads. count=$($activeThreadIds.Count) " +
+                    "ids=$activeSet"
+                )
+                $lastActiveSet = $activeSet
+            }
+            if ($activeThreadIds.Count -eq 0) {
+                $consecutiveIdleChecks += 1
+            }
+            else {
+                $consecutiveIdleChecks = 0
+            }
+        }
+        catch {
+            $consecutiveIdleChecks = 0
+            Write-LauncherLog "Runtime update drain inspection failed; preserving the current server: $($_.Exception.Message)"
+        }
+        if ($consecutiveIdleChecks -lt 5) {
+            Start-Sleep -Seconds 1
+        }
+    }
+    Write-LauncherLog 'Runtime update drain reached five consecutive idle checks.'
+}
+
+function Restore-RuntimeUpdateGoals {
+    param(
+        [Parameter(Mandatory)][string]$WebSocketUrl,
+        [Parameter(Mandatory)][string]$PackageVersion
+    )
+
+    if (-not (Test-Path -LiteralPath $runtimeUpdateStatePath -PathType Leaf)) {
+        return
+    }
+    try {
+        $state = Get-Content -LiteralPath $runtimeUpdateStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($state.phase -eq 'completed' -or $state.toVersion -ne $PackageVersion) {
+            return
+        }
+    }
+    catch {
+        Write-LauncherLog "Unable to inspect paused-goal update state: $($_.Exception.Message)"
+        return
+    }
+
+    for ($attempt = 1; $attempt -le 5; $attempt += 1) {
+        try {
+            $restored = Invoke-RuntimeUpdateDrain `
+                -Command 'resume-paused' `
+                -WebSocketUrl $WebSocketUrl `
+                -FromVersion $null `
+                -ToVersion $null
+            Write-LauncherLog (
+                "Runtime update goals restored. resumed=$(@($restored.resumedThreadIds).Count) " +
+                "unchanged=$(@($restored.unchangedThreadIds).Count)"
+            )
+            return
+        }
+        catch {
+            Write-LauncherLog "Runtime update goal restore attempt $attempt failed: $($_.Exception.Message)"
+            if ($attempt -lt 5) {
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+    Write-LauncherLog 'Paused goals remain paused because all automatic restore attempts failed.'
 }
 
 Write-LauncherLog "CLI redirect enabled for child processes: $cliRedirectEnabledForChildProcesses"
@@ -648,6 +767,8 @@ $exitCode = 1
 $packageInfo = $null
 $registeredWebSocketUrl = $null
 $startupHandled = $false
+$restartAfterCleanup = $false
+$replacementPackageVersion = $null
 
 try {
     $packageInfo = Get-CodexPackageInfo
@@ -669,6 +790,9 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $reusableRuntime `
                 -PortNumber $Port
+            Restore-RuntimeUpdateGoals `
+                -WebSocketUrl $reusableRuntime.websocketUrl `
+                -PackageVersion $packageInfo.Version
             Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
             Invoke-LauncherSignal -Kind Ready
             $exitCode = 0
@@ -755,6 +879,9 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $runtimeState `
                 -PortNumber $Port
+            Restore-RuntimeUpdateGoals `
+                -WebSocketUrl $runtimeState.websocketUrl `
+                -PackageVersion $packageInfo.Version
             Invoke-LauncherSignal -Kind Ready
 
             $monitoredDesktopVersion = $packageInfo.Version
@@ -785,24 +912,17 @@ try {
                                 "Desktop package replacement detected. " +
                                 "oldVersion=$monitoredDesktopVersion newVersion=$($replacement.Version)"
                             )
-                            try {
-                                $null = Start-DesktopOnRuntime `
-                                    -PackageInfo $replacement `
-                                    -RuntimeState $runtimeState `
-                                    -PortNumber $Port
-                                $monitoredDesktopVersion = $replacement.Version
-                                $monitoredDesktopExecutable = $replacement.DesktopExecutable
-                                $missingSince = $null
-                                Write-LauncherLog (
-                                    "Updated Desktop attached automatically to the existing shared app-server. " +
-                                    "version=$monitoredDesktopVersion"
-                                )
-                                Invoke-LauncherSignal -Kind Ready
-                                continue
-                            }
-                            catch {
-                                Write-LauncherLog "Automatic updated-Desktop attachment failed: $($_.Exception.Message)"
-                            }
+                            Wait-RuntimeUpdateQuiescence `
+                                -WebSocketUrl $runtimeState.websocketUrl `
+                                -FromVersion $monitoredDesktopVersion `
+                                -ToVersion $replacement.Version
+                            $restartAfterCleanup = $true
+                            $replacementPackageVersion = $replacement.Version
+                            Write-LauncherLog (
+                                "Updated Desktop and shared app-server will restart together. " +
+                                "version=$replacementPackageVersion"
+                            )
+                            break
                         }
                     }
 
@@ -816,7 +936,12 @@ try {
                 Start-Sleep -Seconds 1
             }
 
-            Write-LauncherLog 'Desktop exited; beginning owned app-server cleanup.'
+            if ($restartAfterCleanup) {
+                Write-LauncherLog 'Runtime update drain completed; beginning old shared app-server cleanup.'
+            }
+            else {
+                Write-LauncherLog 'Desktop exited; beginning owned app-server cleanup.'
+            }
             $exitCode = 0
         }
     }
@@ -873,10 +998,31 @@ finally {
         $mutex.Dispose()
     }
 
-    if (-not $SelfTest -and $exitCode -eq 0 -and $serverProcessId -ne 0) {
+    if (-not $SelfTest -and $exitCode -eq 0 -and $serverProcessId -ne 0 -and -not $restartAfterCleanup) {
         Invoke-LauncherSignal -Kind Stopped
     }
     Write-LauncherLog "Launcher finished. exitCode=$exitCode"
+}
+
+if (-not $SelfTest -and $exitCode -eq 0 -and $restartAfterCleanup) {
+    try {
+        if (-not (Test-Path -LiteralPath $launcherExecutable -PathType Leaf)) {
+            throw "Shared launcher executable was not found: $launcherExecutable"
+        }
+        Start-Process `
+            -FilePath $launcherExecutable `
+            -ArgumentList '--no-dialogs' `
+            -WindowStyle Hidden | Out-Null
+        Write-LauncherLog (
+            "Replacement shared launcher started after runtime cleanup. " +
+            "targetVersion=$replacementPackageVersion"
+        )
+    }
+    catch {
+        Write-LauncherLog "Unable to start replacement shared launcher: $($_.Exception.Message)"
+        Invoke-LauncherSignal -Kind Error
+        $exitCode = 1
+    }
 }
 
 exit $exitCode

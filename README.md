@@ -109,12 +109,15 @@ hashes must match the installed Desktop package before the runtime is reused.
 
 If the Store replaces the `OpenAI.Codex` package while a shared session is
 running, the launcher detects the new package version after the old Desktop
-root exits, activates the updated Desktop, and verifies that it reattached to
-the existing loopback app-server. At Windows logon, the Discord Remote host
-starts the configured shared launcher before loading Discord dependencies, so
-the shared Desktop wins the startup race after a reboot. The logon path honors
-the existing `autoStartSharedDesktop` setting, and update recovery remains
-scoped to the same package identity.
+root exits. It immediately pauses every active task goal, waits until all task
+turns are idle, cleans up the old package's owned app-server, and starts the
+updated Desktop together with the updated package's app-server. Only goals
+paused by that update are resumed after the new shared connection is verified.
+At Windows logon, the Discord Remote host starts the configured shared launcher
+before loading Discord dependencies, so the shared Desktop wins the startup
+race after a reboot. The logon path honors the existing
+`autoStartSharedDesktop` setting, and update recovery remains scoped to the same
+package identity.
 
 Before each Desktop start, the launcher reads the Bridge's managed project
 paths and the app-server's active and archived task lists. While Desktop is
@@ -136,6 +139,12 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
 
 The result is written to
 `launcher/state/project-repair-last.json`.
+
+To replace an already-running stale shared app-server after a Store update, run
+`launcher\Refresh-CodexSharedRuntime.ps1` in a detached hidden PowerShell
+process, bound to the exact current thread and turn. It pauses active goals,
+waits for every active turn, replaces the server and Desktop as one runtime,
+restores only updater-paused goals, and delivers one completion callback.
 
 ```powershell
 .\control\codex-control.cmd status

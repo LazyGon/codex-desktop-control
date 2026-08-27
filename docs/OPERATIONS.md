@@ -17,11 +17,14 @@
    does not take over or clean up the existing server.
 
 When the Store updates `OpenAI.Codex` during a shared session, the launcher
-recognizes the replacement package, opens its updated Desktop executable, and
-verifies the new Desktop connection before continuing to supervise the shared
-app-server. After a Windows logon, the Discord Remote host starts the shared
-launcher before the full Bridge cold start when `autoStartSharedDesktop` is
-enabled. Manual launch is not required after an app update or reboot.
+recognizes the replacement package and pauses every goal whose current status
+is `active`. It keeps the old shared app-server alive until all active turns
+have drained, then replaces the Desktop and app-server together. After the new
+shared connection is verified, it resumes only the goals that this update
+paused. Goals already paused, blocked, limited, or complete are not changed.
+After a Windows logon, the Discord Remote host starts the shared launcher before
+the full Bridge cold start when `autoStartSharedDesktop` is enabled. Manual
+launch is not required after an app update or reboot.
 
 The most recent reconciliation result is stored in
 `launcher\state\project-sync-last.json`. Backups of the Desktop global state
@@ -46,6 +49,15 @@ Bridge. `-WaitForThreadId` names the current task that must finish first;
 `-VerifyThreadId` names the task whose repaired project assignment must be
 proved after Desktop reattaches. The final result is written to
 `launcher\state\project-repair-last.json`.
+
+For an already-running shared runtime whose package version is stale, use
+`launcher\Refresh-CodexSharedRuntime.ps1` from a detached hidden PowerShell
+process. Supply the exact active thread and turn plus the current and target
+package versions. It pauses active goals before waiting, stops Bridge ingress,
+waits for every active turn, replaces the old owned server, verifies the new
+Desktop connection and hashes, restores only updater-paused goals, restarts the
+Bridge, and sends one completion callback. Its finite receipt is written to
+`launcher\state\runtime-refresh-last.json`.
 
 ## Discover and catch up a phone-created task
 
