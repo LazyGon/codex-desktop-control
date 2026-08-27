@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reconcileDesktopProjectState } from './sync-desktop-projects.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  loadBridgeProjects,
+  reconcileDesktopProjectState,
+} from './sync-desktop-projects.mjs';
 
 test('creates missing projects and assigns active and archived threads by cwd', () => {
   const ids = ['local-attendance', 'local-economic'];
@@ -97,4 +103,62 @@ test('is idempotent and preserves non-local assignments', () => {
   assert.equal(result.stats.projectsCreated, 0);
   assert.equal(result.stats.assignmentsUnchanged, 1);
   assert.equal(result.stats.assignmentsSkipped, 1);
+});
+
+test('aliases a hidden native App Server Project to the existing local Project', () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-alias-'));
+  const bridgeState = path.join(temporary, 'state.json');
+  fs.writeFileSync(bridgeState, JSON.stringify({
+    projectCategories: {},
+    bindings: { 'luna-summary': { cwd: 'C:\\legacy-bridge-binding' } },
+    hiddenProjects: {
+      'local-automation': {
+        projectId: 'local-automation',
+        name: 'Codex - economic-support-automation',
+      },
+      'app-server:native-automation': {
+        projectId: 'native-automation',
+        name: 'Codex - economic-support-automation',
+        namespace: 'app-server',
+      },
+    },
+  }));
+  const bridge = loadBridgeProjects(bridgeState);
+  const original = {
+    'electron-saved-workspace-roots': ['C:\\legacy-root'],
+    'project-order': ['local-automation'],
+    'pinned-project-ids': ['local-automation'],
+    'local-projects': {
+      'local-automation': {
+        id: 'local-automation',
+        name: 'economic-support-automation',
+        rootPaths: ['C:\\legacy-root', 'C:\\legacy-runtime'],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    },
+    'thread-project-assignments': {},
+  };
+
+  const result = reconcileDesktopProjectState(original, {
+    projectRoots: bridge.projectRoots,
+    projectAliases: bridge.projectAliases,
+    threads: [
+      ...bridge.boundThreads,
+      {
+        id: 'luna-summary',
+        cwd: 'C:\\portable-instance\\runtime\\summary',
+        projectId: 'native-automation',
+      },
+    ],
+  });
+
+  assert.deepEqual(result.state['thread-project-assignments']['luna-summary'], {
+    projectKind: 'local',
+    projectId: 'local-automation',
+    cwd: 'C:\\legacy-root',
+    pendingCoreUpdate: false,
+  });
+  assert.equal(result.stats.aliasAssignments, 1);
+  fs.rmSync(temporary, { recursive: true, force: true });
 });

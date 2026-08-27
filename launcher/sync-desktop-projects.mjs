@@ -83,11 +83,6 @@ function defaultProjectName(rootPath) {
   return path.win32.basename(rootPath) || rootPath;
 }
 
-function projectRoot(project) {
-  const roots = arrayValue(project?.rootPaths);
-  return roots.length === 1 ? normalizeLocalPath(roots[0]) : null;
-}
-
 function verifiedThreadAssignment(state, threadId) {
   if (!threadId) return null;
   const assignment = objectValue(state['thread-project-assignments'])[threadId];
@@ -112,6 +107,7 @@ export function reconcileDesktopProjectState(
   originalState,
   {
     projectRoots,
+    projectAliases = [],
     threads,
     now = Date.now(),
     createProjectId = defaultProjectId,
@@ -133,9 +129,27 @@ export function reconcileDesktopProjectState(
 
   const projectsByRoot = new Map();
   for (const [projectId, project] of Object.entries(state['local-projects'])) {
-    const rootPath = projectRoot(project);
-    const key = localPathKey(rootPath);
-    if (key && !projectsByRoot.has(key)) projectsByRoot.set(key, { projectId, project });
+    for (const rootPath of arrayValue(project?.rootPaths).map(normalizeLocalPath)) {
+      const key = localPathKey(rootPath);
+      if (key && !projectsByRoot.has(key)) projectsByRoot.set(key, { projectId, project });
+    }
+  }
+
+  const aliasesByRemoteProject = new Map();
+  for (const alias of projectAliases) {
+    const remoteProjectId = typeof alias?.remoteProjectId === 'string'
+      ? alias.remoteProjectId : null;
+    const localProjectId = typeof alias?.localProjectId === 'string'
+      ? alias.localProjectId : null;
+    const project = localProjectId ? state['local-projects'][localProjectId] : null;
+    if (!remoteProjectId || !localProjectId || !project
+        || project.id !== localProjectId || project.name !== alias.projectName) {
+      throw new Error(`Project alias is inconsistent: ${remoteProjectId ?? 'missing'}`);
+    }
+    if (aliasesByRemoteProject.has(remoteProjectId)) {
+      throw new Error(`Project alias is duplicated: ${remoteProjectId}`);
+    }
+    aliasesByRemoteProject.set(remoteProjectId, { projectId: localProjectId, project });
   }
 
   const stats = {
@@ -148,6 +162,7 @@ export function reconcileDesktopProjectState(
     assignmentsUpdated: 0,
     assignmentsUnchanged: 0,
     assignmentsSkipped: 0,
+    aliasAssignments: 0,
   };
 
   for (const [key, rootPath] of rootsByKey) {
@@ -184,8 +199,11 @@ export function reconcileDesktopProjectState(
   }
   for (const thread of threadsById.values()) {
     const cwd = normalizeLocalPath(thread.cwd);
-    const entry = projectsByRoot.get(localPathKey(cwd));
-    if (!cwd || !entry) {
+    const aliasEntry = aliasesByRemoteProject.get(thread.projectId);
+    const entry = aliasEntry ?? projectsByRoot.get(localPathKey(cwd));
+    const assignmentCwd = aliasEntry
+      ? normalizeLocalPath(arrayValue(aliasEntry.project.rootPaths)[0]) : cwd;
+    if (!assignmentCwd || !entry) {
       stats.assignmentsSkipped += 1;
       continue;
     }
@@ -199,7 +217,7 @@ export function reconcileDesktopProjectState(
       ...objectValue(existing),
       projectKind: 'local',
       projectId: entry.projectId,
-      cwd,
+      cwd: assignmentCwd,
       pendingCoreUpdate: existing?.pendingCoreUpdate ?? false,
     };
     const unchanged = existing
@@ -212,6 +230,7 @@ export function reconcileDesktopProjectState(
       continue;
     }
     state['thread-project-assignments'][thread.id] = next;
+    if (aliasEntry) stats.aliasAssignments += 1;
     if (existing) stats.assignmentsUpdated += 1;
     else stats.assignmentsCreated += 1;
   }
@@ -240,7 +259,7 @@ async function listAllThreads(client, archived) {
   return threads;
 }
 
-function loadBridgeProjects(bridgeStatePath) {
+export function loadBridgeProjects(bridgeStatePath) {
   const bridgeState = JSON.parse(fs.readFileSync(bridgeStatePath, 'utf8'));
   const projectRoots = [];
   for (const project of Object.values(objectValue(bridgeState.projectCategories))) {
@@ -253,7 +272,23 @@ function loadBridgeProjects(bridgeStatePath) {
   for (const [threadId, binding] of Object.entries(objectValue(bridgeState.bindings))) {
     if (typeof binding?.cwd === 'string') boundThreads.push({ id: threadId, cwd: binding.cwd });
   }
-  return { projectRoots, boundThreads };
+  const hiddenProjects = Object.values(objectValue(bridgeState.hiddenProjects));
+  const projectAliases = [];
+  for (const remote of hiddenProjects.filter(item => item?.namespace === 'app-server')) {
+    const matches = hiddenProjects.filter(item => item?.namespace !== 'app-server'
+      && item?.name === remote.name && typeof item?.projectId === 'string');
+    if (matches.length > 1) {
+      throw new Error(`Hidden Project alias is ambiguous: ${remote.projectId}`);
+    }
+    if (matches.length === 1) {
+      projectAliases.push({
+        remoteProjectId: remote.projectId,
+        localProjectId: matches[0].projectId,
+        projectName: String(remote.name).replace(/^Codex - /, ''),
+      });
+    }
+  }
+  return { projectRoots, boundThreads, projectAliases };
 }
 
 function timestampForPath(date = new Date()) {
@@ -283,7 +318,7 @@ async function run() {
   if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
   if (!fs.existsSync(bridgeStatePath)) throw new Error(`Bridge state is missing: ${bridgeStatePath}`);
 
-  const { projectRoots, boundThreads } = loadBridgeProjects(bridgeStatePath);
+  const { projectRoots, boundThreads, projectAliases } = loadBridgeProjects(bridgeStatePath);
   const client = new AppServerClient(options.endpoint);
   let activeThreads;
   let archivedThreads;
@@ -301,7 +336,10 @@ async function run() {
   const originalState = JSON.parse(originalText);
   const { state, stats } = reconcileDesktopProjectState(originalState, {
     projectRoots,
-    threads: [...activeThreads, ...archivedThreads, ...boundThreads],
+    projectAliases,
+    // Bridge bindings do not carry native Project identity. Put them first so the
+    // canonical App Server observation wins for duplicate thread identities.
+    threads: [...boundThreads, ...activeThreads, ...archivedThreads],
   });
   const changed = JSON.stringify(state) !== JSON.stringify(originalState);
   const verifiedThread = verifiedThreadAssignment(state, options.verifyThreadId);
@@ -328,6 +366,7 @@ async function run() {
     activeThreads: activeThreads.length,
     archivedThreads: archivedThreads.length,
     bridgeProjects: projectRoots.length,
+    projectAliases: projectAliases.length,
     backupPath,
     stats,
     verifiedThread,
