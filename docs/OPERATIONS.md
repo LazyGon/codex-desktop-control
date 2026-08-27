@@ -36,6 +36,24 @@ is skipped until both Desktop and Bridge have created their initial state files.
 Launcher self-tests use a port-specific runtime-state file and never replace
 the live `launcher\state\current.json`.
 
+On each normal launch, the launcher verifies a managed root-level
+`mcp_servers.codex_app` stdio definition in `~/.codex/config.toml` before it
+decides whether to start or reuse the shared App Server. It also passes that
+complete definition directly to every new shared App Server. Therefore this
+repair is applied at logon, manual launch, runtime reuse, and Store-update
+recovery without a second server or a Desktop-private server. The definition's
+stable bridge resolves the installed Desktop package and native app-tools pipe
+at MCP startup; it does not store a package-version-specific path in the user
+config or open another listener.
+
+If Desktop reports `invalid transport in mcp_servers.codex_app`, do not add a
+`transport` key. Run the shared launcher once. It atomically adds or refreshes
+its marked `mcp_servers.codex_app` command definition and keeps the old config
+as a timestamped backup. If an unmarked `codex_app` definition already exists,
+the launcher preserves it and stops with a conflict instead of guessing which
+definition owns the key. `codex mcp list` should then show `codex_app` with
+`launcher\codex-app-tools-bridge.mjs` as its argument.
+
 For a one-shot offline repair, use
 `launcher\Restart-CodexSharedWithProjectRepair.ps1` from a detached hidden
 PowerShell process. It waits for the named active task to finish before
@@ -54,12 +72,18 @@ For an already-running shared runtime whose package version is stale, use
 `launcher\Refresh-CodexSharedRuntime.ps1`. Supply the exact active thread and
 turn plus the current and target package versions. The entry process launches
 the real controller through a no-trigger one-shot Scheduled Task, keeping it
-outside the old app-server's kill-on-close Job. The controller pauses active
-goals before waiting, stops Bridge ingress, waits for every active turn, allows
-120 seconds for normal Desktop shutdown, replaces the old owned server,
-verifies the new Desktop connection and hashes, restores only updater-paused
-goals, restarts the Bridge, and sends one completion callback. Its finite
-receipt is written to `launcher\state\runtime-refresh-last.json`.
+outside the old app-server's kill-on-close Job. A local admission mutex and the
+Task Scheduler's single-instance policy reject overlap; only an owned, idle,
+no-trigger task may be replaced. The worker writes an atomic request-id-bound
+`armed` receipt and waits for the entry process to replace it with
+`controller-accepted`; without that acknowledgement it stops before inspecting
+or changing the runtime. The controller then revalidates the actual Desktop
+loopback connection, pauses active goals before waiting, stops Bridge ingress,
+waits for every active turn, allows 120 seconds for normal Desktop shutdown,
+replaces the old owned server, verifies the new Desktop connection and hashes,
+restores only updater-paused goals, restarts the Bridge, and sends one completion
+callback. Its finite receipt is written to
+`launcher\state\runtime-refresh-last.json`.
 
 ## Discover and catch up a phone-created task
 

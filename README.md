@@ -107,6 +107,27 @@ The launcher caches the package's `codex.exe` and
 app-server builds start the companion Code Mode host beside `codex.exe`; both
 hashes must match the installed Desktop package before the runtime is reused.
 
+For a Desktop connected through the shared WebSocket, the launcher also keeps
+one managed `mcp_servers.codex_app` stdio definition at the start of
+`~/.codex/config.toml` and pins the same complete definition on every shared
+app-server command line. This prevents a Desktop thread's
+`mcp_servers.codex_app.enabled_tools` override from becoming a transport-less
+MCP definition. A changed config is replaced atomically and the previous file
+is retained beside it as a timestamped `codex-desktop-control` backup. An
+unmanaged `codex_app` definition, a malformed managed block, or a concurrent
+config change fails closed without overwriting the user's definition.
+
+The managed command starts `launcher/codex-app-tools-bridge.mjs`; it opens no
+listener. Before starting the Desktop-bundled MCP over stdio, the bridge
+requires exactly one Desktop process connected to the loopback shared server,
+rechecks its exact executable, binds the current main-process log to its native
+app-tools pipe, verifies that pipe exists, and verifies the bundled MCP layout.
+It resolves these paths on every MCP start, so a Store package replacement does
+not leave a package-version-specific command in `config.toml`. A bounded
+20-second admission wait covers the normal race between Desktop connection and
+launcher state publication; an unresolved or ambiguous owner still fails
+closed.
+
 If the Store replaces the `OpenAI.Codex` package while a shared session is
 running, the launcher detects the new package version after the old Desktop
 root exits. It immediately pauses every active task goal, waits until all task
@@ -144,9 +165,14 @@ To replace an already-running stale shared app-server after a Store update, run
 `launcher\Refresh-CodexSharedRuntime.ps1`, bound to the exact current thread and
 turn. The script registers and starts a no-trigger one-shot Scheduled Task so
 the controller does not inherit the old app-server's kill-on-close Job. It
-pauses active goals, waits for every active turn, allows 120 seconds for a
-normal Desktop exit, replaces the server and Desktop as one runtime, restores
-only updater-paused goals, and delivers one completion callback.
+serializes admission, replaces only an owned stale task, and requires a matching
+request-id acknowledgement before the controller can touch the runtime. The
+controller revalidates the live loopback Desktop connection, pauses active
+goals, waits for every active turn, allows 120 seconds for a normal Desktop
+exit, replaces the server and Desktop as one runtime, restores only
+updater-paused goals, and delivers one completion callback. Each phase replaces
+the prior receipt atomically; an overlap, foreign stale task, duplicate request,
+or unacknowledged launch stops before runtime mutation.
 
 ```powershell
 .\control\codex-control.cmd status
@@ -265,6 +291,9 @@ paths, even in a private repository.
 ```powershell
 node --test .\launcher\sync-desktop-projects.test.mjs
 node --test .\launcher\runtime-cache.test.mjs
+node --test .\launcher\runtime-update-drain.test.mjs
+node --test .\launcher\codex-app-tools-bridge.test.mjs
+node --test .\launcher\codex-app-tools-config.test.mjs
 node --test .\launcher\shared-launcher.test.mjs
 node --check .\launcher\read-thread-status.mjs
 npm --prefix .\discord-bridge run check

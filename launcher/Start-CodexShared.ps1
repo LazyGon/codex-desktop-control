@@ -20,6 +20,8 @@ $cacheRoot = Join-Path $launcherRoot 'cache'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
 $desktopPackageScript = Join-Path $launcherRoot 'CodexDesktopPackage.ps1'
 $processEnvironmentScript = Join-Path $launcherRoot 'CodexProcessEnvironment.ps1'
+$codexAppToolsConfigScript = Join-Path $launcherRoot 'CodexAppToolsSharedConfig.ps1'
+$codexAppToolsBridgeScript = Join-Path $launcherRoot 'codex-app-tools-bridge.mjs'
 $runtimeUpdateDrainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
 $runtimeUpdateStatePath = Join-Path $stateRoot 'package-update-drain.json'
 $launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
@@ -35,12 +37,19 @@ if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $processEnvironmentScript -PathType Leaf)) {
     throw "Codex process environment helper was not found: $processEnvironmentScript"
 }
+if (-not (Test-Path -LiteralPath $codexAppToolsConfigScript -PathType Leaf)) {
+    throw "Shared codex-app-tools config helper was not found: $codexAppToolsConfigScript"
+}
+if (-not (Test-Path -LiteralPath $codexAppToolsBridgeScript -PathType Leaf)) {
+    throw "Shared codex-app-tools bridge was not found: $codexAppToolsBridgeScript"
+}
 if (-not (Test-Path -LiteralPath $runtimeUpdateDrainScript -PathType Leaf)) {
     throw "Runtime update drain helper was not found: $runtimeUpdateDrainScript"
 }
 . $runtimeCacheScript
 . $desktopPackageScript
 . $processEnvironmentScript
+. $codexAppToolsConfigScript
 
 $cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
 
@@ -352,6 +361,40 @@ function Assert-PortAvailable {
     finally {
         $probe.Stop()
     }
+}
+
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append([char]34)
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes += 1
+            continue
+        }
+        if ($character -eq [char]34) {
+            [void]$builder.Append([char]92, ($backslashes * 2) + 1)
+            [void]$builder.Append([char]34)
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([char]92, $backslashes)
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([char]92, $backslashes * 2)
+    }
+    [void]$builder.Append([char]34)
+    $builder.ToString()
 }
 
 function Wait-AppServerReady {
@@ -769,10 +812,28 @@ $registeredWebSocketUrl = $null
 $startupHandled = $false
 $restartAfterCleanup = $false
 $replacementPackageVersion = $null
+$codexAppToolsDefinition = $null
+$codexAppToolsConfigPath = $null
 
 try {
     $packageInfo = Get-CodexPackageInfo
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
+
+    $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
+    $codexAppToolsDefinition = Get-CodexAppToolsSharedDefinition `
+        -LauncherRoot $launcherRoot `
+        -NodeExecutable $nodeExecutable
+    if (-not $SelfTest) {
+        $configInstall = Install-CodexAppToolsSharedConfig `
+            -LauncherRoot $launcherRoot `
+            -NodeExecutable $nodeExecutable
+        $codexAppToolsDefinition = $configInstall.Definition
+        $codexAppToolsConfigPath = $configInstall.ConfigPath
+        Write-LauncherLog (
+            "Shared codex_app transport configuration verified. " +
+            "changed=$($configInstall.Changed) path=$($configInstall.ConfigPath)"
+        )
+    }
 
     $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
     if (-not $SelfTest -and $existingDesktopRoots.Count -gt 0) {
@@ -818,6 +879,8 @@ try {
         $serverArguments = @(
             '-c',
             'features.code_mode_host=true',
+            '-c',
+            $codexAppToolsDefinition.Override,
             'app-server',
             '--listen',
             "ws://127.0.0.1:$Port",
@@ -825,7 +888,10 @@ try {
         )
         $serverStartParameters = @{
             FilePath = $packageInfo.ServerExecutable
-            ArgumentList = $serverArguments
+            ArgumentList = (@(
+                $serverArguments |
+                    ForEach-Object { ConvertTo-WindowsCommandLineArgument -Value ([string]$_) }
+            ) -join ' ')
             WindowStyle = 'Hidden'
             RedirectStandardOutput = $serverStdoutPath
             RedirectStandardError = $serverStderrPath
@@ -852,6 +918,7 @@ try {
             desktopProcessIds = @()
             desktopConnectionVerified = $false
             packageVersion = $packageInfo.Version
+            packageFamilyName = $packageInfo.PackageFamilyName
             desktopExecutable = $packageInfo.DesktopExecutable
             bundledServerExecutable = $packageInfo.BundledServerExecutable
             bundledCodeModeHostExecutable = $packageInfo.BundledCodeModeHostExecutable
@@ -859,6 +926,9 @@ try {
             serverSha256 = $packageInfo.ServerSha256
             codeModeHostExecutable = $packageInfo.CodeModeHostExecutable
             codeModeHostSha256 = $packageInfo.CodeModeHostSha256
+            codexAppToolsTransportSchemaVersion = $codexAppToolsDefinition.SchemaVersion
+            codexAppToolsBridgeScript = $codexAppToolsDefinition.BridgeScript
+            codexAppToolsConfigPath = $codexAppToolsConfigPath
             startedAt = (Get-Date).ToString('o')
             logPath = $logPath
         }
