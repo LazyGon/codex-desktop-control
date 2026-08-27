@@ -130,6 +130,24 @@ test('waitForTurnCompletion closes the notification race using threadId from par
   assert.equal(result.status, 'completed');
 });
 
+test('waitForTurnCompletion re-reads terminal state after a missed notification', async () => {
+  let reads = 0;
+  const client = new FakeClient((method) => {
+    assert.equal(method, 'thread/turns/list');
+    reads += 1;
+    return {
+      data: [{ id: 'TURN', status: reads === 1 ? 'inProgress' : 'completed' }],
+    };
+  });
+  client.waitFor = async () => {
+    throw new Error('Notification wait timed out.');
+  };
+
+  const result = await waitForTurnCompletion(client, 'THREAD', 'TURN', 10_000);
+  assert.equal(result.status, 'completed');
+  assert.equal(reads, 2);
+});
+
 test('shared launcher drains turns and replaces the server on package updates', () => {
   const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
   assert.match(source, /Wait-RuntimeUpdateQuiescence/);

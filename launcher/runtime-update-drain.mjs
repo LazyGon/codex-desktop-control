@@ -236,33 +236,44 @@ export async function resumePausedGoals(client, updateState) {
 function turnCompleted(notification, threadId, turnId) {
   if (notification.method !== 'turn/completed') return false;
   const turn = notification.params?.turn;
-  return notification.params?.threadId === threadId && turn?.id === turnId;
+  const notificationThreadId = notification.params?.threadId ?? turn?.threadId;
+  return notificationThreadId === threadId && turn?.id === turnId;
 }
 
 export async function waitForTurnCompletion(client, threadId, turnId, timeoutMilliseconds) {
   const subscribedAt = Date.now();
-  const turns = await client.call('thread/turns/list', {
-    threadId,
-    limit: 100,
-    sortDirection: 'desc',
-    itemsView: 'notLoaded',
-  });
-  const target = (turns?.data ?? []).find((turn) => turn.id === turnId);
-  if (!target) throw new Error(`Turn was not found: ${turnId}`);
-  if (target.status !== 'inProgress') {
-    return { threadId, turnId, status: target.status, observedAt: nowIso() };
+  const deadline = subscribedAt + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    const turns = await client.call('thread/turns/list', {
+      threadId,
+      limit: 100,
+      sortDirection: 'desc',
+      itemsView: 'notLoaded',
+    });
+    const target = (turns?.data ?? []).find((turn) => turn.id === turnId);
+    if (!target) throw new Error(`Turn was not found: ${turnId}`);
+    if (target.status !== 'inProgress') {
+      return { threadId, turnId, status: target.status, observedAt: nowIso() };
+    }
+
+    const remaining = deadline - Date.now();
+    try {
+      const notification = await client.waitFor(
+        (candidate) => turnCompleted(candidate, threadId, turnId),
+        Math.min(1_000, remaining),
+        subscribedAt,
+      );
+      return {
+        threadId,
+        turnId,
+        status: notification.params?.turn?.status ?? 'completed',
+        observedAt: nowIso(),
+      };
+    } catch (error) {
+      if (error?.message !== 'Notification wait timed out.') throw error;
+    }
   }
-  const notification = await client.waitFor(
-    (candidate) => turnCompleted(candidate, threadId, turnId),
-    timeoutMilliseconds,
-    subscribedAt,
-  );
-  return {
-    threadId,
-    turnId,
-    status: notification.params?.turn?.status ?? 'completed',
-    observedAt: nowIso(),
-  };
+  throw new Error(`Turn wait timed out: ${turnId}`);
 }
 
 async function main() {
