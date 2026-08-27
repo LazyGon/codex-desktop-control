@@ -129,7 +129,7 @@ test('falls back to App Server cwd when Desktop state cannot be read', (context)
   );
 });
 
-test('explicit Desktop assignment takes precedence over conflicting App Server native project identity', () => {
+test('App Server native project identity takes precedence over conflicting Desktop assignment', () => {
   const nativeProjectId = '01a037d8-e412-7af3-8b8f-36c3cf4e338c';
   const snapshot = withAppServerProjects(desktopProjectSnapshot({
     'local-projects': {
@@ -153,12 +153,12 @@ test('explicit Desktop assignment takes precedence over conflicting App Server n
   };
 
   assert.equal(appServerProjectForThread(thread, snapshot).projectId, nativeProjectId);
-  assert.equal(projectForThread(thread, snapshot).resolution, 'assignment');
+  assert.equal(projectForThread(thread, snapshot).resolution, 'app-server-project-id');
   assert.deepEqual(projectDescriptorForThread(thread, snapshot), {
-    id: 'local-economic-support',
-    key: 'local-economic-support',
-    path: 'C:\\git\\other\\economic-support',
-    name: 'Codex - economic-support',
+    id: nativeProjectId,
+    key: appServerProjectKey(nativeProjectId),
+    path: 'C:\\Users\\example\\AppData\\Local\\EconomicSupport\\instances\\default',
+    name: 'Codex - economic-support-automation',
   });
 });
 

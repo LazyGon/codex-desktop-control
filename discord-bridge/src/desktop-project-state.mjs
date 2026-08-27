@@ -179,8 +179,8 @@ export function desktopProjectForThread(thread, snapshot) {
 }
 
 export function projectForThread(thread, snapshot) {
-  return desktopProjectAssignmentForThread(thread, snapshot)
-    ?? appServerProjectForThread(thread, snapshot)
+  return appServerProjectForThread(thread, snapshot)
+    ?? desktopProjectAssignmentForThread(thread, snapshot)
     ?? desktopProjectRootForThread(thread, snapshot);
 }
 
