@@ -168,4 +168,12 @@ test('one-shot refresh waits the exact turn before replacing the owned runtime',
   assert.match(source, /Wait-ForNewRuntime/);
   assert.match(source, /Send-CompletionCallback/);
   assert.match(source, /controlScript deliver \$WaitForThreadId/);
+  assert.match(source, /Start-DetachedRefreshController/);
+  assert.match(source, /Register-ScheduledTask/);
+  assert.match(source, /Start-ScheduledTask/);
+  assert.match(source, /controllerLaunchMode = 'scheduled-task'/);
+  assert.match(source, /requestId = \$RefreshRequestId/);
+  assert.match(source, /DesktopCloseTimeoutSeconds = 120/);
+  assert.match(source, /AddSeconds\(\$DesktopCloseTimeoutSeconds\)/);
+  assert.doesNotMatch(source, /AddSeconds\(15\)/);
 });

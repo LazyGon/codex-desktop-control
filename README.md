@@ -141,10 +141,12 @@ The result is written to
 `launcher/state/project-repair-last.json`.
 
 To replace an already-running stale shared app-server after a Store update, run
-`launcher\Refresh-CodexSharedRuntime.ps1` in a detached hidden PowerShell
-process, bound to the exact current thread and turn. It pauses active goals,
-waits for every active turn, replaces the server and Desktop as one runtime,
-restores only updater-paused goals, and delivers one completion callback.
+`launcher\Refresh-CodexSharedRuntime.ps1`, bound to the exact current thread and
+turn. The script registers and starts a no-trigger one-shot Scheduled Task so
+the controller does not inherit the old app-server's kill-on-close Job. It
+pauses active goals, waits for every active turn, allows 120 seconds for a
+normal Desktop exit, replaces the server and Desktop as one runtime, restores
+only updater-paused goals, and delivers one completion callback.
 
 ```powershell
 .\control\codex-control.cmd status

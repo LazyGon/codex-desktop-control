@@ -9,16 +9,29 @@ param(
     [string]$WaitForTurnId,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9]+(?:\.[0-9]+){1,3}$')]
     [string]$FromVersion,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9]+(?:\.[0-9]+){1,3}$')]
     [string]$ToVersion,
 
     [ValidateRange(60, 3600)]
     [int]$TurnTimeoutSeconds = 1800,
 
     [ValidateRange(60, 600)]
-    [int]$RestartTimeoutSeconds = 240
+    [int]$RestartTimeoutSeconds = 240,
+
+    [ValidateRange(30, 600)]
+    [int]$DesktopCloseTimeoutSeconds = 120,
+
+    [switch]$ScheduledController,
+
+    [ValidatePattern('^[0-9a-f-]{36}$')]
+    [string]$RefreshRequestId,
+
+    [ValidatePattern('^[A-Za-z0-9 ._-]+$')]
+    [string]$ScheduledTaskName = 'Codex Shared Runtime Refresh'
 )
 
 Set-StrictMode -Version Latest
@@ -59,6 +72,95 @@ function Write-RefreshResult {
     $temporaryPath = "$resultPath.$PID.tmp"
     $Result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
     Move-Item -LiteralPath $temporaryPath -Destination $resultPath -Force
+}
+
+function Start-DetachedRefreshController {
+    $existingTask = Get-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction SilentlyContinue
+    if ($null -ne $existingTask -and [string]$existingTask.State -eq 'Running') {
+        throw "A shared runtime refresh controller is already running: $ScheduledTaskName"
+    }
+    if ($null -ne $existingTask) {
+        Unregister-ScheduledTask -TaskName $ScheduledTaskName -Confirm:$false
+    }
+
+    $requestId = [Guid]::NewGuid().ToString()
+    $escapedScriptPath = $PSCommandPath.Replace("'", "''")
+    $controllerCommand = @"
+& '$escapedScriptPath' `
+    -WaitForThreadId '$WaitForThreadId' `
+    -WaitForTurnId '$WaitForTurnId' `
+    -FromVersion '$FromVersion' `
+    -ToVersion '$ToVersion' `
+    -TurnTimeoutSeconds $TurnTimeoutSeconds `
+    -RestartTimeoutSeconds $RestartTimeoutSeconds `
+    -DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds `
+    -ScheduledController `
+    -RefreshRequestId '$requestId' `
+    -ScheduledTaskName '$ScheduledTaskName'
+"@
+    $encodedCommand = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($controllerCommand)
+    )
+    $powerShellExecutable = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction `
+        -Execute $powerShellExecutable `
+        -Argument (
+            '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+            "-WindowStyle Hidden -EncodedCommand $encodedCommand"
+        ) `
+        -WorkingDirectory $repositoryRoot
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew `
+        -StartWhenAvailable
+
+    Register-ScheduledTask `
+        -TaskName $ScheduledTaskName `
+        -Action $action `
+        -Principal $principal `
+        -Settings $settings `
+        -Description 'One-shot controller for a safe shared Codex runtime refresh.' `
+        -Force | Out-Null
+    Start-ScheduledTask -TaskName $ScheduledTaskName
+
+    $deadline = [DateTimeOffset]::Now.AddSeconds(30)
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+            try {
+                $receipt = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if (
+                    $receipt.requestId -eq $requestId -and
+                    $receipt.controllerLaunchMode -eq 'scheduled-task' -and
+                    [int]$receipt.controllerProcessId -ne $PID
+                ) {
+                    return [pscustomobject]@{
+                        ok = $true
+                        phase = 'detached-controller-started'
+                        requestId = $requestId
+                        controllerProcessId = [int]$receipt.controllerProcessId
+                        scheduledTaskName = $ScheduledTaskName
+                        receiptPath = $resultPath
+                        logPath = $logPath
+                    }
+                }
+            }
+            catch {
+                # The worker replaces the receipt atomically; retry transient reads.
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw (
+        'Detached runtime refresh launch is uncertain because no matching armed receipt ' +
+        "was observed within 30 seconds. Task=$ScheduledTaskName requestId=$requestId"
+    )
 }
 
 function Invoke-DrainCommand {
@@ -186,7 +288,7 @@ function Request-DesktopClose {
         throw 'Codex Desktop had no closeable main window. No process termination was attempted.'
     }
 
-    $deadline = [DateTimeOffset]::Now.AddSeconds(15)
+    $deadline = [DateTimeOffset]::Now.AddSeconds($DesktopCloseTimeoutSeconds)
     while ([DateTimeOffset]::Now -lt $deadline) {
         if (@(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable).Count -eq 0) {
             Write-RefreshLog 'Codex Desktop exited normally.'
@@ -206,10 +308,34 @@ function Request-DesktopClose {
             throw "Desktop-only termination safety check failed for PID $($root.ProcessId)."
         }
     }
-    Write-RefreshLog "Desktop remained alive after normal close; stopping verified roots. ids=$($remainingRoots.ProcessId -join ',')"
+    Write-RefreshLog (
+        "Desktop remained alive after $DesktopCloseTimeoutSeconds seconds; " +
+        "stopping verified roots. ids=$($remainingRoots.ProcessId -join ',')"
+    )
     foreach ($root in $remainingRoots) {
-        Stop-Process -Id $root.ProcessId -Force -ErrorAction Stop
+        Stop-Process -Id $root.ProcessId -Force -ErrorAction SilentlyContinue
     }
+
+    $forcedDeadline = [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds)
+    while ([DateTimeOffset]::Now -lt $forcedDeadline) {
+        $stillRunning = @(
+            foreach ($root in $remainingRoots) {
+                $process = Get-CimInstance Win32_Process `
+                    -Filter "ProcessId=$($root.ProcessId)" `
+                    -ErrorAction SilentlyContinue
+                if ($null -ne $process -and $process.ExecutablePath -eq $DesktopExecutable) {
+                    $process
+                }
+            }
+        )
+        if ($stillRunning.Count -eq 0) {
+            Write-RefreshLog 'Verified Desktop roots exited after the bounded stop request.'
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "Verified Codex Desktop roots did not exit within $RestartTimeoutSeconds seconds."
 }
 
 function Start-BridgeHidden {
@@ -322,11 +448,23 @@ The updater waited for all active turns, paused active goals before draining, an
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $resultPath) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
+
+if (-not $ScheduledController) {
+    Start-DetachedRefreshController | ConvertTo-Json -Depth 6
+    return
+}
+if ([string]::IsNullOrWhiteSpace($RefreshRequestId)) {
+    throw 'A scheduled refresh controller requires RefreshRequestId.'
+}
+
 Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
 Set-Content -LiteralPath $logPath -Value '' -Encoding UTF8
 Write-RefreshResult -Result ([ordered]@{
     ok = $null
     phase = 'armed'
+    requestId = $RefreshRequestId
+    controllerLaunchMode = 'scheduled-task'
+    scheduledTaskName = $ScheduledTaskName
     controllerProcessId = $PID
     threadId = $WaitForThreadId
     turnId = $WaitForTurnId
@@ -383,6 +521,10 @@ try {
     $pendingResult = [ordered]@{
         ok = $null
         phase = 'callback-pending'
+        requestId = $RefreshRequestId
+        controllerLaunchMode = 'scheduled-task'
+        scheduledTaskName = $ScheduledTaskName
+        controllerProcessId = $PID
         threadId = $WaitForThreadId
         turnId = $WaitForTurnId
         oldServerProcessId = [int]$oldState.serverProcessId
@@ -421,6 +563,10 @@ catch {
     Write-RefreshResult -Result ([ordered]@{
         ok = $false
         phase = 'failed'
+        requestId = $RefreshRequestId
+        controllerLaunchMode = 'scheduled-task'
+        scheduledTaskName = $ScheduledTaskName
+        controllerProcessId = $PID
         threadId = $WaitForThreadId
         turnId = $WaitForTurnId
         fromVersion = $FromVersion

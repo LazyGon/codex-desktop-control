@@ -51,13 +51,15 @@ proved after Desktop reattaches. The final result is written to
 `launcher\state\project-repair-last.json`.
 
 For an already-running shared runtime whose package version is stale, use
-`launcher\Refresh-CodexSharedRuntime.ps1` from a detached hidden PowerShell
-process. Supply the exact active thread and turn plus the current and target
-package versions. It pauses active goals before waiting, stops Bridge ingress,
-waits for every active turn, replaces the old owned server, verifies the new
-Desktop connection and hashes, restores only updater-paused goals, restarts the
-Bridge, and sends one completion callback. Its finite receipt is written to
-`launcher\state\runtime-refresh-last.json`.
+`launcher\Refresh-CodexSharedRuntime.ps1`. Supply the exact active thread and
+turn plus the current and target package versions. The entry process launches
+the real controller through a no-trigger one-shot Scheduled Task, keeping it
+outside the old app-server's kill-on-close Job. The controller pauses active
+goals before waiting, stops Bridge ingress, waits for every active turn, allows
+120 seconds for normal Desktop shutdown, replaces the old owned server,
+verifies the new Desktop connection and hashes, restores only updater-paused
+goals, restarts the Bridge, and sends one completion callback. Its finite
+receipt is written to `launcher\state\runtime-refresh-last.json`.
 
 ## Discover and catch up a phone-created task
 
