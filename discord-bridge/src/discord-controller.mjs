@@ -364,6 +364,27 @@ export function managedProjectCategoryNames(descriptor, projectCategories = [], 
   ));
 }
 
+export function projectCategoryCollisionCandidates({
+  currentProjectKey = null,
+  projectCategories = [],
+  projectDescriptors = [],
+  bindings = [],
+  syncProjectKeys = [],
+} = {}) {
+  const representedProjectKeys = new Set([
+    currentProjectKey,
+    ...syncProjectKeys,
+    ...projectCategories.map((project) => project.projectKey),
+    ...bindings.filter((binding) => !binding.hidden).map((binding) => binding.projectKey),
+  ].filter(Boolean));
+  return [
+    ...projectCategories,
+    ...projectDescriptors
+      .filter((project) => representedProjectKeys.has(project.key))
+      .map((project) => ({ projectKey: project.key, ...project })),
+  ];
+}
+
 export function projectVisibilityCatalog({
   projectCategories = [],
   hiddenProjects = [],
@@ -3999,6 +4020,10 @@ export class DiscordController {
     });
     const activeEntries = classified(syncableActive);
     const archivedEntries = classified(syncableArchived);
+    context.visibleProjectKeys = new Set([
+      ...activeEntries,
+      ...archivedEntries,
+    ].filter((entry) => !entry.hiddenProject).map((entry) => entry.project.key));
     const active = activeEntries.filter((entry) => !entry.hiddenProject)
       .map((entry) => entry.thread);
     const archived = archivedEntries.filter((entry) => !entry.hiddenProject)
@@ -4553,13 +4578,22 @@ export class DiscordController {
     }
   }
 
-  #projectCategoryNames(descriptor, count = 1) {
-    return managedProjectCategoryNames(descriptor, [
-      ...this.stateStore.projectCategories(),
-      ...projectDescriptorsFromSnapshot(this.projectState, this.config.projectCategoryPrefix)
-        .filter((project) => !this.#isProjectHidden(project.key))
-        .map((project) => ({ projectKey: project.key, ...project })),
-    ], count);
+  #projectCategoryNames(descriptor, count = 1, context = null) {
+    const projectCategories = this.stateStore.projectCategories();
+    const projectDescriptors = projectDescriptorsFromSnapshot(
+      this.projectState,
+      this.config.projectCategoryPrefix,
+    )
+      .filter((project) => !this.#isProjectHidden(project.key))
+      .map((project) => ({ projectKey: project.key, ...project }));
+    const collisionCandidates = projectCategoryCollisionCandidates({
+      currentProjectKey: descriptor.key,
+      projectCategories,
+      projectDescriptors,
+      bindings: stateBindingSummaries(this.stateStore),
+      syncProjectKeys: context?.visibleProjectKeys ?? [],
+    });
+    return managedProjectCategoryNames(descriptor, collisionCandidates, count);
   }
 
   async #projectCategories(thread, context) {
@@ -4583,7 +4617,7 @@ export class DiscordController {
 
   async #ensureProjectCategories(descriptor, context) {
     const stored = this.stateStore.projectCategory(descriptor.key);
-    const desiredBaseName = this.#projectCategoryNames(descriptor)[0];
+    const desiredBaseName = this.#projectCategoryNames(descriptor, 1, context)[0];
     const categories = [];
     for (const categoryId of stored?.categoryIds ?? []) {
       const category = context.channels.get(categoryId)
@@ -4607,7 +4641,7 @@ export class DiscordController {
       }
       categories.push(category);
     }
-    const desiredNames = this.#projectCategoryNames(descriptor, categories.length);
+    const desiredNames = this.#projectCategoryNames(descriptor, categories.length, context);
     for (let index = 0; index < categories.length; index += 1) {
       const category = categories[index];
       const desiredName = desiredNames[index];

@@ -21,6 +21,7 @@ import {
   mergeProjectScopedThreads,
   orderedSessionCardItems,
   postTaskSyncSummary,
+  projectCategoryCollisionCandidates,
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
   sessionOrderRepairMessageIds,
@@ -148,6 +149,33 @@ test('managed project category names drop stale collision suffixes once the Desk
     projectKey: 'local-project-2',
     name: descriptor.name,
   }], 1), [`Codex - Example - ${suffix}`]);
+});
+
+test('project category collision candidates ignore unused aliases after project identity convergence', () => {
+  const current = {
+    id: 'native-id',
+    key: 'app-server:native-id',
+    name: 'Codex - economic-support',
+  };
+  const unusedAlias = {
+    id: 'local-id',
+    key: 'local-id',
+    name: current.name,
+  };
+
+  const converged = projectCategoryCollisionCandidates({
+    currentProjectKey: current.key,
+    projectDescriptors: [current, unusedAlias],
+    bindings: [{ projectKey: current.key }],
+  });
+  assert.deepEqual(managedProjectCategoryNames(current, converged, 1), [current.name]);
+
+  const bothRepresented = projectCategoryCollisionCandidates({
+    currentProjectKey: current.key,
+    projectDescriptors: [current, unusedAlias],
+    syncProjectKeys: [current.key, unusedAlias.key],
+  });
+  assert.match(managedProjectCategoryNames(current, bothRepresented, 1)[0], /^Codex - economic-support - /);
 });
 
 test('task sync summaries use the dedicated sync channel instead of the control panel channel', async () => {
