@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
   ActionRowBuilder,
@@ -16,12 +18,26 @@ import {
   chatgptConversationPanelMarker,
   chatgptConversationPanelPayload,
 } from './chatgpt-panels.mjs';
-import { appendJsonLine, sanitizeChannelName, truncate } from './util.mjs';
+import { safeAttachmentName } from './local-file-share.mjs';
+import {
+  createSplit7zArchive,
+  disposeSplitArchive,
+  readArchiveVolume,
+  splitArchiveManifest,
+} from './split-archive.mjs';
+import {
+  appendJsonLine,
+  sanitizeChannelName,
+  splitText,
+  truncate,
+} from './util.mjs';
 
 const ERROR_COLOR = 0xc92a2a;
 const WARNING_COLOR = 0xf0b232;
-const RESPONSE_CHUNK_LENGTH = 3_900;
-const MAX_RESPONSE_POSTS = 5;
+const RESPONSE_CHUNK_LENGTH = 1_800;
+const MAX_RESPONSE_POSTS = 10;
+const RETURNED_FILE_MATERIALIZATION_KIND = 'reviewer-accessor.discord-returned-file-materialization';
+const DISCORD_INLINE_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp']);
 const ATTACHMENT_ONLY_PROMPT = [
   '添付ファイルがユーザーからの依頼です。',
   '内容を読み取り、意図を判断して、可能な分析・回答・作業を進めてください。',
@@ -32,58 +48,345 @@ function messageOptions(content, extra = {}) {
   return { content, allowedMentions: { parse: [] }, ...extra };
 }
 
-function splitText(value, maximum = RESPONSE_CHUNK_LENGTH) {
-  const input = String(value ?? '');
-  if (!input) return ['(応答本文なし)'];
-  const chunks = [];
-  let remaining = input;
-  while (remaining.length > maximum) {
-    let end = remaining.lastIndexOf('\n', maximum);
-    if (end < Math.floor(maximum * 0.55)) end = remaining.lastIndexOf(' ', maximum);
-    if (end < Math.floor(maximum * 0.55)) end = maximum;
-    chunks.push(remaining.slice(0, end));
-    remaining = remaining.slice(end).replace(/^\s+/, '');
-  }
-  if (remaining || chunks.length === 0) chunks.push(remaining);
-  return chunks;
+export function splitChatgptMarkdown(value, maximum = RESPONSE_CHUNK_LENGTH) {
+  const input = String(value ?? '').trim() || '(応答本文なし)';
+  const rawChunks = splitText(input, Math.max(200, maximum - 80));
+  let openFence = null;
+  return rawChunks.map((chunk) => {
+    const prefix = openFence === null ? '' : `\`\`\`${openFence}\n`;
+    for (const match of chunk.matchAll(/^\s*\`\`\`([^\s\`]*)/gm)) {
+      openFence = openFence === null ? String(match[1] ?? '').slice(0, 32) : null;
+    }
+    const suffix = openFence === null ? '' : '\n```';
+    return `${prefix}${chunk}${suffix}`;
+  });
 }
 
-export function chatgptResponsePayloads(text, { assistantAttachments = [] } = {}) {
-  let completeText = String(text ?? '').trim() || '(応答本文なし)';
-  if (assistantAttachments.length > 0) {
-    const names = assistantAttachments
-      .map((attachment) => attachment?.name ?? attachment?.fileName ?? attachment?.id)
-      .filter(Boolean);
-    completeText += [
-      '',
-      '---',
-      `ChatGPT returned ${assistantAttachments.length} file(s)${names.length ? `: ${names.join(', ')}` : ''}.`,
-      '返却ファイル本体のDiscord転送はこの連携範囲に含まれていません。',
-    ].join('\n');
+function safeAttachmentLabel(value) {
+  return String(value ?? 'unnamed-file').replaceAll('`', '\\`');
+}
+
+function formatFileSize(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return 'unknown size';
+  if (size < 1_000) return `${size} B`;
+  if (size < 1_000_000) return `${(size / 1_000).toFixed(1)} KB`;
+  if (size < 1_000_000_000) return `${(size / 1_000_000).toFixed(1)} MB`;
+  return `${(size / 1_000_000_000).toFixed(1)} GB`;
+}
+
+function containedReturnedFilePath(outputRoot, candidate) {
+  if (typeof outputRoot !== 'string' || typeof candidate !== 'string'
+    || !path.isAbsolute(outputRoot) || !path.isAbsolute(candidate)) return null;
+  const resolvedRoot = path.resolve(outputRoot);
+  const resolvedCandidate = path.resolve(candidate);
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+  return resolvedCandidate;
+}
+
+async function sha256File(filePath) {
+  const hash = createHash('sha256');
+  const stream = fs.createReadStream(filePath);
+  for await (const chunk of stream) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+function returnedFileName(entry, index, usedNames) {
+  const descriptorName = entry?.descriptor?.name;
+  const materializedPath = entry?.materialization?.path;
+  const base = safeAttachmentName(path.basename(String(descriptorName || materializedPath || `chatgpt-file-${index + 1}`)))
+    || `chatgpt-file-${index + 1}`;
+  let candidate = base;
+  const extension = path.extname(base);
+  const stem = extension ? base.slice(0, -extension.length) : base;
+  for (let suffix = 2; usedNames.has(candidate.toLocaleLowerCase('en-US')); suffix += 1) {
+    candidate = safeAttachmentName(`${stem}-${suffix}${extension}`);
   }
-  const chunks = splitText(completeText);
+  usedNames.add(candidate.toLocaleLowerCase('en-US'));
+  return candidate;
+}
+
+function isInlineReturnedImage(name, contentType) {
+  return String(contentType ?? '').toLowerCase().startsWith('image/')
+    && DISCORD_INLINE_IMAGE_EXTENSIONS.has(path.extname(name).toLocaleLowerCase('en-US'));
+}
+
+function returnedFilesUnavailablePayload(entries) {
+  const lines = entries.slice(0, 25).map(({ name, code }) => `- \`${safeAttachmentLabel(name)}\` — \`${code}\``);
+  if (entries.length > lines.length) lines.push(`- ほか ${entries.length - lines.length} 件`);
+  return {
+    embeds: [new EmbedBuilder()
+      .setTitle(`ChatGPT files unavailable (${entries.length})`)
+      .setColor(WARNING_COLOR)
+      .setDescription(truncate([
+        '取得またはDiscord転送できなかった返却物です。回答本文と他の返却物は保持しています。',
+        '',
+        ...lines,
+      ].join('\n'), 4_000, '…'))],
+    allowedMentions: { parse: [] },
+  };
+}
+
+export async function chatgptReturnedFilePayloads(materialization, {
+  expectedOutputRoot,
+  directFileBytes = 7_500_000,
+  maxFileBytes = 512_000_000,
+  archiveTempRoot = null,
+  archiverPath = null,
+} = {}) {
+  if (!materialization) return {
+    payloads: [],
+    readyCount: 0,
+    unavailableCount: 0,
+    cleanupAllowed: true,
+  };
+  const payloads = [];
+  const unavailable = [];
+  let readyCount = 0;
+  let retainOutputRoot = false;
+  const expectedRoot = path.resolve(String(expectedOutputRoot ?? ''));
+  const actualRoot = typeof materialization.outputRoot === 'string'
+    ? path.resolve(materialization.outputRoot)
+    : null;
+  const structurallyValid = materialization.schemaVersion === 1
+    && materialization.kind === RETURNED_FILE_MATERIALIZATION_KIND
+    && ['COMPLETE', 'PARTIAL'].includes(materialization.status)
+    && materialization.cleanupOwner === 'caller'
+    && path.isAbsolute(String(expectedOutputRoot ?? ''))
+    && actualRoot === expectedRoot
+    && Array.isArray(materialization.files);
+  if (!structurallyValid) {
+    return {
+      payloads: [returnedFilesUnavailablePayload([{
+        name: 'returned-file materialization',
+        code: 'BRIDGE_MATERIALIZATION_INVALID',
+      }])],
+      readyCount: 0,
+      unavailableCount: 1,
+      cleanupAllowed: false,
+    };
+  }
+
+  const usedNames = new Set();
+  for (const [index, entry] of materialization.files.entries()) {
+    const name = returnedFileName(entry, index, usedNames);
+    const file = entry?.materialization;
+    if (file?.status === 'UNAVAILABLE') {
+      unavailable.push({ name, code: file.code || 'RETURNED_FILE_UNAVAILABLE' });
+      continue;
+    }
+    const containedPath = file?.status === 'READY'
+      ? containedReturnedFilePath(expectedRoot, file.path)
+      : null;
+    const declaredHash = String(file?.sha256 ?? '').toLowerCase();
+    const stat = containedPath
+      ? await fs.promises.lstat(containedPath).catch(() => null)
+      : null;
+    if (!containedPath || !stat?.isFile() || stat.isSymbolicLink()
+      || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0
+      || stat.size !== file.sizeBytes || !/^[a-f0-9]{64}$/.test(declaredHash)) {
+      unavailable.push({ name, code: 'BRIDGE_RETURNED_FILE_INVALID' });
+      retainOutputRoot = true;
+      continue;
+    }
+    const actualHash = await sha256File(containedPath).catch(() => null);
+    if (actualHash !== declaredHash) {
+      unavailable.push({ name, code: 'BRIDGE_RETURNED_FILE_HASH_MISMATCH' });
+      retainOutputRoot = true;
+      continue;
+    }
+    if (stat.size <= directFileBytes) {
+      const inlineImage = isInlineReturnedImage(name, file.contentType);
+      payloads.push({
+        content: [
+          inlineImage ? '**ChatGPT image**' : '**ChatGPT file**',
+          `\`${safeAttachmentLabel(name)}\` · ${formatFileSize(stat.size)}`,
+        ].join('\n'),
+        files: [new AttachmentBuilder(containedPath, { name })],
+        allowedMentions: { parse: [] },
+      });
+      readyCount += 1;
+      continue;
+    }
+    if (stat.size > maxFileBytes || !archiveTempRoot) {
+      unavailable.push({ name, code: 'BRIDGE_RETURNED_FILE_TRANSFER_LIMIT' });
+      retainOutputRoot = true;
+      continue;
+    }
+    let archive = null;
+    try {
+      archive = await createSplit7zArchive({
+        path: containedPath,
+        root: expectedRoot,
+        relativePath: name,
+        name,
+        size: stat.size,
+        mtime: stat.mtime.toISOString(),
+      }, {
+        volumeBytes: directFileBytes,
+        maxBytes: maxFileBytes,
+        tempRoot: archiveTempRoot,
+        archiverPath,
+      });
+      if (archive.original.sha256 !== declaredHash) {
+        throw new Error('Returned file changed before archive creation.');
+      }
+      payloads.push({
+        content: [
+          '**ChatGPT file archive**',
+          `\`${safeAttachmentLabel(name)}\` · ${formatFileSize(stat.size)}`,
+          `7z · ${archive.volumes.length} volume(s) · SHA-256 \`${declaredHash}\``,
+          `全volumeを同じフォルダへ保存し、\`${archive.volumes[0].name}\`を7z対応アプリで開いてください。`,
+        ].join('\n'),
+        allowedMentions: { parse: [] },
+      });
+      for (const volume of archive.volumes) {
+        payloads.push({
+          content: `**${archive.archiveName}** volume ${volume.index + 1}/${archive.volumes.length}`,
+          files: [new AttachmentBuilder(await readArchiveVolume(volume), { name: volume.name })],
+          allowedMentions: { parse: [] },
+        });
+      }
+      const manifest = Buffer.from(`${JSON.stringify(splitArchiveManifest(archive), null, 2)}\n`, 'utf8');
+      payloads.push({
+        content: `**${archive.archiveName}** transfer manifest`,
+        files: [new AttachmentBuilder(manifest, { name: safeAttachmentName(name, '.7z-manifest.json') })],
+        allowedMentions: { parse: [] },
+      });
+      readyCount += 1;
+    } catch {
+      unavailable.push({ name, code: 'BRIDGE_RETURNED_FILE_ARCHIVE_FAILED' });
+      retainOutputRoot = true;
+    } finally {
+      if (archive) await disposeSplitArchive(archive).catch(() => {});
+    }
+  }
+  if (unavailable.length > 0) payloads.push(returnedFilesUnavailablePayload(unavailable));
+  return {
+    payloads,
+    readyCount,
+    unavailableCount: unavailable.length,
+    cleanupAllowed: !retainOutputRoot,
+  };
+}
+
+export function chatgptResponsePayloads(text, {
+  assistantAttachments = [],
+  returnedFileMaterialization = null,
+} = {}) {
+  const completeText = String(text ?? '').trim() || '(応答本文なし)';
+  const chunks = splitChatgptMarkdown(completeText);
   const payloads = [];
   const previewCount = chunks.length > MAX_RESPONSE_POSTS ? MAX_RESPONSE_POSTS - 1 : chunks.length;
   for (let index = 0; index < previewCount; index += 1) {
+    const page = chunks.length === 1 ? '**ChatGPT**' : `**ChatGPT · ${index + 1}/${chunks.length}**`;
     payloads.push({
-      embeds: [new EmbedBuilder()
-        .setTitle(index === 0 ? 'ChatGPT answer' : `ChatGPT answer (${index + 1}/${chunks.length})`)
-        .setColor(CHATGPT_COLOR)
-        .setDescription(chunks[index])],
+      content: `${page}\n${chunks[index]}`,
       allowedMentions: { parse: [] },
     });
   }
   if (chunks.length > MAX_RESPONSE_POSTS) {
     payloads.push({
+      content: `**ChatGPT · 完全版**\n回答が長いため、完全なMarkdown本文を添付しました（${completeText.length}文字）。`,
+      files: [new AttachmentBuilder(Buffer.from(completeText, 'utf8'), { name: 'chatgpt-answer.md' })],
+      allowedMentions: { parse: [] },
+    });
+  }
+  if (!returnedFileMaterialization && assistantAttachments.length > 0) {
+    const lines = assistantAttachments.slice(0, 25).map((attachment) => {
+      const name = safeAttachmentLabel(attachment?.name ?? attachment?.fileName ?? attachment?.id);
+      const details = [
+        attachment?.mimeType,
+        Number.isFinite(attachment?.size) ? `${attachment.size} bytes` : null,
+      ].filter(Boolean).join(' · ');
+      return `- \`${name}\`${details ? ` — ${details}` : ''}`;
+    });
+    if (assistantAttachments.length > lines.length) {
+      lines.push(`- ほか ${assistantAttachments.length - lines.length} 件`);
+    }
+    payloads.push({
       embeds: [new EmbedBuilder()
-        .setTitle('ChatGPT answer (complete text)')
+        .setTitle(`ChatGPT returned files (${assistantAttachments.length})`)
         .setColor(CHATGPT_COLOR)
-        .setDescription(`全文は添付ファイルを参照してください（${completeText.length}文字）。`)],
-      files: [new AttachmentBuilder(Buffer.from(completeText, 'utf8'), { name: 'chatgpt-answer.txt' })],
+        .setDescription(truncate([
+          ...lines,
+          '',
+          '返却ファイルの実体化結果がないため、descriptorだけを表示しています。',
+        ].join('\n'), 4_000, '…'))],
       allowedMentions: { parse: [] },
     });
   }
   return payloads;
+}
+
+function historyAttachmentSummary(attachments = []) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  const lines = attachments.slice(0, 5).map((attachment) => {
+    const name = safeAttachmentLabel(truncate(attachment?.name ?? attachment?.id ?? 'unnamed-file', 120, '…'));
+    const details = [
+      attachment?.mimeType,
+      Number.isFinite(attachment?.size) ? formatFileSize(attachment.size) : null,
+    ].filter(Boolean).join(' · ');
+    return `- \`${name}\`${details ? ` — ${details}` : ''}`;
+  });
+  if (attachments.length > lines.length) lines.push(`- ほか ${attachments.length - lines.length} 件`);
+  return `\n\n添付情報:\n${lines.join('\n')}`;
+}
+
+function historyTextPayload(label, text, {
+  attachments = [],
+  completeFileName,
+  note = null,
+} = {}) {
+  const exactText = String(text ?? '');
+  const attachmentSummary = historyAttachmentSummary(attachments);
+  const header = `**${label}**`;
+  const noteText = note ? `\n${note}` : '';
+  const maximumBody = Math.max(200, 1_950 - header.length - noteText.length - attachmentSummary.length);
+  const displayText = exactText || (note ? '' : '(本文なし)');
+  const truncated = displayText.length > maximumBody;
+  const preview = truncated
+    ? truncate(displayText, Math.max(100, maximumBody - 45), '…')
+    : displayText;
+  const payload = {
+    content: `${header}${noteText}${preview ? `\n${preview}` : ''}${attachmentSummary}${truncated ? '\n\n全文は添付Markdownを参照してください。' : ''}`,
+    allowedMentions: { parse: [] },
+  };
+  if (truncated) {
+    payload.files = [new AttachmentBuilder(Buffer.from(exactText, 'utf8'), { name: completeFileName })];
+  }
+  return payload;
+}
+
+export function chatgptHistoryTurnPayloads(turn) {
+  const turnId = String(turn?.turnId ?? 'unknown');
+  const suffix = turnId.slice(-12).replace(/[^a-z0-9-]/gi, '_');
+  const user = historyTextPayload('You · synced history', turn?.user?.text, {
+    attachments: turn?.user?.attachments ?? [],
+    completeFileName: `chatgpt-history-user-${suffix}.md`,
+  });
+  if (turn?.status === 'COMPLETED' && turn.assistantFinal) {
+    return [user, historyTextPayload('ChatGPT · synced history', turn.assistantFinal.text, {
+      attachments: turn.assistantFinal.attachments ?? [],
+      completeFileName: `chatgpt-history-assistant-${suffix}.md`,
+    })];
+  }
+  const reason = turn?.incompleteReason === 'DURABLE_FINAL_AMBIGUOUS'
+    ? '確定済みの最終回答を一つに特定できません。'
+    : '確定済みの最終回答はまだありません。';
+  return [user, historyTextPayload('ChatGPT · synced history · incomplete', '', {
+    completeFileName: `chatgpt-history-assistant-${suffix}.md`,
+    note: reason,
+  })];
+}
+
+export function chatgptLiveRecordForHistoryTurn(conversation, turn) {
+  const records = Object.entries(conversation?.messageRecords ?? {});
+  return records.find(([, record]) => record.state === 'completed' && (
+    (turn?.user?.messageId && record.requestMessageId === turn.user.messageId)
+    || (turn?.assistantFinal?.messageId && record.assistantMessageId === turn.assistantFinal.messageId)
+  )) ?? null;
 }
 
 export function isUnsupportedChatgptImage(attachment) {
@@ -107,6 +410,8 @@ export class ChatgptController {
     this.config = config;
     this.authorizedUserIds = [...new Set(config.authorizedUserIds ?? [])];
     this.logPath = path.join(logDir, `chatgpt-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
+    this.returnedFileRoot = path.join(path.dirname(logDir), 'data', 'chatgpt-returned-files');
+    this.returnedArchiveRoot = path.join(path.dirname(logDir), 'data', 'chatgpt-returned-archives');
     this.incomingAttachmentStore = incomingAttachmentStore ?? new IncomingAttachmentStore(
       path.join(path.dirname(logDir), 'data', 'incoming-files'),
       {
@@ -138,6 +443,7 @@ export class ChatgptController {
       error: this.readyError?.message ?? null,
       linkedConversations: this.stateStore.chatgptConversations().length,
       activeConversations: this.service.activeCount,
+      activeHistorySyncs: this.service.activeHistoryCount ?? 0,
       categoryId: this.infrastructure?.category?.id ?? null,
       controlChannelId: this.infrastructure?.control?.id ?? null,
     };
@@ -352,6 +658,12 @@ export class ChatgptController {
     let liveMessage = null;
     let renderTimer = null;
     let latestText = '';
+    const returnedFileOutputRoot = path.join(
+      this.returnedFileRoot,
+      String(conversationId).replace(/[^a-z0-9-]/gi, '_'),
+      String(message.id).replace(/[^a-z0-9-]/gi, '_'),
+      randomUUID(),
+    );
     try {
       const storedAttachments = attachments.length > 0
         ? await this.incomingAttachmentStore.store({
@@ -372,6 +684,7 @@ export class ChatgptController {
         submitted: null,
         liveMessageId: liveMessage.id,
         attachmentCount: storedAttachments.length,
+        returnedFileOutputRoot,
       });
       this.stateStore.setChatgptConversation(conversationId, { activeMessageId: message.id });
       await this.#setConversationActive(conversationId, true);
@@ -398,6 +711,7 @@ export class ChatgptController {
         responsePerformance: conversation.responsePerformance,
         prompt: String(message.content ?? '').trim() || ATTACHMENT_ONLY_PROMPT,
         files: storedAttachments.map((attachment) => attachment.path),
+        returnedFileOutputRoot,
         onText: (text) => {
           latestText = String(text ?? '');
           scheduleRender();
@@ -410,6 +724,14 @@ export class ChatgptController {
       }
       const payloads = chatgptResponsePayloads(result.assistantText, {
         assistantAttachments: result.assistantAttachments ?? [],
+        returnedFileMaterialization: result.returnedFileMaterialization ?? null,
+      });
+      const returnedFiles = await chatgptReturnedFilePayloads(result.returnedFileMaterialization, {
+        expectedOutputRoot: returnedFileOutputRoot,
+        directFileBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+        maxFileBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+        archiveTempRoot: this.returnedArchiveRoot,
+        archiverPath: this.config.fileShareArchiverPath,
       });
       const responseMessageIds = [];
       await liveMessage.edit(payloads[0]);
@@ -418,6 +740,34 @@ export class ChatgptController {
         const sent = await message.channel.send(payload);
         responseMessageIds.push(sent.id);
       }
+      let returnedFilePostsComplete = true;
+      for (const payload of returnedFiles.payloads) {
+        try {
+          const sent = await message.channel.send(payload);
+          responseMessageIds.push(sent.id);
+        } catch (error) {
+          returnedFilePostsComplete = false;
+          this.#log('returned-file-post-failed', {
+            conversationId,
+            discordMessageId: message.id,
+            error: error.message,
+          });
+          break;
+        }
+      }
+      let returnedFileCleanup = 'retained';
+      if (returnedFilePostsComplete && returnedFiles.cleanupAllowed) {
+        try {
+          await this.#removeReturnedFileOutputRoot(returnedFileOutputRoot);
+          returnedFileCleanup = 'removed';
+        } catch (error) {
+          this.#log('returned-file-cleanup-failed', {
+            conversationId,
+            discordMessageId: message.id,
+            error: error.message,
+          });
+        }
+      }
       this.stateStore.setChatgptMessageRecord(conversationId, message.id, {
         state: 'completed',
         submitted: true,
@@ -425,6 +775,11 @@ export class ChatgptController {
         assistantMessageId: result.assistantMessageId ?? null,
         responseMessageIds,
         assistantAttachmentCount: result.assistantAttachments?.length ?? 0,
+        returnedFileReadyCount: returnedFiles.readyCount,
+        returnedFileUnavailableCount: returnedFiles.unavailableCount,
+        returnedFilePostsComplete,
+        returnedFileCleanup,
+        returnedFileOutputRoot: returnedFileCleanup === 'removed' ? null : returnedFileOutputRoot,
         completedAt: new Date().toISOString(),
       });
       await message.react('✅').catch(() => {});
@@ -435,6 +790,9 @@ export class ChatgptController {
         requestMessageId: result.requestMessageId ?? null,
         assistantMessageId: result.assistantMessageId ?? null,
         responseMessageIds,
+        returnedFileReadyCount: returnedFiles.readyCount,
+        returnedFileUnavailableCount: returnedFiles.unavailableCount,
+        returnedFileCleanup,
       });
     } catch (error) {
       if (renderTimer) {
@@ -474,6 +832,93 @@ export class ChatgptController {
       const pendingReaction = message.reactions?.resolve?.('⏳');
       await pendingReaction?.users?.remove?.(this.client.user.id).catch(() => {});
     }
+  }
+
+  async #removeReturnedFileOutputRoot(outputRoot) {
+    const managedRoot = path.resolve(this.returnedFileRoot);
+    const candidate = path.resolve(outputRoot);
+    const relative = path.relative(managedRoot, candidate);
+    const segments = relative.split(path.sep).filter(Boolean);
+    if (segments.length !== 3 || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('Refusing to remove a returned-file path outside the managed response root.');
+    }
+    await fs.promises.rm(candidate, { recursive: true, force: true });
+    await fs.promises.rmdir(path.dirname(candidate)).catch(() => {});
+    await fs.promises.rmdir(path.dirname(path.dirname(candidate))).catch(() => {});
+  }
+
+  async #upsertHistoryMessage(channel, messageId, payload) {
+    const existing = messageId
+      ? await channel.messages.fetch(messageId).catch(() => null)
+      : null;
+    if (existing?.author?.id === this.client.user.id) {
+      await existing.edit({ ...payload, attachments: [] });
+      return { message: existing, created: false };
+    }
+    return { message: await channel.send(payload), created: true };
+  }
+
+  async #syncConversationHistory(conversation, channel, history) {
+    if (history?.kind !== 'reviewer-accessor.discord-chat-history'
+      || history.schemaVersion !== 1
+      || history.conversationId !== conversation.conversationId
+      || history.limit !== 5
+      || !Array.isArray(history.turns)
+      || history.turns.length > history.limit
+      || history.turns.some((turn) => !/^dht_[a-f0-9]{64}$/.test(String(turn?.turnId ?? '')))
+      || new Set(history.turns.map((turn) => turn.turnId)).size !== history.turns.length) {
+      throw new Error('reviewer-accessorから不正な履歴結果を受信しました。');
+    }
+    const summary = { returned: history.turns.length, created: 0, updated: 0, live: 0 };
+    for (const turn of history.turns) {
+      const stored = this.stateStore.chatgptHistoryRecord(conversation.conversationId, turn.turnId);
+      const live = chatgptLiveRecordForHistoryTurn(conversation, turn);
+      if (stored?.source === 'live' || (!stored && live)) {
+        this.stateStore.setChatgptHistoryRecord(conversation.conversationId, turn.turnId, {
+          source: 'live',
+          status: turn.status,
+          userSourceMessageId: turn.user?.messageId ?? null,
+          assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+          discordUserMessageId: stored?.discordUserMessageId ?? live?.[0] ?? null,
+          discordAssistantMessageId: stored?.discordAssistantMessageId ?? live?.[1]?.responseMessageIds?.[0] ?? null,
+          syncedAt: new Date().toISOString(),
+        });
+        summary.live += 1;
+        continue;
+      }
+      const [userPayload, assistantPayload] = chatgptHistoryTurnPayloads(turn);
+      const userResult = await this.#upsertHistoryMessage(channel, stored?.discordUserMessageId, userPayload);
+      this.stateStore.setChatgptHistoryRecord(conversation.conversationId, turn.turnId, {
+        source: 'history',
+        status: turn.status,
+        userSourceMessageId: turn.user?.messageId ?? null,
+        assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+        discordUserMessageId: userResult.message.id,
+        discordAssistantMessageId: stored?.discordAssistantMessageId ?? null,
+        syncedAt: new Date().toISOString(),
+      });
+      const assistantResult = await this.#upsertHistoryMessage(
+        channel,
+        stored?.discordAssistantMessageId,
+        assistantPayload,
+      );
+      const created = userResult.created || assistantResult.created;
+      summary[created ? 'created' : 'updated'] += 1;
+      this.stateStore.setChatgptHistoryRecord(conversation.conversationId, turn.turnId, {
+        source: 'history',
+        status: turn.status,
+        userSourceMessageId: turn.user?.messageId ?? null,
+        assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+        discordUserMessageId: userResult.message.id,
+        discordAssistantMessageId: assistantResult.message.id,
+        syncedAt: new Date().toISOString(),
+      });
+    }
+    this.stateStore.setChatgptConversation(conversation.conversationId, {
+      lastHistorySyncAt: new Date().toISOString(),
+      lastHistorySyncTurnCount: history.turns.length,
+    });
+    return summary;
   }
 
   async #handleInteraction(interaction) {
@@ -530,6 +975,29 @@ export class ChatgptController {
       throw new Error('このChatGPT操作は現在の会話チャンネルに紐付いていません。');
     }
     if (!this.#canExecuteInteraction(interaction)) return this.#rejectInteraction(interaction, false);
+    if (parts[1] === 'history') {
+      if (conversation.activeMessageId) {
+        await interaction.reply(messageOptions('ChatGPT応答の完了後に履歴を同期してください。', { ephemeral: true }));
+        return;
+      }
+      await interaction.deferReply({ ephemeral: true });
+      const history = await this.service.readHistory({
+        conversationUrl: conversation.conversationUrl,
+        limit: 5,
+      });
+      const summary = await this.#syncConversationHistory(conversation, interaction.channel, history);
+      await this.#repostConversationPanel(conversationId, interaction.channel);
+      await interaction.editReply(messageOptions([
+        `直近${summary.returned}ターンを確認しました。`,
+        `新規表示: ${summary.created} / 更新: ${summary.updated} / 既存ライブ表示: ${summary.live}`,
+      ].join('\n')));
+      this.#log('history-synced', {
+        conversationId,
+        userId: interaction.user.id,
+        ...summary,
+      });
+      return;
+    }
     if (parts[1] === 'performance') {
       const selected = interaction.values[0];
       this.stateStore.setChatgptConversation(conversationId, { responsePerformance: selected });
@@ -742,7 +1210,10 @@ export class ChatgptController {
       customId: interaction.customId ?? null,
       error: error.stack ?? error.message,
     });
-    const payload = messageOptions(`ChatGPT操作に失敗しました: ${truncate(error.message, 1_700)}`, { ephemeral: true });
+    const detail = error?.code
+      ? `${truncate(error.code, 300)}: ${truncate(error.message, 1_350)}`
+      : truncate(error.message, 1_700);
+    const payload = messageOptions(`ChatGPT操作に失敗しました: ${detail}`, { ephemeral: true });
     if (interaction.deferred) await interaction.editReply(payload).catch(() => {});
     else if (interaction.replied) await interaction.followUp(payload).catch(() => {});
     else await interaction.reply(payload).catch(() => {});

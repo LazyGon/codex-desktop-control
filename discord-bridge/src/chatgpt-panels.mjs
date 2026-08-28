@@ -84,6 +84,11 @@ export function chatgptConversationPanelPayload(conversation) {
   );
   const controls = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId(`cg:history:${conversation.conversationId}`)
+      .setLabel('最近5ターン同期')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(active),
+    new ButtonBuilder()
       .setCustomId(`cg:conversation-status:${conversation.conversationId}`)
       .setLabel('状態')
       .setStyle(ButtonStyle.Secondary),

@@ -171,6 +171,20 @@ outbound connection to Discord.
   reviewer contract: ordinary documents, source files, and archives are
   accepted; image input is rejected before submission. A post-submission
   failure is marked uncertain and is never automatically retried.
+- Renders ordinary ChatGPT answers as native Discord Markdown instead of Codex
+  task cards. It keeps balanced fenced code blocks across roughly 1,800-character
+  pages, shows up to nine pages inline, and attaches a complete
+  `chatgpt-answer.md` when the response is longer. Returned images are uploaded
+  as their own Discord image posts, other returned files are attached separately,
+  and files above the direct-upload size use the existing split-7z transfer with
+  a SHA-256 manifest. Per-file acquisition failures are displayed instead of
+  silently dropping the file. Caller-owned materialized files are removed only
+  after every corresponding Discord post succeeds.
+- Adds `最近5ターン同期` to each explicitly linked ChatGPT channel. The button
+  performs one read-only persisted-history request, renders only user text and
+  exact durable assistant finals, and upserts by the stable
+  `(conversationId, turnId)` key. Repeated syncs and an incomplete-to-completed
+  transition edit the existing two-message projection instead of duplicating it.
 - When completion reporting is enabled for the task, mentions the configured
   user with `タスクが完了しました。` on the first line in `codex-completions`,
   posts a one-line final-answer summary on the second line, and uses the bare
@@ -246,6 +260,9 @@ outbound connection to Discord.
 | `/chatgpt link` | Explicitly link one existing ordinary ChatGPT conversation URL |
 | `/chatgpt list` | List only explicitly linked ChatGPT channels |
 | `/chatgpt status` | Inspect reviewer-accessor and linked-conversation session state |
+
+Each linked conversation panel also provides `最近5ターン同期`. It never sends a
+Chat message and does not retry a failed history read.
 
 Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct

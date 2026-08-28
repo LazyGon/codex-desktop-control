@@ -427,6 +427,36 @@ export class StateStore {
     });
   }
 
+  chatgptHistoryRecord(conversationId, turnId) {
+    const value = this.value.chatgptConversations[conversationId]?.historyRecords?.[turnId];
+    return value ? deepClone(value) : null;
+  }
+
+  setChatgptHistoryRecord(conversationId, turnId, patch) {
+    if (!this.value.chatgptConversations[conversationId]) {
+      throw new Error(`Unknown ChatGPT conversation: ${conversationId}`);
+    }
+    if (typeof turnId !== 'string' || !turnId) {
+      throw new Error('A stable ChatGPT history turn id is required.');
+    }
+    return this.update((state) => {
+      const conversation = state.chatgptConversations[conversationId];
+      conversation.historyRecords ??= {};
+      conversation.historyRecords[turnId] = {
+        ...conversation.historyRecords[turnId],
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      const entries = Object.entries(conversation.historyRecords);
+      if (entries.length > 2_000) {
+        entries
+          .sort(([, left], [, right]) => String(left.updatedAt).localeCompare(String(right.updatedAt)))
+          .slice(0, entries.length - 2_000)
+          .forEach(([oldKey]) => delete conversation.historyRecords[oldKey]);
+      }
+    });
+  }
+
   projectCategory(projectKey) {
     const value = this.value.projectCategories[projectKey];
     return value ? deepClone(value) : null;

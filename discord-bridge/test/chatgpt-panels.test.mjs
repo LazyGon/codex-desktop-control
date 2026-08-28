@@ -9,6 +9,7 @@ import {
 import {
   chatgptResponsePayloads,
   isUnsupportedChatgptImage,
+  splitChatgptMarkdown,
 } from '../src/chatgpt-controller.mjs';
 
 const CONVERSATION = {
@@ -40,18 +41,42 @@ test('ChatGPT conversation panel exposes performance and confirmed unlink UI', (
     payload.components[0].toJSON().components[0].options.find((option) => option.default).value,
     'high',
   );
-  assert.equal(payload.components[1].toJSON().components[1].custom_id, `cg:unlink:${CONVERSATION.conversationId}`);
+  assert.equal(payload.components[1].toJSON().components[0].custom_id, `cg:history:${CONVERSATION.conversationId}`);
+  assert.equal(payload.components[1].toJSON().components[0].label, '最近5ターン同期');
+  assert.equal(payload.components[1].toJSON().components[2].custom_id, `cg:unlink:${CONVERSATION.conversationId}`);
 });
 
-test('ChatGPT response delivery is capped at five posts with a complete text attachment', () => {
+test('ChatGPT response delivery uses Markdown messages and caps long output with a complete attachment', () => {
   const payloads = chatgptResponsePayloads('x'.repeat(30_000));
-  assert.equal(payloads.length, 5);
-  assert.equal(payloads.at(-1).files[0].name, 'chatgpt-answer.txt');
+  assert.equal(payloads.length, 10);
+  assert.equal(payloads.at(-1).files[0].name, 'chatgpt-answer.md');
   assert.equal(payloads.at(-1).files[0].attachment.length, 30_000);
+  assert.ok(payloads.every((payload) => !payload.content || payload.content.length <= 2_000));
 
   const short = chatgptResponsePayloads('hello');
   assert.equal(short.length, 1);
-  assert.equal(short[0].embeds[0].toJSON().description, 'hello');
+  assert.equal(short[0].content, '**ChatGPT**\nhello');
+  assert.equal(short[0].embeds, undefined);
+});
+
+test('ChatGPT Markdown pages close and reopen fenced code blocks', () => {
+  const chunks = splitChatgptMarkdown(`before\n\`\`\`js\n${'const value = 1;\n'.repeat(200)}\`\`\`\nafter`, 500);
+  assert.ok(chunks.length > 2);
+  assert.ok(chunks.every((chunk) => chunk.length <= 500));
+  assert.match(chunks[0], /\n```$/);
+  assert.match(chunks[1], /^```js\n/);
+  assert.match(chunks.at(-1), /```\nafter$/);
+});
+
+test('ChatGPT returned-file descriptors are shown separately from answer text', () => {
+  const payloads = chatgptResponsePayloads('answer', {
+    assistantAttachments: [{ name: 'picture.png', mimeType: 'image/png', size: 123 }],
+  });
+  assert.equal(payloads[0].content, '**ChatGPT**\nanswer');
+  assert.equal(payloads.length, 2);
+  const fileEmbed = payloads[1].embeds[0].toJSON();
+  assert.match(fileEmbed.title, /returned files \(1\)/i);
+  assert.match(fileEmbed.description, /picture\.png/);
 });
 
 test('reviewer-accessor image exclusions are rejected before submission', () => {

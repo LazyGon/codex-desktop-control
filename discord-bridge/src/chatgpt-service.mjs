@@ -84,11 +84,16 @@ export class ChatgptService {
     this.modulesPromise = null;
     this.updateResult = null;
     this.active = new Map();
+    this.activeHistory = new Map();
     this.stopping = false;
   }
 
   get activeCount() {
     return this.active.size;
+  }
+
+  get activeHistoryCount() {
+    return this.activeHistory.size;
   }
 
   async #modules() {
@@ -129,6 +134,7 @@ export class ChatgptService {
         ready: true,
         configured: false,
         activeCount: this.activeCount,
+        activeHistoryCount: this.activeHistoryCount,
         profile: this.config.reviewerAccessorProfile,
         schemaVersion: modules.DISCORD_REVIEWER_ACCESSOR_SCHEMA_VERSION ?? null,
         transport: 'reviewer-accessor-discord-bridge',
@@ -146,6 +152,8 @@ export class ChatgptService {
       browserSessionCheck: 'on-send',
       active: this.active.has(identity.conversationId),
       activeCount: this.activeCount,
+      historyActive: this.activeHistory.has(identity.conversationId),
+      activeHistoryCount: this.activeHistoryCount,
       update: this.updateResult,
     };
   }
@@ -155,6 +163,7 @@ export class ChatgptService {
     responsePerformance,
     prompt,
     files = [],
+    returnedFileOutputRoot = null,
     signal = null,
     onText = null,
     onAttachments = null,
@@ -164,6 +173,9 @@ export class ChatgptService {
     const identity = chatgptConversationIdentity(conversationUrl);
     if (this.active.has(identity.conversationId)) {
       throw new Error('このChatGPT会話では別の応答が進行中です。');
+    }
+    if (this.activeHistory.has(identity.conversationId)) {
+      throw new Error('このChatGPT会話では履歴同期が進行中です。完了後に送信してください。');
     }
     const performance = normalizeChatgptPerformance(
       responsePerformance,
@@ -181,6 +193,7 @@ export class ChatgptService {
       profile: this.config.reviewerAccessorProfile,
       prompt,
       responsePerformance: performance,
+      ...(returnedFileOutputRoot ? { returnedFileOutputRoot } : {}),
       signal: controller.signal,
       onStatus: (event) => this.onStatus('transport', chatgptStatusText(event), identity),
     });
@@ -198,11 +211,52 @@ export class ChatgptService {
     }
   }
 
+  async readHistory({
+    conversationUrl,
+    limit = 5,
+    signal = null,
+  }) {
+    if (this.stopping) throw new Error('ChatGPT連携は停止処理中です。');
+    const modules = await this.#modules();
+    const identity = chatgptConversationIdentity(conversationUrl);
+    if (this.active.has(identity.conversationId)) {
+      throw new Error('このChatGPT会話では応答が進行中のため、履歴を同期できません。');
+    }
+    if (this.activeHistory.has(identity.conversationId)) {
+      throw new Error('このChatGPT会話では履歴同期が進行中です。');
+    }
+    const accessor = new modules.DiscordReviewerAccessor();
+    if (typeof accessor.readHistory !== 'function') {
+      throw new Error('reviewer-accessorの公開履歴APIがありません。');
+    }
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(signal?.reason ?? new Error('ChatGPT履歴同期が中断されました。'));
+    if (signal?.aborted) relayAbort();
+    else signal?.addEventListener?.('abort', relayAbort, { once: true });
+    const operation = accessor.readHistory({
+      conversationUrl: identity.conversationUrl,
+      limit,
+      port: this.config.reviewerAccessorPort,
+      profile: this.config.reviewerAccessorProfile,
+      signal: controller.signal,
+      onStatus: (event) => this.onStatus('history', chatgptStatusText(event), identity),
+    });
+    this.activeHistory.set(identity.conversationId, { controller, operation });
+    try {
+      return await operation;
+    } finally {
+      signal?.removeEventListener?.('abort', relayAbort);
+      if (this.activeHistory.get(identity.conversationId)?.operation === operation) {
+        this.activeHistory.delete(identity.conversationId);
+      }
+    }
+  }
+
   async stop(timeoutMs = 300_000) {
     this.stopping = true;
-    const operations = [...this.active.values()];
+    const operations = [...this.active.values(), ...this.activeHistory.values()];
     for (const entry of operations) {
-      entry.controller.abort(new Error('Discord Bridgeを安全に停止するためChatGPT送信を中断しました。'));
+      entry.controller.abort(new Error('Discord Bridgeを安全に停止するためChatGPT操作を中断しました。'));
     }
     if (operations.length === 0) return { timedOut: false };
     let timer = null;

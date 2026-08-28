@@ -11,8 +11,8 @@ import {
 
 const CONVERSATION_URL = 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-function fakeModules({ sendImpl = null } = {}) {
-  const calls = { update: 0, accessors: 0, sends: [] };
+function fakeModules({ sendImpl = null, historyImpl = null } = {}) {
+  const calls = { update: 0, accessors: 0, sends: [], histories: [] };
   class Accessor {
     constructor() { calls.accessors += 1; }
     async send(options) {
@@ -25,6 +25,18 @@ function fakeModules({ sendImpl = null } = {}) {
         assistantText: 'final answer',
         assistantAttachments: [],
         done: true,
+      };
+    }
+    async readHistory(options) {
+      calls.histories.push(options);
+      if (historyImpl) return historyImpl(options);
+      options.onStatus?.({ operation: 'history', phase: 'completed' });
+      return {
+        schemaVersion: 1,
+        kind: 'reviewer-accessor.discord-chat-history',
+        conversationId: CONVERSATION_URL.split('/').at(-1),
+        limit: options.limit,
+        turns: [],
       };
     }
   }
@@ -86,6 +98,7 @@ test('ChatgptService loads reviewer-accessor once and uses only its public Disco
     responsePerformance: 'high',
     prompt: 'hello',
     files: ['C:\\input\\report.pdf'],
+    returnedFileOutputRoot: 'C:\\output\\chatgpt-returned-files',
     onText: (text) => { streamed = text; },
   });
   assert.equal(result.assistantText, 'final answer');
@@ -95,6 +108,7 @@ test('ChatgptService loads reviewer-accessor once and uses only its public Disco
   assert.equal(fake.calls.sends[0].responsePerformance, 'high');
   assert.equal(fake.calls.sends[0].profile, 'dev');
   assert.deepEqual(fake.calls.sends[0].files, ['C:\\input\\report.pdf']);
+  assert.equal(fake.calls.sends[0].returnedFileOutputRoot, 'C:\\output\\chatgpt-returned-files');
   assert.equal(service.activeCount, 0);
 });
 
@@ -118,6 +132,28 @@ test('ChatgptService rejects a second in-flight send for the same explicit conve
   release({ assistantText: 'done', assistantAttachments: [], done: true });
   await first;
   assert.equal(fake.calls.sends.length, 1);
+});
+
+test('ChatgptService reads bounded history through the public wrapper without sending a Chat request', async () => {
+  const fake = fakeModules();
+  const statuses = [];
+  const service = new ChatgptService({
+    config: config(),
+    moduleLoader: async () => fake.modules,
+    onStatus: (...args) => statuses.push(args),
+  });
+  const result = await service.readHistory({
+    conversationUrl: CONVERSATION_URL,
+    limit: 5,
+  });
+  assert.equal(result.kind, 'reviewer-accessor.discord-chat-history');
+  assert.equal(fake.calls.sends.length, 0);
+  assert.equal(fake.calls.histories.length, 1);
+  assert.equal(fake.calls.histories[0].limit, 5);
+  assert.equal(fake.calls.histories[0].profile, 'dev');
+  assert.equal(fake.calls.histories[0].port, 9222);
+  assert.equal(service.activeHistoryCount, 0);
+  assert.equal(statuses[0][0], 'history');
 });
 
 test('reviewer-accessor loader resolves the canonical package export without internal transport imports', async (context) => {

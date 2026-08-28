@@ -87,10 +87,28 @@ discovery or status reconciliation for other channels.
 
 Each send uses reviewer-accessor's exported `chat-direct-client/discord-bridge`
 wrapper, shared Chrome for Testing profile, and current browser session. Discord
-shows a green waiting card and replaces it with the exact recovered final answer; long output is
-capped at five posts with a complete UTF-8 attachment. Documents,
+shows a green waiting card, then replaces it with native Discord Markdown. Fenced
+code blocks remain balanced across roughly 1,800-character pages; up to nine
+pages are shown inline, and a tenth post carries the complete
+`chatgpt-answer.md` for longer answers. Returned images are materialized through
+the public reviewer-accessor contract and posted separately so Discord renders
+them inline. Other returned files are attached separately; files above
+`fileShareChunkBytes` use split 7z volumes plus a SHA-256 manifest, up to
+`fileShareMaxBytes`. Unavailable files are reported with a fixed safe code, and
+the caller-owned materialization root is removed only after all Discord uploads
+succeed. Documents,
 source files, and archives accepted by reviewer-accessor may be attached to the
 Discord input. Its current direct transport does not accept image input.
+
+Press `最近5ターン同期` on a linked-conversation panel to perform one read-only
+history request. The Bridge renders the returned turns oldest-to-newest, with a
+separate user and assistant message. Long exact text is preserved in a Markdown
+attachment. It stores the stable `(conversationId, turnId)` identity, so pressing
+the button again or observing an `INCOMPLETE` turn become `COMPLETED` edits the
+existing projection instead of appending another copy. Turns already delivered
+live by the Bridge are recognized from their source message IDs and are not
+posted again. History attachment descriptors remain informational; this read-only
+API does not materialize historical files.
 If Bridge state becomes uncertain after ChatGPT submission, the message is
 marked uncertain and is not retried automatically; manually inspect the
 ChatGPT conversation before deciding whether to send again.
