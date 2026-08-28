@@ -225,10 +225,21 @@ posted to the matching private Discord task channel as orange cards with
 `Task`, `Turn`, and `Message` identity fields. Project/category, task/channel,
 and turn/message IDs are persisted together. Instructions sent from Discord are
 linked to the same turn ledger and, after app-server accepts them, the original
-Discord message is replaced with the same user-card format. On reconnect, the
-bridge reconciles task history against both persisted message IDs and visible
-identity fields. Long user and final-answer text remains one card, with the full
-text attached when necessary.
+Discord message is replaced with the same user-card format. Ordinary Discord
+messages received after the outbox-enabled Bridge starts are persisted under
+`discord-bridge\data\delivery-outbox` before mutation. Older Discord history is
+excluded by a one-time persisted cutover. Later reconnects and Bridge restarts
+scan visible task channels after their per-channel cursor and recover missed
+post-cutover messages. Pre-mutation `queued` entries resume after subscription restore;
+post-mutation uncertainty is reconciled by exact request ID and otherwise stops
+without automatic resend. Delivery and reaction callback receipts are atomic
+and exact-attempt-bound. On reconnect, the bridge restores visible task
+subscriptions serially with bounded recent turns before outbox and task-list
+work. Task inventories are fetched serially; after one complete subagent scan,
+known child IDs are retained and only the newest ten full turns are inspected
+for additions. The bridge then reconciles task history against both persisted
+message IDs and visible identity fields. Long user and final-answer text
+remains one card, with the full text attached when necessary.
 
 Every assistant turn uses one card. The latest card shows current commentary,
 reasoning, plans, tool progress, and token usage. On completion the same post

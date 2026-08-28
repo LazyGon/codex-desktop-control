@@ -8,6 +8,7 @@ import {
   CodexService,
   forEachConcurrent,
   subscriptionRestoreBindings,
+  subscriptionRestoreThread,
   threadForSubscriptionRestore,
 } from '../src/codex-service.mjs';
 import { StateStore } from '../src/state-store.mjs';
@@ -17,6 +18,7 @@ test('subscription restore prioritizes recent active tasks and remains bounded a
     { threadId: 'idle', taskStatus: 'idle', updatedAt: '2026-08-24T12:00:00Z' },
     { threadId: 'active-old', taskStatus: 'active', updatedAt: '2026-08-24T10:00:00Z' },
     { threadId: 'archived', taskStatus: 'active', archived: true, updatedAt: '2026-08-24T13:00:00Z' },
+    { threadId: 'hidden', taskStatus: 'active', hidden: true, updatedAt: '2026-08-24T14:00:00Z' },
     { threadId: 'active-new', taskStatus: 'active', updatedAt: '2026-08-24T11:00:00Z' },
   ]);
   assert.deepEqual(ordered.map((binding) => binding.threadId), [
@@ -47,6 +49,17 @@ test('subscription restore excludes completed history inherited from a fork sour
   assert.equal(threadForSubscriptionRestore({}, thread), thread);
 });
 
+test('subscription restore normalizes newest-first paged turns to transcript order', () => {
+  assert.deepEqual(subscriptionRestoreThread(
+    { id: 'thread-1', status: { type: 'active' } },
+    [{ id: 'newest' }, { id: 'oldest' }],
+  ), {
+    id: 'thread-1',
+    status: { type: 'active' },
+    turns: [{ id: 'oldest' }, { id: 'newest' }],
+  });
+});
+
 test('CodexService restores subscriptions and forwards live notifications', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-service-'));
   const server = new WebSocketServer({ port: 0 });
@@ -63,6 +76,10 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     channelId: 'channel-archived',
     archived: true,
   });
+  stateStore.setBinding('thread-hidden', {
+    channelId: null,
+    hidden: true,
+  });
 
   let peer;
   const resumedThreads = [];
@@ -73,6 +90,8 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const controlCalls = [];
   const turnStarts = [];
   const turnSteers = [];
+  const turnListCalls = [];
+  let threadReadCalls = 0;
   server.on('connection', (socket) => {
     peer = socket;
     socket.on('message', (data) => {
@@ -81,7 +100,14 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
       if (request.method === 'initialize') result = { userAgent: 'mock' };
       if (request.method === 'thread/resume') {
         resumedThreads.push(request.params.threadId);
-        result = { thread: { id: request.params.threadId } };
+        result = {
+          thread: {
+            id: request.params.threadId,
+            name: 'Mock task',
+            cwd: 'C:/work',
+            status: { type: 'idle' },
+          },
+        };
       }
       if (request.method === 'thread/start') {
         startedThreads.push(request.params);
@@ -118,6 +144,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
       if (request.method === 'plugin/list') result = { marketplaces: [] };
       if (request.method === 'experimentalFeature/list') result = { data: [{ name: 'mock-feature' }], nextCursor: null };
       if (request.method === 'thread/read') {
+        threadReadCalls += 1;
         result = {
           thread: {
             id: 'thread-1',
@@ -139,7 +166,22 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
           ? { data: [{ id: 'thread-2', cwd: 'C:/work' }], nextCursor: null }
           : { data: [{ id: 'thread-1', cwd: 'C:/work' }], nextCursor: 'page-2' };
       }
-      if (request.method === 'thread/turns/list') result = { data: [], nextCursor: null };
+      if (request.method === 'thread/turns/list') {
+        turnListCalls.push(request.params);
+        result = request.params.itemsView === 'full'
+          ? {
+            data: [{
+              id: 'new-turn',
+              status: 'completed',
+              items: [
+                { type: 'userMessage', id: 'user-outbox', clientId: 'outbox-request', content: [{ type: 'text', text: 'queued input' }] },
+                { type: 'agentMessage', phase: 'final_answer', text: 'finished offline' },
+              ],
+            }],
+            nextCursor: 'older-turns-not-loaded',
+          }
+          : { data: [], nextCursor: null };
+      }
       if (request.method === 'turn/start') {
         turnStarts.push(request.params);
         result = { turn: { id: 'turn-started' } };
@@ -166,15 +208,26 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     fs.rmSync(resolved, { recursive: true, force: true });
   });
 
+  const connectionStates = [];
+  service.on('connectionState', (status) => connectionStates.push({
+    state: status.state,
+    restoring: service.subscriptionRestoreInProgress,
+  }));
   const restoredPromise = new Promise((resolve) => service.once('subscriptionRestored', resolve));
+  const subscriptionsReadyPromise = new Promise((resolve) => service.once('subscriptionsReady', resolve));
   service.start();
   const restored = await restoredPromise;
+  const subscriptionsReady = await subscriptionsReadyPromise;
   assert.equal(restored.thread.id, 'thread-1');
   assert.equal(restored.runtime.thread.id, 'thread-1');
   assert.equal(restored.missedCompletion.turn.id, 'new-turn');
   assert.equal(restored.missedCompletion.finalText, 'finished offline');
   assert.equal(restored.missedCompletion.needsCompletionMessage, true);
   assert.equal(restored.missedCompletion.needsCompletionNotice, true);
+  assert.deepEqual(subscriptionsReady, { total: 1, restored: 1, failed: 0 });
+  assert.deepEqual(connectionStates[0], { state: 'connecting', restoring: false });
+  assert.deepEqual(connectionStates[1], { state: 'connected', restoring: true });
+  assert.equal(service.subscriptionRestoreInProgress, false);
 
   const allThreads = await service.listAllThreads({ archived: true });
   assert.deepEqual(allThreads.map((thread) => thread.id), ['thread-1', 'thread-2']);
@@ -185,6 +238,13 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.deepEqual(listProjectFilters.slice(-2), ['project-1', 'project-1']);
   assert.deepEqual(await service.listAllProjects(), [{ id: 'project-1' }, { id: 'project-2' }]);
   assert.deepEqual(resumedThreads, ['thread-1']);
+  assert.equal(threadReadCalls, 0);
+  assert.deepEqual(turnListCalls[0], {
+    threadId: 'thread-1',
+    limit: 2,
+    sortDirection: 'desc',
+    itemsView: 'full',
+  });
 
   const started = await service.startThread('C:\\new-work');
   await service.setThreadName(started.thread.id, 'New work');
@@ -267,6 +327,30 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     }],
     clientUserMessageId: 'client-steer',
   }]);
+
+  const preparedTarget = await service.prepareDelivery('thread-1');
+  assert.deepEqual(preparedTarget, { mode: 'send', expectedTurnId: null });
+  const preparedResult = await service.executePreparedDelivery(
+    'thread-1',
+    'queued input',
+    null,
+    'outbox-request',
+    preparedTarget,
+  );
+  assert.deepEqual(
+    { mode: preparedResult.mode, turnId: preparedResult.turnId },
+    { mode: 'send', turnId: 'turn-started' },
+  );
+  assert.deepEqual(turnStarts.at(-1), {
+    threadId: 'thread-1',
+    input: [{ type: 'text', text: 'queued input' }],
+    clientUserMessageId: 'outbox-request',
+  });
+  assert.deepEqual(await service.findDeliveryReceipt('thread-1', 'outbox-request'), {
+    threadId: 'thread-1',
+    turnId: 'new-turn',
+    itemId: 'user-outbox',
+  });
 
   const notificationPromise = new Promise((resolve) => service.once('notification', resolve));
   peer.send(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'live-turn' } } }));

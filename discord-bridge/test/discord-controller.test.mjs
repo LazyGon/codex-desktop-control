@@ -32,6 +32,7 @@ import {
   subagentIdsFromThread,
   subagentMetadata,
   subagentOwnTurns,
+  subagentScanPlan,
 } from '../src/discord-controller.mjs';
 import {
   CONTROL_PANEL_COLOR,
@@ -41,6 +42,7 @@ import {
 import { discover7Zip } from '../src/split-archive.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
+import { DeliveryOutbox } from '../src/delivery-outbox.mjs';
 
 test('managed project category cleanup removes empty overflow categories but preserves occupied ones', () => {
   const category = (id, children) => ({
@@ -227,6 +229,7 @@ test('control channel messages replace the unpinned control card at the latest p
   client.user = { id: 'bot-user' };
   const codex = new EventEmitter();
   codex.connected = true;
+  codex.subscriptionRestoreInProgress = false;
   const messages = new Map();
   let sent = 0;
   let oldPanelUnpinned = 0;
@@ -1313,6 +1316,22 @@ test('periodic subagent sync excludes completed and unloaded bindings', () => {
   assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'unknown', discordArchived: true }), false);
 });
 
+test('subagent rescans preserve known children and bound later scans to recent turns', () => {
+  assert.deepEqual(subagentScanPlan({}), {
+    mode: 'full',
+    recentTurnLimit: null,
+    knownThreadIds: [],
+  });
+  assert.deepEqual(subagentScanPlan({
+    subagentScanVersion: 1,
+    subagentThreadIds: ['child-old', 'child-old', null],
+  }), {
+    mode: 'recent',
+    recentTurnLimit: 10,
+    knownThreadIds: ['child-old'],
+  });
+});
+
 test('an unknown live subagent notification creates an isolated Discord thread mirror', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subagent-thread-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -1504,6 +1523,44 @@ test('completion recovery targets only a newer live record or a broken latest co
       '019fa200': { status: 'completed', cardMessageId: null, finalMessageIds: ['commentary'] },
     },
   }), '019fa200');
+});
+
+test('reconnect task discovery waits until subscription restoration is ready', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-restore-barrier-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  const client = new EventEmitter();
+  client.user = null;
+  const codex = new EventEmitter();
+  codex.connected = true;
+  codex.subscriptionRestoreInProgress = true;
+  let projectListCalls = 0;
+  codex.listAllProjects = async () => {
+    projectListCalls += 1;
+    return [];
+  };
+  codex.listAllThreads = async () => [];
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: { guildId: 'guild-1' },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({});
+  controller.attach();
+
+  codex.emit('connectionState', { state: 'connected', endpoint: 'ws://127.0.0.1:8798' });
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(projectListCalls, 0);
+
+  codex.subscriptionRestoreInProgress = false;
+  codex.emit('subscriptionsReady', { total: 1, restored: 1, failed: 0 });
+  for (let attempt = 0; attempt < 100 && projectListCalls === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(projectListCalls, 1);
+  await controller.stop();
 });
 
 test('controller shutdown clears polling and recovery timers before Discord closes', async (context) => {
@@ -2441,7 +2498,11 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     }],
   };
   binding.transcriptVersion = 11;
-  codex.readThread = async () => ({ thread: restoredThread });
+  let restoredFullHistoryReads = 0;
+  codex.readThread = async () => {
+    restoredFullHistoryReads += 1;
+    return { thread: restoredThread };
+  };
   codex.emit('subscriptionRestored', {
     binding: structuredClone(binding),
     thread: restoredThread,
@@ -2459,6 +2520,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   );
   assert.ok(restoredElapsed >= 5);
   assert.equal(binding.turnMessages['turn-active'].startedAt, restoredThread.turns[1].startedAt);
+  assert.equal(restoredFullHistoryReads, 0);
   await new Promise((resolve) => setTimeout(resolve, 1_100));
   assert.ok(Number.parseInt(
     restoredRunning.embeds[0].fields.find((field) => field.name === 'Elapsed').value,
@@ -2667,15 +2729,25 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
   const codex = new EventEmitter();
+  codex.connected = true;
+  codex.subscriptionRestoreInProgress = false;
   let delivered = null;
   let resolveDelivery;
   const delivery = new Promise((resolve) => { resolveDelivery = resolve; });
-  codex.deliver = async (threadId, prompt, attachment, clientUserMessageId) => {
+  codex.prepareDelivery = async () => ({ mode: 'steer', expectedTurnId: 'turn-1' });
+  codex.executePreparedDelivery = async (
+    threadId,
+    prompt,
+    attachment,
+    clientUserMessageId,
+    target,
+  ) => {
     delivered = {
       threadId,
       prompt,
       attachment,
       clientUserMessageId,
+      target,
     };
     resolveDelivery();
     return { mode: 'steer', turnId: 'turn-1' };
@@ -2771,6 +2843,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
     },
     logDir: directory,
     incomingAttachmentStore,
+    deliveryOutbox: new DeliveryOutbox(path.join(directory, 'delivery-outbox')),
   });
   controller.attach();
 
@@ -2858,7 +2931,8 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
     storedAttachments.attachments.map((attachment) => attachment.name),
     ['screen.png', 'requirements.pdf'],
   );
-  assert.match(delivered.clientUserMessageId, /^discord-[a-f0-9]{12}$/);
+  assert.equal(delivered.clientUserMessageId, 'discord-message:guild-1:task-channel:message-1');
+  assert.deepEqual(delivered.target, { mode: 'steer', expectedTurnId: 'turn-1' });
   assert.deepEqual(reactions, ['⏳', '✅'], JSON.stringify(replies));
   assert.deepEqual(replies, []);
   assert.equal(originalDeleted, true);
@@ -3387,19 +3461,27 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   const client = new EventEmitter();
   client.user = { id: 'bot-user' };
   const codex = new EventEmitter();
+  codex.connected = true;
+  codex.subscriptionRestoreInProgress = false;
   const started = [];
   const named = [];
   const delivered = [];
+  const deliveryAttempts = [];
   codex.startThread = async (cwd) => {
     started.push(cwd);
     await new Promise((resolve) => setTimeout(resolve, 20));
     return { thread: { id: 'thread-new', cwd, status: { type: 'idle' }, turns: [] } };
   };
   codex.setThreadName = async (threadId, name) => { named.push({ threadId, name }); };
-  codex.deliver = async (threadId, prompt, attachment) => {
+  codex.prepareDelivery = async () => (delivered.length === 0
+    ? { mode: 'send', expectedTurnId: null }
+    : { mode: 'steer', expectedTurnId: 'turn-1' });
+  codex.executePreparedDelivery = async (threadId, prompt, attachment, clientUserMessageId, target) => {
+    deliveryAttempts.push({ threadId, prompt, clientUserMessageId, target });
+    if (prompt === 'acceptance becomes uncertain') throw new Error('socket closed after mutation');
     const turnId = `turn-${delivered.length + 1}`;
     const itemId = `user-item-${delivered.length + 1}`;
-    delivered.push({ threadId, prompt, attachment, turnId });
+    delivered.push({ threadId, prompt, attachment, clientUserMessageId, target, turnId });
     setImmediate(() => codex.emit('notification', {
       method: 'item/started',
       params: {
@@ -3408,7 +3490,7 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
         item: { type: 'userMessage', id: itemId, content: [{ type: 'text', text: prompt }] },
       },
     }));
-    return { mode: delivered.length === 1 ? 'send' : 'steer', turnId };
+    return { mode: target.mode, turnId };
   };
 
   const bindings = new Map();
@@ -3419,6 +3501,7 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
       const entry = [...bindings.entries()].find(([, binding]) => binding.channelId === channelId);
       return entry ? { threadId: entry[0], ...entry[1] } : null;
     },
+    bindings: () => [...bindings.entries()].map(([threadId, value]) => ({ threadId, ...value })),
     projectCategories: () => [{
       projectKey: 'project-key',
       projectId: 'project-id',
@@ -3482,6 +3565,7 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   };
   client.channels = { fetch: async () => channel };
 
+  const deliveryOutbox = new DeliveryOutbox(path.join(directory, 'delivery-outbox'));
   const controller = new DiscordController({
     client,
     codex,
@@ -3494,6 +3578,7 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
       liveUpdateIntervalMs: 100,
     },
     logDir: directory,
+    deliveryOutbox,
   });
   controller.attach();
 
@@ -3551,6 +3636,71 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   assert.equal(channelMessages.has('user-message-1'), false);
   assert.equal(channelMessages.has('user-message-2'), false);
   assert.equal(sent.filter((message) => message.embeds[0]?.title === 'User message').length, 2);
+
+  codex.connected = false;
+  const offline = makeMessage('user-message-offline', 'execute after reconnect');
+  client.emit('messageCreate', offline.message);
+  const offlineRequestId = 'discord-message:guild-1:new-channel:user-message-offline';
+  for (let attempt = 0; attempt < 100 && !deliveryOutbox.get(offlineRequestId); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(deliveryOutbox.get(offlineRequestId).state, 'queued');
+  assert.equal(delivered.length, 2);
+  assert.deepEqual(offline.reactions, ['⏳']);
+
+  codex.connected = true;
+  codex.emit('subscriptionsReady');
+  for (let attempt = 0; attempt < 100 && !offline.reactions.includes('✅'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(delivered.length, 3);
+  assert.equal(delivered[2].prompt, 'execute after reconnect');
+  assert.equal(deliveryOutbox.get(offlineRequestId).state, 'accepted');
+  assert.equal(deliveryOutbox.get(offlineRequestId).callback.state, 'delivered');
+  assert.deepEqual(offline.reactions, ['⏳', '✅']);
+
+  let receiptLookups = 0;
+  codex.findDeliveryReceipt = async () => {
+    receiptLookups += 1;
+    return null;
+  };
+  const uncertainMessage = makeMessage('user-message-uncertain', 'acceptance becomes uncertain');
+  client.emit('messageCreate', uncertainMessage.message);
+  const uncertainRequestId = 'discord-message:guild-1:new-channel:user-message-uncertain';
+  for (let attempt = 0; attempt < 100
+    && deliveryOutbox.get(uncertainRequestId)?.callback.state !== 'delivered'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(deliveryOutbox.get(uncertainRequestId).state, 'uncertain');
+  assert.deepEqual(uncertainMessage.reactions, ['⏳', '⚠️']);
+  const attemptsBeforeReconcile = deliveryAttempts.filter((attempt) => (
+    attempt.clientUserMessageId === uncertainRequestId
+  )).length;
+  codex.emit('subscriptionsReady');
+  for (let attempt = 0; attempt < 100 && receiptLookups === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(receiptLookups >= 1);
+  assert.equal(deliveryOutbox.get(uncertainRequestId).state, 'uncertain');
+  assert.equal(deliveryAttempts.filter((attempt) => (
+    attempt.clientUserMessageId === uncertainRequestId
+  )).length, attemptsBeforeReconcile);
+
+  const cutover = BigInt(deliveryOutbox.channelRecoveryCursor(channel.id));
+  const alreadyHandled = makeMessage((cutover - 1n).toString(), 'already handled before cutover');
+  const missedAfterRestart = makeMessage((cutover + 1n).toString(), 'recover after Bridge restart');
+  codex.emit('subscriptionsReady');
+  for (let attempt = 0; attempt < 100
+    && !missedAfterRestart.reactions.includes('✅'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(delivered.at(-1).prompt, 'recover after Bridge restart');
+  assert.deepEqual(missedAfterRestart.reactions, ['⏳', '✅']);
+  assert.deepEqual(alreadyHandled.reactions, []);
+  assert.equal(
+    deliveryOutbox.channelRecoveryCursor(channel.id),
+    missedAfterRestart.message.id,
+  );
   controller.taskSyncPromise = null;
 });
 

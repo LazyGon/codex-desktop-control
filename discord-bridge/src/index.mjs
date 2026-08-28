@@ -75,7 +75,14 @@ const client = new Client({
   rest: discordRestOptions(config, discordRestAgent),
 });
 const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
-const controller = new DiscordController({ client, codex, stateStore, config, logDir });
+const controller = new DiscordController({
+  client,
+  codex,
+  stateStore,
+  config,
+  logDir,
+  deliveryOutboxDirectory: path.join(dataDir, 'delivery-outbox'),
+});
 const chatgptService = new ChatgptService({
   config,
   onStatus: (scope, message, identity = null) => appendJsonLine(processLog, 'chatgpt-transport-status', {

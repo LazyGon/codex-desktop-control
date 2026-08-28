@@ -150,8 +150,12 @@ outbound connection to Discord.
   owned by external connectors fail closed with a specific reason.
 - Confirms `interrupt` before using app-server `turn/interrupt`; it does not
   kill the task process.
-- Reconnects indefinitely, re-subscribes bound tasks, reconciles persisted
-  message IDs with visible Discord IDs, and reports missed completions.
+- Reconnects indefinitely, restores visible non-archived task subscriptions
+  serially with bounded recent turns, then releases outbox and task-list work;
+  reconciles persisted message IDs with visible Discord IDs and reports missed
+  completions. Task inventories are fetched serially, and a parent task that
+  already completed one full subagent scan preserves known children while
+  scanning only its newest ten turns for additions.
 - Treats transient communication failures across the Discord gateway, Discord
   REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and TLS as
   recoverable. Initial Discord login and setup retry with exponential backoff
@@ -183,12 +187,25 @@ outbound connection to Discord.
   for later Discord or subagent reconciliation.
 - Treats ordinary messages from allowed users in bound task channels as Codex
   `deliver` input. The same input in an unbound channel under a managed project
-  category first creates and binds a new task. After app-server accepts the
+  category first creates and binds a new task. Each message received after this
+  version is running is atomically queued under `data\delivery-outbox` before
+  App Server mutation. The first start records a recovery cutover without
+  importing older Discord history; later reconnects and restarts scan forward
+  from each task channel's persisted cursor, so post-cutover messages received
+  while the Bridge was unavailable are queued in order. A message
+  that has not reached mutation is delivered after reconnect, while an
+  acceptance-uncertain attempt is reconciled by exact request ID and is never
+  automatically resent merely because bounded history did not find it. Stale
+  targets, overlap, corrupt state, and request-ID replacement fail closed.
+  After app-server accepts the
   input, the bridge replaces the original Discord message with the same orange
   user-card format used for Desktop input. Each input carries a stable client
-  message ID, so a delayed app-server `userMessage` item no longer turns an
+  message ID for correlation, not server-side deduplication, so a delayed
+  app-server `userMessage` item no longer turns an
   accepted instruction into a false send failure; the provisional card is
-  reconciled to the persisted server item ID when it arrives. An ordinary
+  reconciled to the persisted server item ID when it arrives. Success/error/
+  uncertain reactions use a separately persisted, one-attempt callback receipt.
+  An ordinary
   message may carry up to ten Discord attachments. Images become app-server
   `localImage` inputs; PDFs, Office documents, archives, audio, video, source
   files, and other regular files are stored in the task-scoped runtime inbox
@@ -196,7 +213,8 @@ outbound connection to Discord.
   executed by the Bridge. An attachment-only message asks Codex to infer the
   intended analysis, answer, or work and proceed instead of merely confirming
   receipt. Attachments can also steer an active turn. Slash
-  commands remain available for explicit modes and a single attachment.
+  commands remain available for explicit immediate modes and a single
+  attachment; they are not imported into the ordinary-message outbox.
 - Starts at Windows logon and can start the formal shared Desktop launcher when
   the app-server is absent.
 

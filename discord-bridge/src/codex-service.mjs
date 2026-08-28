@@ -58,7 +58,7 @@ export function subscriptionRestoreBindings(bindings) {
   const statusRank = (binding) => binding.taskStatus === 'active' ? 0 : 1;
   const updatedAtMs = (binding) => Date.parse(binding.updatedAt ?? '') || 0;
   return [...bindings]
-    .filter((binding) => !binding.archived)
+    .filter((binding) => !binding.archived && !binding.hidden)
     .sort((left, right) => statusRank(left) - statusRank(right)
       || updatedAtMs(right) - updatedAtMs(left));
 }
@@ -83,6 +83,13 @@ export function threadForSubscriptionRestore(binding, thread) {
   return { ...thread, turns: forkOwnTurns(thread, binding.forkedAtMs) };
 }
 
+export function subscriptionRestoreThread(runtimeThread, turns) {
+  return {
+    ...(runtimeThread ?? {}),
+    turns: [...(turns ?? [])].reverse(),
+  };
+}
+
 export class CodexService extends EventEmitter {
   constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn }) {
     super();
@@ -97,6 +104,7 @@ export class CodexService extends EventEmitter {
     this.endpoint = null;
     this.connectionAttempt = 0;
     this.connectedAt = null;
+    this.subscriptionRestoreInProgress = false;
     this.lastLauncherStartAt = 0;
     this.stopPromise = new Promise((resolve) => {
       this.resolveStop = resolve;
@@ -358,13 +366,79 @@ export class CodexService extends EventEmitter {
     return (result.data ?? []).find((turn) => turn.status === 'inProgress') ?? null;
   }
 
-  async deliver(threadId, prompt, attachments = null, clientUserMessageId = null) {
+  async recentTurns(threadId, { limit = 2, itemsView = 'full' } = {}) {
+    this.#requireClient();
+    return this.client.call('thread/turns/list', {
+      threadId,
+      limit,
+      sortDirection: 'desc',
+      itemsView,
+    }, APP_SERVER_OPERATION_TIMEOUT_MS);
+  }
+
+  async prepareDelivery(threadId) {
     await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
-    if (currentTurn) {
-      return this.steer(threadId, prompt, attachments, clientUserMessageId, currentTurn);
+    return currentTurn
+      ? { mode: 'steer', expectedTurnId: currentTurn.id }
+      : { mode: 'send', expectedTurnId: null };
+  }
+
+  async executePreparedDelivery(
+    threadId,
+    prompt,
+    attachments,
+    clientUserMessageId,
+    target,
+  ) {
+    this.#requireClient();
+    if (!clientUserMessageId) throw new Error('Prepared delivery requires clientUserMessageId.');
+    if (target?.mode === 'send') {
+      const result = await this.client.call('turn/start', {
+        threadId,
+        input: textInput(prompt, attachments),
+        clientUserMessageId,
+      }, APP_SERVER_OPERATION_TIMEOUT_MS);
+      const turnId = result.turn?.id ?? null;
+      if (!turnId) throw new Error('turn/start did not return the accepted exact turn ID.');
+      return { mode: 'send', turnId, result };
     }
-    return this.send(threadId, prompt, attachments, clientUserMessageId);
+    if (target?.mode === 'steer' && target.expectedTurnId) {
+      const result = await this.client.call('turn/steer', {
+        threadId,
+        expectedTurnId: target.expectedTurnId,
+        input: textInput(prompt, attachments),
+        clientUserMessageId,
+      }, APP_SERVER_OPERATION_TIMEOUT_MS);
+      return { mode: 'steer', turnId: target.expectedTurnId, result };
+    }
+    throw new Error(`Invalid prepared delivery target for ${threadId}.`);
+  }
+
+  async findDeliveryReceipt(threadId, clientUserMessageId, { limit = 20 } = {}) {
+    const result = await this.recentTurns(threadId, { limit, itemsView: 'full' });
+    for (const turn of result.data ?? []) {
+      const item = (turn.items ?? []).find((candidate) => candidate.type === 'userMessage'
+        && (candidate.clientId === clientUserMessageId
+          || candidate.clientUserMessageId === clientUserMessageId));
+      if (item) return { threadId, turnId: turn.id, itemId: item.id ?? null };
+    }
+    return null;
+  }
+
+  async deliver(threadId, prompt, attachments = null, clientUserMessageId = null) {
+    const target = await this.prepareDelivery(threadId);
+    if (clientUserMessageId) {
+      return this.executePreparedDelivery(
+        threadId,
+        prompt,
+        attachments,
+        clientUserMessageId,
+        target,
+      );
+    }
+    if (target.mode === 'steer') return this.steer(threadId, prompt, attachments, null, { id: target.expectedTurnId });
+    return this.send(threadId, prompt, attachments);
   }
 
   async send(threadId, prompt, attachments = null, clientUserMessageId = null) {
@@ -475,8 +549,14 @@ export class CodexService extends EventEmitter {
         this.emit('serverRequest', message);
       });
       client.on('protocolError', (error) => this.#log('protocol-error', { error: error.message }));
-      client.on('socketError', () => {});
-      client.once('disconnected', disconnectedResolve);
+      client.on('socketError', (event) => this.#log('socket-error', {
+        error: event?.error?.message ?? event?.message ?? 'Unknown WebSocket error.',
+        code: event?.error?.code ?? null,
+      }));
+      client.once('disconnected', (event) => {
+        this.#log('disconnected', event);
+        disconnectedResolve(event);
+      });
 
       try {
         const connected = await Promise.race([
@@ -486,9 +566,15 @@ export class CodexService extends EventEmitter {
         if (!connected) break;
         this.connectionAttempt = 0;
         this.connectedAt = new Date().toISOString();
+        this.subscriptionRestoreInProgress = true;
         this.emit('connectionState', { state: 'connected', ...this.status(), source: endpoint.source });
         this.#log('connected', { endpoint: endpoint.url });
-        await this.#restoreSubscriptions();
+        const restored = await this.#restoreSubscriptions();
+        if (this.client === client && client.connected && !this.stopping) {
+          this.subscriptionRestoreInProgress = false;
+          this.#log('subscriptions-ready', restored);
+          this.emit('subscriptionsReady', restored);
+        }
         await Promise.race([disconnected, this.stopPromise]);
       } catch (error) {
         this.#log('connect-failed', { endpoint: endpoint.url, error: error.message });
@@ -498,6 +584,7 @@ export class CodexService extends EventEmitter {
         client.close();
         if (this.client === client) this.client = null;
         this.connectedAt = null;
+        this.subscriptionRestoreInProgress = false;
       }
 
       if (this.stopping) break;
@@ -509,11 +596,20 @@ export class CodexService extends EventEmitter {
 
   async #restoreSubscriptions() {
     const bindings = subscriptionRestoreBindings(this.stateStore.bindings());
-    await forEachConcurrent(bindings, 4, async (binding) => {
+    // A reconnect must not hydrate several unbounded histories on one
+    // WebSocket. Newer app-server builds can close that overloaded connection,
+    // causing every restore to restart from the beginning. Resume one task at
+    // a time and request only the bounded recent turns needed for live-card and
+    // missed-completion reconciliation.
+    const outcome = { total: bindings.length, restored: 0, failed: 0 };
+    await forEachConcurrent(bindings, 1, async (binding) => {
       try {
         const runtime = await this.resumeThread(binding.threadId);
-        const result = await this.readThread(binding.threadId);
-        const thread = threadForSubscriptionRestore(binding, result.thread);
+        const result = await this.recentTurns(binding.threadId);
+        const thread = threadForSubscriptionRestore(
+          binding,
+          subscriptionRestoreThread(runtime.thread, result.data),
+        );
         const completed = [...(thread.turns ?? [])].reverse().find((turn) => turn.status !== 'inProgress');
         const finalText = finalTextFromTurn(
           completed,
@@ -535,11 +631,14 @@ export class CodexService extends EventEmitter {
           status: threadStatusLabel(thread.status),
           missedTurnId: needsCompletionMessage || needsCompletionNotice ? completed?.id : null,
         });
+        outcome.restored += 1;
       } catch (error) {
+        outcome.failed += 1;
         this.#log('subscription-restore-failed', { threadId: binding.threadId, error: error.message });
         this.emit('subscriptionError', { binding, error });
       }
     });
+    return outcome;
   }
 
   #requireClient() {

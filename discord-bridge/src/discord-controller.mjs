@@ -55,6 +55,12 @@ import { readSessionTurnCardOrder } from './session-message-order.mjs';
 import { forkOwnTurns, readSessionForkInfo } from './session-fork-info.mjs';
 export { forkOwnTurns } from './session-fork-info.mjs';
 import {
+  DeliveryOutbox,
+  DeliveryOutboxLockedError,
+  discordSnowflakeAt,
+} from './delivery-outbox.mjs';
+import { isTransientCommunicationError } from './communication-error.mjs';
+import {
   contentCardComponents,
   fileBrowserPayload,
   formatFileSize,
@@ -251,6 +257,16 @@ export function subagentIdsFromThread(thread) {
     }
   }
   return [...new Set(ids.filter(Boolean))];
+}
+
+export function subagentScanPlan(binding) {
+  const hasCompletePriorScan = binding?.subagentScanVersion === 1
+    && Array.isArray(binding.subagentThreadIds);
+  return {
+    mode: hasCompletePriorScan ? 'recent' : 'full',
+    recentTurnLimit: hasCompletePriorScan ? 10 : null,
+    knownThreadIds: hasCompletePriorScan ? [...new Set(binding.subagentThreadIds.filter(Boolean))] : [],
+  };
 }
 
 export function subagentOwnTurns(thread) {
@@ -550,6 +566,8 @@ export class DiscordController {
     desktopClientInspector = inspectDesktopClientOwner,
     textTransferStore = null,
     incomingAttachmentStore = null,
+    deliveryOutbox = null,
+    deliveryOutboxDirectory = path.join(logDir, 'delivery-outbox'),
   }) {
     this.client = client;
     this.codex = codex;
@@ -582,6 +600,12 @@ export class DiscordController {
     this.textTransferStore = textTransferStore ?? new TextTransferStore(
       path.join(path.dirname(logDir), 'data', 'transfer-text'),
     );
+    this.deliveryOutbox = deliveryOutbox ?? new DeliveryOutbox(
+      deliveryOutboxDirectory,
+    );
+    this.deliveryOutbox.ensureDirectory();
+    this.discordRecoveryCursorExistedAtConstruction = Boolean(this.deliveryOutbox.recoveryCursor());
+    this.deliveryOutbox.initializeRecoveryCursor(discordSnowflakeAt());
     this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
     this.pendingRequests = new Map();
     this.pendingClientToolRequests = new Map();
@@ -592,6 +616,9 @@ export class DiscordController {
     this.taskSyncTimer = null;
     this.taskSyncInitialTimer = null;
     this.taskSyncPromise = null;
+    this.taskSyncAfterSubscriptionRestore = false;
+    this.deliveryOutboxDrainPromise = null;
+    this.discordRecoveryPromise = null;
     this.taskListBarrier = null;
     this.taskSyncDebounceTimer = null;
     this.transcriptSyncPromises = new Map();
@@ -639,6 +666,16 @@ export class DiscordController {
   attach() {
     this.client.on('interactionCreate', (interaction) => this.#handleInteraction(interaction));
     this.client.on('messageCreate', (message) => this.#queueDiscordMessage(message));
+    this.client.on('shardResume', () => {
+      this.#queueDiscordRecovery('discord-shard-resume')
+        .then(() => this.#queueDeliveryOutboxDrain('discord-shard-resume'))
+        .catch((error) => {
+          this.#log('discord-recovery-error', {
+            reason: 'discord-shard-resume',
+            error: error.stack ?? error.message,
+          });
+        });
+    });
     this.client.on('channelUpdate', (oldChannel, newChannel) => this.#handleChannelUpdate(oldChannel, newChannel).catch((error) => {
       this.#log('channel-ui-handler-error', {
         channelId: newChannel.id,
@@ -661,6 +698,7 @@ export class DiscordController {
       ++this.codexEventSequence,
     ));
     this.codex.on('connectionState', (status) => this.#handleConnectionState(status));
+    this.codex.on('subscriptionsReady', () => this.#handleSubscriptionsReady());
     this.codex.on('subscriptionRestored', (event) => this.#queueSubscriptionRestored(event));
     this.codex.on('subscriptionError', (event) => {
       if (this.stopping) return;
@@ -695,6 +733,8 @@ export class DiscordController {
     this.completionRecoveryJobs.clear();
     const pending = [
       ['task-sync', this.taskSyncPromise],
+      ['delivery-outbox', this.deliveryOutboxDrainPromise],
+      ['discord-recovery', this.discordRecoveryPromise],
       ['transcript-tail', this.transcriptSyncTail],
       ['recent-history', this.recentHistoryRestorePromise],
       ...[...this.notificationQueues].map(([key, promise]) => [`notification:${key}`, promise]),
@@ -732,6 +772,18 @@ export class DiscordController {
   }
 
   async ready() {
+    const recoveryCursor = this.deliveryOutbox.recoveryCursor();
+    const recoveredDeliveries = this.deliveryOutbox.recoverStaleOwnership();
+    const deliveryEntries = this.deliveryOutbox.list();
+    this.#log('delivery-outbox-ready', {
+      entries: deliveryEntries.length,
+      queued: deliveryEntries.filter((entry) => entry.state === 'queued').length,
+      uncertain: deliveryEntries.filter((entry) => entry.state === 'uncertain').length,
+      recovered: recoveredDeliveries,
+      recoveryCursorExisted: this.discordRecoveryCursorExistedAtConstruction,
+      recoveryCutoverMessageId: recoveryCursor.cutoverMessageId,
+      importsBeforeCutover: false,
+    });
     if (this.config.textTransferEnabled) await this.textTransferStore.ensureDirectory();
     const removedStaleTransfers = await cleanupStaleSplitArchives(this.fileTransferTempRoot).catch((error) => {
       this.#log('file-transfer-cleanup-error', { error: error.message });
@@ -1004,19 +1056,27 @@ export class DiscordController {
     const channelId = message.channelId ?? '__unknown__';
     const previous = this.discordMessageQueues.get(channelId) ?? Promise.resolve();
     const queued = previous
-      .then(() => this.#handleDiscordMessage(message))
-      .catch((error) => {
-        this.#log('plain-message-handler-error', {
-          messageId: message.id,
-          channelId: message.channelId,
-          userId: message.author?.id,
-          error: error.stack ?? error.message,
-        });
+      .catch(() => {})
+      .then(async () => {
+        const result = await this.#handleDiscordMessage(message);
+        if (result?.cursorSafe && /^\d+$/.test(String(message.id ?? ''))) {
+          this.deliveryOutbox.advanceChannelRecoveryCursor(message.channelId, message.id);
+        }
+        return result;
       });
+    queued.catch((error) => {
+      this.#log('plain-message-handler-error', {
+        messageId: message.id,
+        channelId: message.channelId,
+        userId: message.author?.id,
+        error: error.stack ?? error.message,
+      });
+    });
     this.discordMessageQueues.set(channelId, queued);
     queued.finally(() => {
       if (this.discordMessageQueues.get(channelId) === queued) this.discordMessageQueues.delete(channelId);
-    });
+    }).catch(() => {});
+    return queued;
   }
 
   #managedProjectForChannel(channel) {
@@ -1136,6 +1196,7 @@ export class DiscordController {
     const pendingReactionRequest = message.react('⏳').catch(() => {});
     const prompt = content || ATTACHMENT_ONLY_PROMPT;
     let reservation = null;
+    let outboxOwnsPendingReaction = false;
     try {
       if (!binding) binding = await this.#ensureTaskBinding(channel, project);
       if (!binding) throw new Error('Discord channel could not be bound to the new Codex task.');
@@ -1144,6 +1205,7 @@ export class DiscordController {
         binding.threadId,
         message.id,
       );
+      const requestId = `discord-message:${message.guildId}:${message.channelId}:${message.id}`;
       reservation = this.#reserveUserInput(
         binding.threadId,
         prompt,
@@ -1152,37 +1214,52 @@ export class DiscordController {
           executorUserId: message.author.id,
           alreadyVisible: true,
           visibleMessageId: message.id,
+          clientUserMessageId: requestId,
         },
       );
-      const result = await this.codex.deliver(
-        binding.threadId,
+      this.deliveryOutbox.enqueue({
+        requestId,
+        threadId: binding.threadId,
         prompt,
-        preparedAttachments,
-        reservation.clientUserMessageId,
-      );
-      reservation.turnId ??= result.turnId;
-      await this.#ensureReservedUserInputPosted(reservation);
-      await this.#moveLiveCardAfterReservedInput(reservation);
-      await message.react('✅').catch(() => {});
-      this.#log('plain-message-delivered', {
+        attachments: preparedAttachments,
+        source: {
+          kind: 'discord-message',
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          userId: message.author.id,
+          userTag: message.author.tag,
+        },
+      });
+      outboxOwnsPendingReaction = true;
+      await this.#queueDeliveryOutboxDrain('discord-message');
+      const delivery = this.deliveryOutbox.get(requestId);
+      this.#log(delivery?.state === 'accepted' ? 'plain-message-delivered' : 'plain-message-queued', {
+        requestId,
         messageId: message.id,
         channelId: message.channelId,
         threadId: binding.threadId,
         userId: message.author.id,
-        mode: result.mode,
-        turnId: result.turnId,
+        state: delivery?.state ?? 'missing',
+        mode: delivery?.receipt?.mode ?? null,
+        turnId: delivery?.receipt?.turnId ?? null,
         attachments: preparedAttachments.map((attachment) => attachment.kind),
       });
     } catch (error) {
-      if (reservation) this.#removeUserInputReservation(reservation);
-      await message.react('❌').catch(() => {});
-      await message.reply(messageOptions(`Codexへの指示送信に失敗しました: ${truncate(error.message, 1700)}`)).catch(() => {});
+      if (!outboxOwnsPendingReaction) {
+        if (reservation) this.#removeUserInputReservation(reservation);
+        await message.react('❌').catch(() => {});
+        await message.reply(messageOptions(`Codexへの指示送信に失敗しました: ${truncate(error.message, 1700)}`)).catch(() => {});
+      }
       throw error;
     } finally {
       await pendingReactionRequest;
-      const pendingReaction = message.reactions.resolve('⏳');
-      await pendingReaction?.users.remove(this.client.user.id).catch(() => {});
+      if (!outboxOwnsPendingReaction) {
+        const pendingReaction = message.reactions.resolve('⏳');
+        await pendingReaction?.users.remove(this.client.user.id).catch(() => {});
+      }
     }
+    return { cursorSafe: true };
   }
 
   async #handleTransferTextMessage(message) {
@@ -3878,14 +3955,15 @@ export class DiscordController {
 
   async #listAllThreadsWithProjects(projectState, archived) {
     const nativeProjectIds = [...(projectState?.appServerProjects?.keys?.() ?? [])];
-    const results = await Promise.all([
-      this.codex.listAllThreads({ archived }),
-      ...nativeProjectIds.map((projectId) => this.codex.listAllThreads({ archived, projectId })),
-    ]);
-    return mergeProjectScopedThreads(results[0], nativeProjectIds.map((projectId, index) => ({
-      projectId,
-      threads: results[index + 1],
-    })));
+    const globalThreads = await this.codex.listAllThreads({ archived });
+    const projectResults = [];
+    for (const projectId of nativeProjectIds) {
+      projectResults.push({
+        projectId,
+        threads: await this.codex.listAllThreads({ archived, projectId }),
+      });
+    }
+    return mergeProjectScopedThreads(globalThreads, projectResults);
   }
 
   #startTaskSyncPolling() {
@@ -3893,7 +3971,16 @@ export class DiscordController {
     let initialPanelLayoutRefreshPending = true;
     const run = () => {
       if (this.stopping || !this.codex.connected) return;
-      this.#syncAllTasks().then(async (result) => {
+      if (this.codex.subscriptionRestoreInProgress) {
+        this.taskSyncAfterSubscriptionRestore = true;
+        this.#log('task-sync-deferred-for-subscription-restore', { reason: 'poll' });
+        return;
+      }
+      this.#queueDeliveryOutboxDrain('task-sync-poll').then(() => {
+        if (this.stopping || !this.codex.connected || this.codex.subscriptionRestoreInProgress) return null;
+        return this.#syncAllTasks();
+      }).then(async (result) => {
+        if (!result) return;
         if (initialPanelLayoutRefreshPending) {
           initialPanelLayoutRefreshPending = false;
           const panelRefresh = await this.#refreshStoredTaskPanelLayouts();
@@ -3981,10 +4068,8 @@ export class DiscordController {
       }
       markPhase('pendingBindings');
       projectState = await this.#loadProjectState();
-      [activeThreads, archivedThreads] = await Promise.all([
-        this.#listAllThreadsWithProjects(projectState, false),
-        this.#listAllThreadsWithProjects(projectState, true),
-      ]);
+      activeThreads = await this.#listAllThreadsWithProjects(projectState, false);
+      archivedThreads = await this.#listAllThreadsWithProjects(projectState, true);
     } finally {
       releaseTaskList();
       if (this.taskListBarrier === listBarrier) this.taskListBarrier = null;
@@ -5191,8 +5276,20 @@ export class DiscordController {
         continue;
       }
       try {
-        const hydrated = (await this.codex.readThread(parent.id)).thread;
-        const discoveredIds = subagentIdsFromThread(hydrated);
+        const scanPlan = subagentScanPlan(binding);
+        const hydrated = scanPlan.mode === 'recent'
+          ? {
+            ...parent,
+            turns: (await this.codex.recentTurns(parent.id, {
+              limit: scanPlan.recentTurnLimit,
+              itemsView: 'full',
+            })).data ?? [],
+          }
+          : (await this.codex.readThread(parent.id)).thread;
+        const discoveredIds = [...new Set([
+          ...scanPlan.knownThreadIds,
+          ...subagentIdsFromThread(hydrated),
+        ])];
         for (const childId of discoveredIds) addChildId(childId);
         this.stateStore.setBinding(parent.id, {
           subagentScanVersion: 1,
@@ -6424,6 +6521,7 @@ export class DiscordController {
   async #performTranscriptReconciliation(threadId, {
     channel: knownChannel = null,
     activeOnly = false,
+    hydratedThread: knownHydratedThread = null,
     recentSinceMs = null,
     includeHistoricalDetails = false,
     forkCleanupOnly = false,
@@ -6434,7 +6532,7 @@ export class DiscordController {
     const channel = knownChannel ?? await this.client.channels.fetch(binding.channelId);
     // thread/list entries can omit historical turns and items. Reconciliation
     // must only prune Discord messages against a fully hydrated transcript.
-    const hydratedThread = (await this.codex.readThread(threadId)).thread;
+    const hydratedThread = knownHydratedThread ?? (await this.codex.readThread(threadId)).thread;
     const forked = !binding.isSubagent && binding.forkedFromThreadId;
     const thread = binding.isSubagent
       ? { ...hydratedThread, turns: subagentOwnTurns(hydratedThread) }
@@ -7081,10 +7179,20 @@ export class DiscordController {
   }
 
   #scheduleTaskSync(reason) {
-    if (this.stopping || this.taskSyncDebounceTimer) return;
+    if (this.stopping) return;
+    if (this.codex.subscriptionRestoreInProgress) {
+      this.taskSyncAfterSubscriptionRestore = true;
+      this.#log('task-sync-deferred-for-subscription-restore', { reason });
+      return;
+    }
+    if (this.taskSyncDebounceTimer) return;
     this.taskSyncDebounceTimer = setTimeout(() => {
       this.taskSyncDebounceTimer = null;
-      this.#syncAllTasks().catch((error) => {
+      if (this.stopping || !this.codex.connected) return;
+      this.#queueDeliveryOutboxDrain(`task-sync:${reason}`).then(() => {
+        if (this.stopping || !this.codex.connected || this.codex.subscriptionRestoreInProgress) return null;
+        return this.#syncAllTasks();
+      }).catch((error) => {
         this.#log('task-sync-notification-error', { reason, error: error.stack ?? error.message });
       });
     }, 300);
@@ -8703,13 +8811,310 @@ export class DiscordController {
       state === 'connected' ? 'normal' : 'error');
     }
     if (state === 'connected') {
-      const timer = setTimeout(() => {
-        this.#syncAllTasks().catch((error) => {
-          this.#log('task-sync-reconnect-error', { error: error.stack ?? error.message });
-        });
-      }, 2_000);
-      timer.unref?.();
+      this.#scheduleTaskSync('app-server-connected');
     }
+  }
+
+  #handleSubscriptionsReady() {
+    if (this.stopping || !this.codex.connected) return;
+    const deferred = this.taskSyncAfterSubscriptionRestore;
+    this.taskSyncAfterSubscriptionRestore = false;
+    this.#queueDiscordRecovery('subscriptions-ready')
+      .then(() => this.#queueDeliveryOutboxDrain('subscriptions-ready'))
+      .finally(() => {
+        if (!this.stopping && this.codex.connected) {
+          this.#scheduleTaskSync(deferred ? 'subscriptions-ready-deferred' : 'subscriptions-ready');
+        }
+      });
+  }
+
+  #queueDiscordRecovery(reason) {
+    if (this.stopping) return Promise.resolve();
+    if (this.discordRecoveryPromise) return this.discordRecoveryPromise;
+    const recovery = this.#recoverDiscordMessages(reason)
+      .catch((error) => {
+        this.#log('discord-recovery-error', { reason, error: error.stack ?? error.message });
+      })
+      .finally(() => {
+        if (this.discordRecoveryPromise === recovery) this.discordRecoveryPromise = null;
+      });
+    this.discordRecoveryPromise = recovery;
+    return recovery;
+  }
+
+  async #recoverDiscordMessages(reason) {
+    const bindings = (typeof this.stateStore.bindings === 'function' ? this.stateStore.bindings() : [])
+      .filter((binding) => binding.channelId && !binding.archived && !this.#isBindingHidden(binding));
+    const outcome = { reason, channels: 0, scanned: 0, recovered: 0, ignored: 0 };
+    for (const binding of bindings) {
+      if (this.stopping) break;
+      const channel = await this.client.channels.fetch(binding.channelId).catch((error) => {
+        if ([10003, 10008].includes(error.code)) return null;
+        throw error;
+      });
+      if (!channel?.messages?.fetch) continue;
+      outcome.channels += 1;
+      let cursor = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
+      for (let page = 0; page < 100; page += 1) {
+        const fetched = await channel.messages.fetch({ after: cursor, limit: 100 });
+        const messages = [...fetched.values()]
+          .filter((message) => /^\d+$/.test(String(message.id ?? '')) && BigInt(message.id) > BigInt(cursor))
+          .sort((left, right) => BigInt(left.id) < BigInt(right.id) ? -1 : 1);
+        if (messages.length === 0) break;
+        for (const message of messages) {
+          outcome.scanned += 1;
+          const hasInput = Boolean(String(message.content ?? '').trim())
+            || (message.attachments?.size ?? 0) > 0;
+          const shouldRecover = this.config.plainMessageInputEnabled
+            && !message.author?.bot
+            && !message.webhookId
+            && hasInput
+            && this.#hasMessageExecutionPermission(message);
+          if (shouldRecover) {
+            await this.#queueDiscordMessage(message);
+            const advanced = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
+            if (BigInt(advanced) < BigInt(message.id)) {
+              throw new Error(`Recovered Discord message did not advance its cursor: ${message.id}`);
+            }
+            outcome.recovered += 1;
+          } else {
+            this.deliveryOutbox.advanceChannelRecoveryCursor(binding.channelId, message.id);
+            outcome.ignored += 1;
+          }
+          cursor = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
+        }
+        if (messages.length < 100) break;
+      }
+    }
+    this.#log('discord-recovery-complete', outcome);
+    return outcome;
+  }
+
+  #queueDeliveryOutboxDrain(reason) {
+    if (this.stopping || !this.codex.connected || this.codex.subscriptionRestoreInProgress) {
+      this.#log('delivery-outbox-drain-deferred', {
+        reason,
+        stopping: this.stopping,
+        connected: Boolean(this.codex.connected),
+        subscriptionRestoreInProgress: Boolean(this.codex.subscriptionRestoreInProgress),
+      });
+      return Promise.resolve();
+    }
+    if (this.deliveryOutboxDrainPromise) return this.deliveryOutboxDrainPromise;
+    const drain = this.#drainDeliveryOutbox(reason)
+      .catch((error) => {
+        this.#log('delivery-outbox-drain-error', { reason, error: error.stack ?? error.message });
+      })
+      .finally(() => {
+        if (this.deliveryOutboxDrainPromise === drain) this.deliveryOutboxDrainPromise = null;
+      });
+    this.deliveryOutboxDrainPromise = drain;
+    return drain;
+  }
+
+  async #drainDeliveryOutbox(reason) {
+    this.#log('delivery-outbox-drain-start', { reason });
+    for (const entry of this.deliveryOutbox.list({ states: ['uncertain'] })) {
+      if (this.stopping || !this.codex.connected) break;
+      let receipt = null;
+      try {
+        receipt = await this.codex.findDeliveryReceipt(entry.threadId, entry.requestId, { limit: 20 });
+      } catch (error) {
+        this.#log('delivery-outbox-reconcile-error', {
+          requestId: entry.requestId,
+          threadId: entry.threadId,
+          error: error.stack ?? error.message,
+        });
+        break;
+      }
+      if (receipt?.turnId) {
+        this.deliveryOutbox.acceptReconciled(entry.requestId, {
+          turnId: receipt.turnId,
+          mode: entry.attempt?.mode ?? null,
+        });
+        this.#log('delivery-outbox-reconciled', {
+          requestId: entry.requestId,
+          threadId: entry.threadId,
+          turnId: receipt.turnId,
+        });
+      } else {
+        this.#log('delivery-outbox-remains-uncertain', {
+          requestId: entry.requestId,
+          threadId: entry.threadId,
+        });
+      }
+    }
+
+    for (const entry of this.deliveryOutbox.list({ states: ['queued'] })) {
+      if (this.stopping || !this.codex.connected) break;
+      const binding = this.stateStore.binding(entry.threadId);
+      const staleReason = !binding
+        ? 'The target task binding no longer exists.'
+        : binding.archived
+          ? 'The target task is archived.'
+          : this.#isBindingHidden(binding)
+            ? 'The target task is hidden.'
+            : binding.channelId !== entry.source?.channelId
+              ? 'The target Discord channel binding changed.'
+              : null;
+      if (staleReason) {
+        this.deliveryOutbox.reject(entry.requestId, {
+          error: staleReason,
+          code: 'STALE_DELIVERY_TARGET',
+        });
+        continue;
+      }
+
+      let target;
+      try {
+        target = await this.codex.prepareDelivery(entry.threadId);
+      } catch (error) {
+        if (!this.codex.connected || isTransientCommunicationError(error)) {
+          this.#log('delivery-outbox-prepare-deferred', {
+            requestId: entry.requestId,
+            threadId: entry.threadId,
+            error: error.message,
+          });
+          break;
+        }
+        this.deliveryOutbox.reject(entry.requestId, {
+          error,
+          code: 'DELIVERY_TARGET_READ_REJECTED',
+        });
+        continue;
+      }
+
+      let attempt;
+      try {
+        attempt = this.deliveryOutbox.beginAttempt(entry.requestId, target);
+      } catch (error) {
+        if (error instanceof DeliveryOutboxLockedError) continue;
+        throw error;
+      }
+      try {
+        const result = await this.codex.executePreparedDelivery(
+          entry.threadId,
+          entry.prompt,
+          entry.attachments,
+          entry.requestId,
+          target,
+        );
+        this.deliveryOutbox.accept(entry.requestId, {
+          attemptId: attempt.attempt.attemptId,
+          mode: result.mode,
+          turnId: result.turnId,
+        });
+        this.#log('delivery-outbox-accepted', {
+          requestId: entry.requestId,
+          threadId: entry.threadId,
+          mode: result.mode,
+          turnId: result.turnId,
+        });
+      } catch (error) {
+        this.deliveryOutbox.markUncertain(entry.requestId, {
+          attemptId: attempt.attempt.attemptId,
+          error,
+        });
+        this.#log('delivery-outbox-acceptance-uncertain', {
+          requestId: entry.requestId,
+          threadId: entry.threadId,
+          error: error.stack ?? error.message,
+        });
+      }
+    }
+
+    for (const entry of this.deliveryOutbox.list({
+      states: ['accepted', 'rejected', 'uncertain'],
+      callbackStates: ['pending'],
+    })) {
+      if (this.stopping) break;
+      await this.#deliverOutboxCallback(entry);
+    }
+    const remaining = this.deliveryOutbox.list();
+    this.#log('delivery-outbox-drain-complete', {
+      reason,
+      queued: remaining.filter((entry) => entry.state === 'queued').length,
+      uncertain: remaining.filter((entry) => entry.state === 'uncertain').length,
+      callbackPending: remaining.filter((entry) => entry.callback.state === 'pending').length,
+    });
+  }
+
+  async #deliverOutboxCallback(original) {
+    let callback;
+    try {
+      callback = this.deliveryOutbox.beginCallback(original.requestId);
+    } catch (error) {
+      if (error instanceof DeliveryOutboxLockedError) return;
+      throw error;
+    }
+    const callbackAttemptId = callback.callback.attemptId;
+    try {
+      const channel = await this.client.channels.fetch(callback.source.channelId).catch((error) => {
+        if (error.code === 10003) return null;
+        throw error;
+      });
+      const message = channel
+        ? await channel.messages.fetch(callback.source.messageId).catch((error) => {
+          if (error.code === 10008) return null;
+          throw error;
+        })
+        : null;
+      let outcome = 'source-message-missing';
+      if (message) {
+        const reaction = callback.state === 'accepted' ? '✅' : callback.state === 'rejected' ? '❌' : '⚠️';
+        await message.react(reaction);
+        const pendingReaction = message.reactions.resolve('⏳');
+        await pendingReaction?.users.remove(this.client.user.id);
+        outcome = `reaction:${reaction}`;
+      }
+      this.deliveryOutbox.completeCallback(callback.requestId, {
+        attemptId: callbackAttemptId,
+        outcome,
+      });
+    } catch (error) {
+      this.deliveryOutbox.markCallbackUncertain(callback.requestId, {
+        attemptId: callbackAttemptId,
+        error,
+      });
+      this.#log('delivery-outbox-callback-uncertain', {
+        requestId: callback.requestId,
+        error: error.stack ?? error.message,
+      });
+      return;
+    }
+
+    if (callback.state !== 'accepted' || !callback.receipt?.turnId) return;
+    let reservation = this.recentUserInputs.find((candidate) => (
+      candidate.clientUserMessageId === callback.requestId
+    ));
+    if (!reservation) {
+      reservation = this.#reserveUserInput(
+        callback.threadId,
+        callback.prompt,
+        `Discord: ${callback.source.userTag ?? callback.source.userId}`,
+        {
+          executorUserId: callback.source.userId,
+          alreadyVisible: true,
+          visibleMessageId: callback.source.messageId,
+          clientUserMessageId: callback.requestId,
+        },
+      );
+    }
+    reservation.turnId ??= callback.receipt.turnId;
+    await this.#ensureReservedUserInputPosted(reservation).catch((error) => {
+      this.#log('delivery-outbox-mirror-error', {
+        requestId: callback.requestId,
+        threadId: callback.threadId,
+        error: error.stack ?? error.message,
+      });
+    });
+    await this.#moveLiveCardAfterReservedInput(reservation).catch((error) => {
+      this.#log('delivery-outbox-live-card-error', {
+        requestId: callback.requestId,
+        threadId: callback.threadId,
+        error: error.stack ?? error.message,
+      });
+    });
   }
 
   async #handleSubscriptionRestored({ binding, thread, runtime, missedCompletion }) {
@@ -8734,7 +9139,11 @@ export class DiscordController {
     if (needsHistory) {
       await this.#reconcileThreadTranscript(binding.threadId, { channel });
     } else if (hasActiveTurn) {
-      await this.#reconcileThreadTranscript(binding.threadId, { channel, activeOnly: true });
+      await this.#reconcileThreadTranscript(binding.threadId, {
+        channel,
+        activeOnly: true,
+        hydratedThread: thread,
+      });
     }
     if (missedCompletion?.needsCompletionMessage && missedCompletion.turn?.id) {
       await this.#turnCompleted(
@@ -8800,6 +9209,7 @@ export class DiscordController {
     executorUserId = null,
     alreadyVisible = false,
     visibleMessageId = null,
+    clientUserMessageId = null,
   } = {}) {
     this.#pruneUserInputReservations();
     const record = {
@@ -8814,7 +9224,7 @@ export class DiscordController {
       visibleMessageId,
       turnId: null,
       userItemId: null,
-      clientUserMessageId: `discord-${randomKey()}`,
+      clientUserMessageId: clientUserMessageId ?? `discord-${randomKey()}`,
       postedItemId: null,
       at: Date.now(),
     };

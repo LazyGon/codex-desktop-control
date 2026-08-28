@@ -269,13 +269,35 @@ source Discord message is deleted. If the local write fails, the Discord
 message remains for recovery. Other bots are ignored, and attachments or
 embeds without a message body are not stored or sent to Codex.
 
-Discord input uses an app-server `clientUserMessageId` as its immediate stable
-identity. The Bridge posts the orange user card after `turn/start` or
-`turn/steer` returns a turn ID, even if the persisted `userMessage` notification
+Each ordinary Discord task-channel message received after this outbox version
+is running is first written atomically to
+`data\delivery-outbox\<sha256(requestId)>.json`. Its request ID is derived from
+the exact guild, channel, and Discord message IDs and is also sent as the
+app-server `clientUserMessageId`. Existing Discord history is never imported,
+so the first outbox-enabled start writes a `recovery-cursor.json` cutover and
+does not execute messages at or before it. Later app-server reconnects, Discord
+gateway resumes, and Bridge restarts scan each visible active task channel
+after its persisted cursor and enqueue missed post-cutover messages in order.
+
+Before mutation, the drain reads the exact target and active turn. It then
+persists one `attempting` record and issues exactly one `turn/start` or
+`turn/steer`. A matching request/attempt receipt and exact turn ID are written
+atomically before the success reaction is attempted. If the Bridge disconnects
+before the mutation begins, the entry remains `queued` and is retried after
+subscription restoration. If acceptance is uncertain after mutation begins,
+the entry becomes `uncertain`: reconnect performs a bounded full-item history
+lookup for the request ID, but absence is not treated as proof that retry is
+safe and the instruction is not resent. Stale, hidden, archived, reassigned,
+overlapping, corrupt, and request-ID/payload-mismatch cases fail closed.
+
+The terminal Discord reaction callback has its own persisted attempt and can
+be claimed only once. A crash during that callback becomes callback
+`uncertain`, rather than repeating an external effect. After accepted delivery,
+the orange user card is posted even if the persisted `userMessage` notification
 is delayed by active tool work. When that notification arrives, its `clientId`
-is used to replace the provisional identity with the server item ID on the
-existing card. Failure to receive a server item ID within five seconds is
-therefore no longer reported as an instruction-send failure.
+replaces the provisional identity with the server item ID on the existing card.
+Slash-command delivery remains immediate and is not imported into this ordinary
+message outbox.
 
 When a turn completes and that task's completion-report setting is ON,
 `codex-completions` starts by mentioning the configured user with
@@ -294,10 +316,18 @@ live view. The completion-report selector independently controls
 ## Connection recovery
 
 The Discord gateway and Codex app-server both reconnect automatically. When
-app-server reconnects, every non-archived task is resumed on the same server and read
-from persisted history. Historical reconciliation backfills user cards and final
-assistant cards only. Commentary is captured while the turn is actively subscribed;
-already-persisted commentary cards are preserved by task, turn, and item identity.
+app-server reconnects, every visible, non-archived task is resumed serially on
+the same server and only the bounded recent full turns needed for live-card and
+missed-completion repair are loaded. Task-list reconciliation and outbox drain
+wait until that subscription restoration is ready, preventing concurrent bulk
+RPC load from repeatedly closing the shared WebSocket. Global, active,
+archived, and native-project inventories are fetched serially. A parent task's
+first subagent discovery still scans its complete history; later scans preserve
+the known child IDs and inspect only the newest ten full turns for additions.
+Historical
+reconciliation backfills user cards and final assistant cards only. Commentary
+is captured while the turn is actively subscribed; already-persisted
+commentary cards are preserved by task, turn, and item identity.
 Transient gateway, REST, app-server, attachment-fetch, DNS, TCP, and TLS
 failures do not terminate the Bridge even if they reach the process error
 boundary. Initial Discord login and setup retry with exponential backoff capped
@@ -319,6 +349,10 @@ Use `Get-DiscordBridgeStatus.ps1` when the bot appears offline. Relevant files:
 - `data\runtime.json`: process, Discord, and app-server status.
 - `data\state.json`: project/category, task/channel, and turn/message identity
   bindings plus completion-notice IDs.
+- `data\delivery-outbox\*.json`: post-deployment ordinary-message delivery,
+  exact-attempt receipt, uncertainty, and one-shot reaction-callback state.
+- `data\delivery-outbox\recovery-cursor.json`: the immutable initial cutover
+  plus the last examined post-cutover Discord message ID per task channel.
 - `data\transfer-text\<timestamp>.txt`: latest authorized user or webhook text
   posted to `Others` / `transfer-text`.
 - `logs\bridge-YYYYMMDD.jsonl`: process lifecycle.
