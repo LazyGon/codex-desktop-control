@@ -358,6 +358,7 @@ try {
       chatgptConversationPanelMarker(conversationId),
       [
         `cg:performance:${conversationId}`,
+        `cg:history:${conversationId}`,
         `cg:conversation-status:${conversationId}`,
         `cg:unlink:${conversationId}`,
       ],
