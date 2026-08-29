@@ -11,8 +11,8 @@ import {
 
 const CONVERSATION_URL = 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-function fakeModules({ sendImpl = null, historyImpl = null } = {}) {
-  const calls = { update: 0, accessors: 0, sends: [], histories: [] };
+function fakeModules({ sendImpl = null, historyImpl = null, historyAttachmentImpl = null } = {}) {
+  const calls = { update: 0, accessors: 0, sends: [], histories: [], historyAttachments: [] };
   class Accessor {
     constructor() { calls.accessors += 1; }
     async send(options) {
@@ -37,6 +37,28 @@ function fakeModules({ sendImpl = null, historyImpl = null } = {}) {
         conversationId: CONVERSATION_URL.split('/').at(-1),
         limit: options.limit,
         turns: [],
+      };
+    }
+    async materializeHistoryAttachment(options) {
+      calls.historyAttachments.push(options);
+      if (historyAttachmentImpl) return historyAttachmentImpl(options);
+      options.onStatus?.({ operation: 'history-attachment', phase: 'completed' });
+      return {
+        schemaVersion: 1,
+        kind: 'reviewer-accessor.discord-history-attachment-materialization',
+        conversationId: CONVERSATION_URL.split('/').at(-1),
+        turnId: options.turnId,
+        role: options.role,
+        selector: options.selector,
+        descriptor: { name: 'preview.png', mimeType: 'image/png', selector: options.selector },
+        status: 'READY',
+        code: null,
+        outputRoot: options.outputRoot,
+        cleanupOwner: 'caller',
+        path: `${options.outputRoot}\\preview.png`,
+        sizeBytes: 8,
+        sha256: 'a'.repeat(64),
+        contentType: 'image/png',
       };
     }
   }
@@ -154,6 +176,35 @@ test('ChatgptService reads bounded history through the public wrapper without se
   assert.equal(fake.calls.histories[0].port, 9222);
   assert.equal(service.activeHistoryCount, 0);
   assert.equal(statuses[0][0], 'history');
+});
+
+test('ChatgptService materializes exactly one selected history attachment through the public wrapper', async () => {
+  const fake = fakeModules();
+  const statuses = [];
+  const service = new ChatgptService({
+    config: config(),
+    moduleLoader: async () => fake.modules,
+    onStatus: (...args) => statuses.push(args),
+  });
+  const selector = `dha_${'b'.repeat(64)}`;
+  const result = await service.materializeHistoryAttachment({
+    conversationUrl: CONVERSATION_URL,
+    turnId: 'dht_turn-1',
+    role: 'assistant',
+    selector,
+    outputRoot: 'C:\\output\\history-attachment',
+  });
+  assert.equal(result.selector, selector);
+  assert.equal(fake.calls.sends.length, 0);
+  assert.equal(fake.calls.histories.length, 0);
+  assert.equal(fake.calls.historyAttachments.length, 1);
+  assert.equal(fake.calls.historyAttachments[0].turnId, 'dht_turn-1');
+  assert.equal(fake.calls.historyAttachments[0].role, 'assistant');
+  assert.equal(fake.calls.historyAttachments[0].selector, selector);
+  assert.equal(fake.calls.historyAttachments[0].profile, 'dev');
+  assert.equal(fake.calls.historyAttachments[0].port, 9222);
+  assert.equal(service.activeHistoryAttachmentCount, 0);
+  assert.equal(statuses[0][0], 'history-attachment');
 });
 
 test('reviewer-accessor loader resolves the canonical package export without internal transport imports', async (context) => {

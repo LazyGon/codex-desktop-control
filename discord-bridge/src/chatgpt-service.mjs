@@ -85,6 +85,7 @@ export class ChatgptService {
     this.updateResult = null;
     this.active = new Map();
     this.activeHistory = new Map();
+    this.activeHistoryAttachments = new Map();
     this.stopping = false;
   }
 
@@ -94,6 +95,10 @@ export class ChatgptService {
 
   get activeHistoryCount() {
     return this.activeHistory.size;
+  }
+
+  get activeHistoryAttachmentCount() {
+    return this.activeHistoryAttachments.size;
   }
 
   async #modules() {
@@ -135,6 +140,7 @@ export class ChatgptService {
         configured: false,
         activeCount: this.activeCount,
         activeHistoryCount: this.activeHistoryCount,
+        activeHistoryAttachmentCount: this.activeHistoryAttachmentCount,
         profile: this.config.reviewerAccessorProfile,
         schemaVersion: modules.DISCORD_REVIEWER_ACCESSOR_SCHEMA_VERSION ?? null,
         transport: 'reviewer-accessor-discord-bridge',
@@ -154,6 +160,7 @@ export class ChatgptService {
       activeCount: this.activeCount,
       historyActive: this.activeHistory.has(identity.conversationId),
       activeHistoryCount: this.activeHistoryCount,
+      activeHistoryAttachmentCount: this.activeHistoryAttachmentCount,
       update: this.updateResult,
     };
   }
@@ -176,6 +183,9 @@ export class ChatgptService {
     }
     if (this.activeHistory.has(identity.conversationId)) {
       throw new Error('このChatGPT会話では履歴同期が進行中です。完了後に送信してください。');
+    }
+    if (this.activeHistoryAttachments.has(identity.conversationId)) {
+      throw new Error('このChatGPT会話では履歴添付の取得が進行中です。完了後に送信してください。');
     }
     const performance = normalizeChatgptPerformance(
       responsePerformance,
@@ -225,6 +235,9 @@ export class ChatgptService {
     if (this.activeHistory.has(identity.conversationId)) {
       throw new Error('このChatGPT会話では履歴同期が進行中です。');
     }
+    if (this.activeHistoryAttachments.has(identity.conversationId)) {
+      throw new Error('このChatGPT会話では履歴添付の取得が進行中です。');
+    }
     const accessor = new modules.DiscordReviewerAccessor();
     if (typeof accessor.readHistory !== 'function') {
       throw new Error('reviewer-accessorの公開履歴APIがありません。');
@@ -252,9 +265,64 @@ export class ChatgptService {
     }
   }
 
+  async materializeHistoryAttachment({
+    conversationUrl,
+    turnId,
+    role,
+    selector,
+    outputRoot,
+    signal = null,
+  }) {
+    if (this.stopping) throw new Error('ChatGPT連携は停止処理中です。');
+    const modules = await this.#modules();
+    const identity = chatgptConversationIdentity(conversationUrl);
+    if (this.active.has(identity.conversationId) || this.activeHistory.has(identity.conversationId)) {
+      throw Object.assign(new Error('このChatGPT会話では別の操作が進行中です。'), {
+        code: 'BRIDGE_CHATGPT_OPERATION_BUSY',
+      });
+    }
+    if (this.activeHistoryAttachments.has(identity.conversationId)) {
+      throw Object.assign(new Error('このChatGPT会話では別の履歴添付を取得中です。'), {
+        code: 'BRIDGE_CHATGPT_OPERATION_BUSY',
+      });
+    }
+    const accessor = new modules.DiscordReviewerAccessor();
+    if (typeof accessor.materializeHistoryAttachment !== 'function') {
+      throw new Error('reviewer-accessorの公開履歴添付APIがありません。');
+    }
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(signal?.reason ?? new Error('ChatGPT履歴添付の取得が中断されました。'));
+    if (signal?.aborted) relayAbort();
+    else signal?.addEventListener?.('abort', relayAbort, { once: true });
+    const operation = accessor.materializeHistoryAttachment({
+      conversationUrl: identity.conversationUrl,
+      turnId,
+      role,
+      selector,
+      outputRoot,
+      port: this.config.reviewerAccessorPort,
+      profile: this.config.reviewerAccessorProfile,
+      signal: controller.signal,
+      onStatus: (event) => this.onStatus('history-attachment', chatgptStatusText(event), identity),
+    });
+    this.activeHistoryAttachments.set(identity.conversationId, { controller, operation });
+    try {
+      return await operation;
+    } finally {
+      signal?.removeEventListener?.('abort', relayAbort);
+      if (this.activeHistoryAttachments.get(identity.conversationId)?.operation === operation) {
+        this.activeHistoryAttachments.delete(identity.conversationId);
+      }
+    }
+  }
+
   async stop(timeoutMs = 300_000) {
     this.stopping = true;
-    const operations = [...this.active.values(), ...this.activeHistory.values()];
+    const operations = [
+      ...this.active.values(),
+      ...this.activeHistory.values(),
+      ...this.activeHistoryAttachments.values(),
+    ];
     for (const entry of operations) {
       entry.controller.abort(new Error('Discord Bridgeを安全に停止するためChatGPT操作を中断しました。'));
     }

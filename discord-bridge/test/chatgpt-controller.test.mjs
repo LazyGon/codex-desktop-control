@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { ChannelType } from 'discord.js';
 import {
   ChatgptController,
+  chatgptHistoryAttachmentPickerPayload,
   chatgptHistoryTurnPayloads,
   chatgptLiveRecordForHistoryTurn,
   chatgptReturnedFilePayloads,
@@ -180,11 +181,16 @@ test('returned-file paths outside the caller root are rejected and retained for 
 });
 
 test('history payloads preserve long exact text as Markdown and identify already-live turns', () => {
+  const selector = `dha_${'1'.repeat(64)}`;
   const turn = {
     turnId: `dht_${'a'.repeat(64)}`,
     status: 'COMPLETED',
     incompleteReason: null,
-    user: { messageId: 'request-1', text: 'u'.repeat(3_000), attachments: [] },
+    user: {
+      messageId: 'request-1',
+      text: 'u'.repeat(3_000),
+      attachments: [{ name: 'input.png', mimeType: 'image/png', size: 12, selector }],
+    },
     assistantFinal: { messageId: 'assistant-1', text: 'answer', attachments: [] },
   };
   const payloads = chatgptHistoryTurnPayloads(turn);
@@ -192,6 +198,7 @@ test('history payloads preserve long exact text as Markdown and identify already
   assert.equal(payloads[0].files[0].attachment.length, 3_000);
   assert.match(payloads[0].files[0].name, /chatgpt-history-user/);
   assert.ok(payloads[0].content.length <= 2_000);
+  assert.equal(payloads[0].components[0].toJSON().components[0].custom_id, `cg:hfiles:u:${turn.turnId}`);
   assert.equal(payloads[1].content, '**ChatGPT · synced history**\nanswer');
   const live = chatgptLiveRecordForHistoryTurn({
     messageRecords: {
@@ -205,6 +212,38 @@ test('history payloads preserve long exact text as Markdown and identify already
   }, turn);
   assert.equal(live[0], 'discord-user-1');
   assert.equal(live[1].responseMessageIds[0], 'discord-assistant-1');
+});
+
+test('history attachment picker pages safe descriptors and preserves selector identity', () => {
+  const attachments = Array.from({ length: 26 }, (_, index) => ({
+    name: index === 0 ? 'preview.png' : `report-${index}.json`,
+    mimeType: index === 0 ? 'image/png' : 'application/json',
+    size: index + 1,
+    selector: `dha_${index.toString(16).padStart(64, '0')}`,
+  }));
+  const record = { assistantAttachments: attachments };
+  const first = chatgptHistoryAttachmentPickerPayload(record, {
+    turnId: 'dht_turn-1',
+    role: 'a',
+  });
+  const firstSelect = first.components[0].toJSON().components[0];
+  assert.equal(firstSelect.custom_id, 'cg:hfileget:a:dht_turn-1');
+  assert.equal(firstSelect.options.length, 25);
+  assert.equal(firstSelect.options[0].value, attachments[0].selector);
+  assert.equal(firstSelect.options[0].emoji.name, '🖼️');
+  const navigation = first.components[1].toJSON().components;
+  assert.equal(navigation[0].disabled, true);
+  assert.equal(navigation[1].custom_id, 'cg:hfilepage:a:1:dht_turn-1');
+
+  const second = chatgptHistoryAttachmentPickerPayload(record, {
+    turnId: 'dht_turn-1',
+    role: 'a',
+    page: 1,
+  });
+  const secondSelect = second.components[0].toJSON().components[0];
+  assert.equal(secondSelect.options.length, 1);
+  assert.equal(secondSelect.options[0].value, attachments[25].selector);
+  assert.equal(second.components[1].toJSON().components[1].disabled, true);
 });
 
 test('manual recent-history sync updates the stable turn projection instead of duplicating it', async (context) => {
@@ -300,6 +339,181 @@ test('manual recent-history sync updates the stable turn projection instead of d
   assert.equal(second.discordAssistantMessageId, first.discordAssistantMessageId);
   assert.equal(second.status, 'COMPLETED');
   assert.equal(channel._messages.get(second.discordAssistantMessageId).content, '**ChatGPT · synced history**\nfinal answer');
+  await controller.stop();
+});
+
+test('history attachment UI materializes only the selected file once and reuses its posted result', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-history-attachment-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const logDir = path.join(directory, 'logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  const stateStore = new StateStore(directory, 'guild-1');
+  const channel = fakeTextChannel('chat-channel-1', 'bot-user');
+  stateStore.setChatgptConversation(CONVERSATION_ID, {
+    channelId: channel.id,
+    name: 'History attachments',
+    conversationUrl: `https://chatgpt.com/c/${CONVERSATION_ID}`,
+    responsePerformance: 'fastest',
+  });
+  const turnId = `dht_${'c'.repeat(64)}`;
+  const selected = `dha_${'d'.repeat(64)}`;
+  const unselected = `dha_${'e'.repeat(64)}`;
+  stateStore.setChatgptHistoryRecord(CONVERSATION_ID, turnId, {
+    status: 'COMPLETED',
+    assistantAttachments: [
+      { name: 'selected.png', mimeType: 'image/png', size: 11, selector: selected },
+      { name: 'unselected.json', mimeType: 'application/json', size: 7, selector: unselected },
+    ],
+  });
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  client.channels = { fetch: async () => channel };
+  const acquisitions = [];
+  let materializedRoot = null;
+  const service = {
+    activeCount: 0,
+    activeHistoryCount: 0,
+    activeHistoryAttachmentCount: 0,
+    async materializeHistoryAttachment(options) {
+      acquisitions.push(options);
+      materializedRoot = options.outputRoot;
+      if (options.selector === unselected) {
+        return {
+          schemaVersion: 1,
+          kind: 'reviewer-accessor.discord-history-attachment-materialization',
+          conversationId: CONVERSATION_ID,
+          turnId,
+          role: 'assistant',
+          selector: unselected,
+          descriptor: { name: 'unselected.json', mimeType: 'application/json', size: 7, selector: unselected },
+          status: 'UNAVAILABLE',
+          code: 'RETURNED_FILE_CONTENT_UNAVAILABLE',
+          outputRoot: materializedRoot,
+          cleanupOwner: 'caller',
+          path: null,
+          sizeBytes: null,
+          sha256: null,
+          contentType: null,
+        };
+      }
+      fs.mkdirSync(materializedRoot, { recursive: true });
+      const filePath = path.join(materializedRoot, 'selected.png');
+      const content = Buffer.from('image-bytes');
+      fs.writeFileSync(filePath, content);
+      return {
+        schemaVersion: 1,
+        kind: 'reviewer-accessor.discord-history-attachment-materialization',
+        conversationId: CONVERSATION_ID,
+        turnId,
+        role: 'assistant',
+        selector: selected,
+        descriptor: { name: 'selected.png', mimeType: 'image/png', size: content.length, selector: selected },
+        status: 'READY',
+        code: null,
+        outputRoot: materializedRoot,
+        cleanupOwner: 'caller',
+        path: filePath,
+        sizeBytes: content.length,
+        sha256: createHash('sha256').update(content).digest('hex'),
+        contentType: 'image/png',
+      };
+    },
+    async stop() {},
+  };
+  const controller = new ChatgptController({
+    client,
+    service,
+    stateStore,
+    config: {
+      guildId: 'guild-1',
+      chatgptEnabled: true,
+      authorizedUserIds: ['authorized-user'],
+      inputAttachmentMaxBytes: 1_000_000,
+      inputAttachmentTotalMaxBytes: 1_000_000,
+      inputAttachmentMaxCount: 10,
+      discordRestTimeoutMs: 300_000,
+      chatgptLiveUpdateIntervalMs: 1_000,
+      fileShareChunkBytes: 7_500_000,
+      fileShareMaxBytes: 512_000_000,
+    },
+    logDir,
+    incomingAttachmentStore: { store: async () => [] },
+  });
+  const originalChannelSend = channel.send.bind(channel);
+  let failNextReturnedImageUpload = true;
+  channel.send = async (payload) => {
+    if (failNextReturnedImageUpload && String(payload?.content ?? '').startsWith('**ChatGPT image**')) {
+      failNextReturnedImageUpload = false;
+      throw new Error('fixture Discord upload failure');
+    }
+    return originalChannelSend(payload);
+  };
+  controller.attach();
+
+  const emitInteraction = async (customId, values = []) => {
+    const result = { reply: null, update: null, edit: null };
+    const interaction = {
+      customId,
+      commandName: null,
+      guildId: 'guild-1',
+      channelId: channel.id,
+      channel,
+      user: { id: 'authorized-user' },
+      values,
+      replied: false,
+      deferred: false,
+      isChatInputCommand: () => false,
+      reply: async (payload) => { result.reply = payload; interaction.replied = true; },
+      update: async (payload) => { result.update = payload; interaction.replied = true; },
+      editReply: async (payload) => { result.edit = payload; },
+      followUp: async (payload) => { result.edit = payload; },
+    };
+    client.emit('interactionCreate', interaction);
+    const deadline = Date.now() + 2_000;
+    while (!result.reply && !result.edit && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return result;
+  };
+
+  const picker = await emitInteraction(`cg:hfiles:a:${turnId}`);
+  assert.equal(picker.reply.ephemeral, true);
+  const select = picker.reply.components[0].toJSON().components[0];
+  assert.equal(select.options.length, 2);
+  assert.deepEqual(select.options.map((option) => option.value), [selected, unselected]);
+
+  const failedUpload = await emitInteraction(`cg:hfileget:a:${turnId}`, [selected]);
+  assert.match(failedUpload.edit.content, /投稿を完了できませんでした/);
+  assert.equal(acquisitions.length, 1);
+  assert.equal(acquisitions[0].selector, selected);
+  assert.equal(fs.existsSync(materializedRoot), true);
+  assert.equal(stateStore.chatgptHistoryRecord(CONVERSATION_ID, turnId).attachmentTransfers[selected].state, 'ready');
+
+  const first = await emitInteraction(`cg:hfileget:a:${turnId}`, [selected]);
+  assert.match(first.edit.content, /投稿しました/);
+  assert.equal(acquisitions.length, 1);
+  assert.equal(fs.existsSync(materializedRoot), false);
+  const transfer = stateStore.chatgptHistoryRecord(CONVERSATION_ID, turnId).attachmentTransfers[selected];
+  assert.equal(transfer.state, 'posted');
+  assert.equal(transfer.materialized, null);
+  const posted = channel._messages.get(transfer.messageIds[0]);
+  assert.equal(posted.content.startsWith('**ChatGPT image**'), true);
+  assert.equal(posted.files[0].name, 'selected.png');
+
+  const messageCount = channel._messages.size;
+  const second = await emitInteraction(`cg:hfileget:a:${turnId}`, [selected]);
+  assert.match(second.edit.content, /投稿済み/);
+  assert.equal(acquisitions.length, 1);
+  assert.equal(channel._messages.size, messageCount);
+
+  const unavailableFirst = await emitInteraction(`cg:hfileget:a:${turnId}`, [unselected]);
+  assert.match(unavailableFirst.edit.content, /取得できませんでした/);
+  assert.equal(acquisitions.length, 2);
+  assert.equal(acquisitions[1].selector, unselected);
+  const unavailableSecond = await emitInteraction(`cg:hfileget:a:${turnId}`, [unselected]);
+  assert.match(unavailableSecond.edit.content, /取得できませんでした/);
+  assert.equal(acquisitions.length, 2);
+  assert.equal(channel._messages.size, messageCount);
   await controller.stop();
 });
 

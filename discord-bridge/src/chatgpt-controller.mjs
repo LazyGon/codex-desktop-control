@@ -9,6 +9,8 @@ import {
   ChannelType,
   EmbedBuilder,
   PermissionFlagsBits,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
 } from 'discord.js';
 import { IncomingAttachmentStore } from './incoming-attachment-store.mjs';
 import {
@@ -38,6 +40,7 @@ const RESPONSE_CHUNK_LENGTH = 1_800;
 const MAX_RESPONSE_POSTS = 10;
 const RETURNED_FILE_MATERIALIZATION_KIND = 'reviewer-accessor.discord-returned-file-materialization';
 const DISCORD_INLINE_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp']);
+const HISTORY_ATTACHMENT_PAGE_SIZE = 25;
 const ATTACHMENT_ONLY_PROMPT = [
   '添付ファイルがユーザーからの依頼です。',
   '内容を読み取り、意図を判断して、可能な分析・回答・作業を進めてください。',
@@ -336,6 +339,7 @@ function historyAttachmentSummary(attachments = []) {
 
 function historyTextPayload(label, text, {
   attachments = [],
+  attachmentButtonId = null,
   completeFileName,
   note = null,
 } = {}) {
@@ -356,19 +360,38 @@ function historyTextPayload(label, text, {
   if (truncated) {
     payload.files = [new AttachmentBuilder(Buffer.from(exactText, 'utf8'), { name: completeFileName })];
   }
+  if (attachmentButtonId) {
+    payload.components = [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(attachmentButtonId)
+        .setLabel('添付を選ぶ')
+        .setEmoji('📎')
+        .setStyle(ButtonStyle.Secondary),
+    )];
+  }
   return payload;
+}
+
+function historyAttachmentButtonId(turnId, role, attachments) {
+  return attachments.some((attachment) => /^dha_[a-f0-9]{64}$/.test(String(attachment?.selector ?? '')))
+    ? `cg:hfiles:${role}:${turnId}`
+    : null;
 }
 
 export function chatgptHistoryTurnPayloads(turn) {
   const turnId = String(turn?.turnId ?? 'unknown');
   const suffix = turnId.slice(-12).replace(/[^a-z0-9-]/gi, '_');
+  const userAttachments = turn?.user?.attachments ?? [];
   const user = historyTextPayload('You · synced history', turn?.user?.text, {
-    attachments: turn?.user?.attachments ?? [],
+    attachments: userAttachments,
+    attachmentButtonId: historyAttachmentButtonId(turnId, 'u', userAttachments),
     completeFileName: `chatgpt-history-user-${suffix}.md`,
   });
   if (turn?.status === 'COMPLETED' && turn.assistantFinal) {
+    const assistantAttachments = turn.assistantFinal.attachments ?? [];
     return [user, historyTextPayload('ChatGPT · synced history', turn.assistantFinal.text, {
-      attachments: turn.assistantFinal.attachments ?? [],
+      attachments: assistantAttachments,
+      attachmentButtonId: historyAttachmentButtonId(turnId, 'a', assistantAttachments),
       completeFileName: `chatgpt-history-assistant-${suffix}.md`,
     })];
   }
@@ -387,6 +410,81 @@ export function chatgptLiveRecordForHistoryTurn(conversation, turn) {
     (turn?.user?.messageId && record.requestMessageId === turn.user.messageId)
     || (turn?.assistantFinal?.messageId && record.assistantMessageId === turn.assistantFinal.messageId)
   )) ?? null;
+}
+
+function historyRecordAttachments(record, role) {
+  return (role === 'u' ? record?.userAttachments : record?.assistantAttachments) ?? [];
+}
+
+export function chatgptHistoryAttachmentPickerPayload(record, {
+  turnId,
+  role,
+  page = 0,
+} = {}) {
+  const attachments = historyRecordAttachments(record, role)
+    .filter((attachment) => /^dha_[a-f0-9]{64}$/.test(String(attachment?.selector ?? '')));
+  if (attachments.length === 0) throw new Error('選択可能な履歴添付がありません。履歴をもう一度同期してください。');
+  const pageCount = Math.ceil(attachments.length / HISTORY_ATTACHMENT_PAGE_SIZE);
+  const selectedPage = Math.max(0, Math.min(Number(page) || 0, pageCount - 1));
+  const start = selectedPage * HISTORY_ATTACHMENT_PAGE_SIZE;
+  const visible = attachments.slice(start, start + HISTORY_ATTACHMENT_PAGE_SIZE);
+  const select = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`cg:hfileget:${role}:${turnId}`)
+      .setPlaceholder('取得する添付を選択')
+      .addOptions(visible.map((attachment, index) => {
+        const name = String(attachment?.name ?? attachment?.id ?? `attachment-${start + index + 1}`);
+        const details = [
+          attachment?.mimeType,
+          Number.isFinite(attachment?.size) ? formatFileSize(attachment.size) : null,
+        ].filter(Boolean).join(' · ');
+        return new StringSelectMenuOptionBuilder()
+          .setLabel(truncate(name, 100, ''))
+          .setDescription(truncate(details || `${start + index + 1}/${attachments.length}`, 100, ''))
+          .setEmoji(String(attachment?.mimeType ?? '').toLowerCase().startsWith('image/') ? '🖼️' : '📄')
+          .setValue(attachment.selector);
+      })),
+  );
+  const components = [select];
+  if (pageCount > 1) {
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`cg:hfilepage:${role}:${selectedPage - 1}:${turnId}`)
+        .setLabel('前へ')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedPage === 0),
+      new ButtonBuilder()
+        .setCustomId(`cg:hfilepage:${role}:${selectedPage + 1}:${turnId}`)
+        .setLabel('次へ')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedPage >= pageCount - 1),
+    ));
+  }
+  return messageOptions([
+    `**履歴添付を選択** · ${role === 'u' ? 'You' : 'ChatGPT'}`,
+    `${attachments.length}件${pageCount > 1 ? ` · ${selectedPage + 1}/${pageCount}ページ` : ''}`,
+  ].join('\n'), { components });
+}
+
+function historyAttachmentReturnedFileMaterialization(result) {
+  return {
+    schemaVersion: 1,
+    kind: RETURNED_FILE_MATERIALIZATION_KIND,
+    status: result.status === 'READY' ? 'COMPLETE' : 'PARTIAL',
+    outputRoot: result.outputRoot,
+    cleanupOwner: result.cleanupOwner,
+    files: [{
+      descriptor: result.descriptor,
+      materialization: {
+        status: result.status,
+        code: result.code,
+        path: result.path,
+        sizeBytes: result.sizeBytes,
+        sha256: result.sha256,
+        contentType: result.contentType,
+      },
+    }],
+  };
 }
 
 export function isUnsupportedChatgptImage(attachment) {
@@ -879,6 +977,8 @@ export class ChatgptController {
           status: turn.status,
           userSourceMessageId: turn.user?.messageId ?? null,
           assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+          userAttachments: turn.user?.attachments ?? [],
+          assistantAttachments: turn.assistantFinal?.attachments ?? [],
           discordUserMessageId: stored?.discordUserMessageId ?? live?.[0] ?? null,
           discordAssistantMessageId: stored?.discordAssistantMessageId ?? live?.[1]?.responseMessageIds?.[0] ?? null,
           syncedAt: new Date().toISOString(),
@@ -893,6 +993,8 @@ export class ChatgptController {
         status: turn.status,
         userSourceMessageId: turn.user?.messageId ?? null,
         assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+        userAttachments: turn.user?.attachments ?? [],
+        assistantAttachments: turn.assistantFinal?.attachments ?? [],
         discordUserMessageId: userResult.message.id,
         discordAssistantMessageId: stored?.discordAssistantMessageId ?? null,
         syncedAt: new Date().toISOString(),
@@ -909,6 +1011,8 @@ export class ChatgptController {
         status: turn.status,
         userSourceMessageId: turn.user?.messageId ?? null,
         assistantSourceMessageId: turn.assistantFinal?.messageId ?? null,
+        userAttachments: turn.user?.attachments ?? [],
+        assistantAttachments: turn.assistantFinal?.attachments ?? [],
         discordUserMessageId: userResult.message.id,
         discordAssistantMessageId: assistantResult.message.id,
         syncedAt: new Date().toISOString(),
@@ -919,6 +1023,214 @@ export class ChatgptController {
       lastHistorySyncTurnCount: history.turns.length,
     });
     return summary;
+  }
+
+  #setHistoryAttachmentTransfer(conversationId, turnId, selector, patch) {
+    const record = this.stateStore.chatgptHistoryRecord(conversationId, turnId);
+    if (!record) throw new Error('履歴添付の同期記録がありません。');
+    this.stateStore.setChatgptHistoryRecord(conversationId, turnId, {
+      attachmentTransfers: {
+        ...(record.attachmentTransfers ?? {}),
+        [selector]: {
+          ...(record.attachmentTransfers?.[selector] ?? {}),
+          ...patch,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    });
+  }
+
+  #historyAttachmentResultUrl(channelId, messageId) {
+    return `https://discord.com/channels/${this.config.guildId}/${channelId}/${messageId}`;
+  }
+
+  async #deliverHistoryAttachment({
+    conversation,
+    channel,
+    turnId,
+    roleCode,
+    selector,
+  }) {
+    const record = this.stateStore.chatgptHistoryRecord(conversation.conversationId, turnId);
+    if (!record) throw new Error('履歴同期記録がありません。もう一度履歴を同期してください。');
+    const role = roleCode === 'u' ? 'user' : roleCode === 'a' ? 'assistant' : null;
+    if (!role) throw new Error('履歴添付のroleが不正です。');
+    const descriptor = historyRecordAttachments(record, roleCode)
+      .find((attachment) => attachment?.selector === selector);
+    if (!descriptor || !/^dha_[a-f0-9]{64}$/.test(String(selector ?? ''))) {
+      throw new Error('選択した履歴添付は現在の同期記録にありません。');
+    }
+    const previous = record.attachmentTransfers?.[selector] ?? null;
+    if (['posted', 'posted-retained'].includes(previous?.state) && previous.messageUrl) {
+      return { status: 'already-posted', messageUrl: previous.messageUrl };
+    }
+    if (['unavailable', 'acquisition-failed'].includes(previous?.state)) {
+      return { status: previous.state, code: previous.code ?? 'DISCORD_HISTORY_ATTACHMENT_UNAVAILABLE' };
+    }
+
+    let materialized = previous?.state === 'ready' ? previous.materialized : null;
+    let outputRoot = materialized?.outputRoot ?? path.join(
+      this.returnedFileRoot,
+      String(conversation.conversationId).replace(/[^a-z0-9-]/gi, '_'),
+      `history-${turnId.slice(-12)}-${roleCode}`,
+      randomUUID(),
+    );
+    if (materialized?.status === 'READY') {
+      const reusablePath = containedReturnedFilePath(outputRoot, materialized.path);
+      const reusableStat = reusablePath
+        ? await fs.promises.stat(reusablePath).catch(() => null)
+        : null;
+      if (!reusableStat?.isFile() || reusableStat.size !== materialized.sizeBytes) materialized = null;
+    }
+    if (!materialized) {
+      if (previous) {
+        this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+          state: 'acquisition-failed',
+          code: 'BRIDGE_HISTORY_ATTACHMENT_LOCAL_COPY_MISSING',
+        });
+        return { status: 'acquisition-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_LOCAL_COPY_MISSING' };
+      }
+      try {
+        materialized = await this.service.materializeHistoryAttachment({
+          conversationUrl: conversation.conversationUrl,
+          turnId,
+          role,
+          selector,
+          outputRoot,
+        });
+      } catch (error) {
+        if (error?.code === 'BRIDGE_CHATGPT_OPERATION_BUSY') {
+          await this.#removeReturnedFileOutputRoot(outputRoot).catch(() => {});
+          return { status: 'busy', code: error.code };
+        }
+        const partial = error?.partialResult;
+        this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+          state: 'acquisition-failed',
+          code: error?.code ?? 'DISCORD_HISTORY_ATTACHMENT_FAILED',
+          materialized: partial ?? null,
+          outputRoot,
+        });
+        await this.#removeReturnedFileOutputRoot(outputRoot).catch(() => {});
+        return { status: 'acquisition-failed', code: error?.code ?? 'DISCORD_HISTORY_ATTACHMENT_FAILED' };
+      }
+      const resultValid = materialized?.schemaVersion === 1
+        && materialized.kind === 'reviewer-accessor.discord-history-attachment-materialization'
+        && materialized.conversationId === conversation.conversationId
+        && materialized.turnId === turnId
+        && materialized.role === role
+        && materialized.selector === selector
+        && materialized.descriptor?.selector === selector
+        && materialized.cleanupOwner === 'caller'
+        && path.isAbsolute(String(materialized.outputRoot ?? ''))
+        && path.resolve(String(materialized.outputRoot ?? '')) === path.resolve(outputRoot)
+        && ['READY', 'UNAVAILABLE'].includes(materialized.status);
+      if (!resultValid) {
+        this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+          state: 'acquisition-failed',
+          code: 'BRIDGE_HISTORY_ATTACHMENT_RESULT_INVALID',
+          materialized: null,
+          outputRoot,
+        });
+        await this.#removeReturnedFileOutputRoot(outputRoot).catch(() => {});
+        return { status: 'acquisition-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_RESULT_INVALID' };
+      }
+      if (materialized.status === 'UNAVAILABLE') {
+        this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+          state: 'unavailable',
+          code: materialized.code,
+          materialized,
+          outputRoot,
+        });
+        await this.#removeReturnedFileOutputRoot(outputRoot).catch(() => {});
+        return { status: 'unavailable', code: materialized.code };
+      }
+      this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+        state: 'ready',
+        code: null,
+        materialized,
+        outputRoot,
+      });
+    }
+
+    const delivery = await chatgptReturnedFilePayloads(
+      historyAttachmentReturnedFileMaterialization(materialized),
+      {
+        expectedOutputRoot: outputRoot,
+        directFileBytes: this.config.fileShareChunkBytes ?? 7_500_000,
+        maxFileBytes: this.config.fileShareMaxBytes ?? 512_000_000,
+        archiveTempRoot: this.returnedArchiveRoot,
+        archiverPath: this.config.fileShareArchiverPath,
+      },
+    );
+    if (delivery.readyCount !== 1 || !delivery.cleanupAllowed) {
+      this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+        state: 'ready',
+        code: 'BRIDGE_HISTORY_ATTACHMENT_UPLOAD_PREPARATION_FAILED',
+        materialized,
+        outputRoot,
+      });
+      return { status: 'upload-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_UPLOAD_PREPARATION_FAILED' };
+    }
+    const messageIds = [];
+    const partialMessageIds = Array.isArray(previous?.partialMessageIds)
+      ? previous.partialMessageIds
+      : [];
+    if (partialMessageIds.length > delivery.payloads.length) {
+      return { status: 'upload-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_PARTIAL_UPLOAD_INVALID' };
+    }
+    for (const messageId of partialMessageIds) {
+      const existing = await channel.messages.fetch(messageId).catch(() => null);
+      if (!existing || existing.author?.id !== this.client.user.id) {
+        return { status: 'upload-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_PARTIAL_UPLOAD_MISSING' };
+      }
+      messageIds.push(existing.id);
+    }
+    try {
+      for (const payload of delivery.payloads.slice(messageIds.length)) {
+        const sent = await channel.send(payload);
+        messageIds.push(sent.id);
+      }
+    } catch (error) {
+      this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+        state: 'ready',
+        code: 'BRIDGE_HISTORY_ATTACHMENT_DISCORD_UPLOAD_FAILED',
+        materialized,
+        outputRoot,
+        partialMessageIds: messageIds,
+      });
+      this.#log('history-attachment-upload-failed', {
+        conversationId: conversation.conversationId,
+        turnId,
+        role,
+        selector,
+        error: error.message,
+        partialMessageIds: messageIds,
+      });
+      return { status: 'upload-failed', code: 'BRIDGE_HISTORY_ATTACHMENT_DISCORD_UPLOAD_FAILED' };
+    }
+    const messageUrl = this.#historyAttachmentResultUrl(channel.id, messageIds[0]);
+    let state = 'posted-retained';
+    try {
+      await this.#removeReturnedFileOutputRoot(outputRoot);
+      state = 'posted';
+    } catch (error) {
+      this.#log('history-attachment-cleanup-failed', {
+        conversationId: conversation.conversationId,
+        turnId,
+        selector,
+        error: error.message,
+      });
+    }
+    this.#setHistoryAttachmentTransfer(conversation.conversationId, turnId, selector, {
+      state,
+      code: null,
+      materialized: state === 'posted' ? null : materialized,
+      outputRoot: state === 'posted' ? null : outputRoot,
+      messageIds,
+      messageUrl,
+      postedAt: new Date().toISOString(),
+    });
+    return { status: 'posted', messageUrl };
   }
 
   async #handleInteraction(interaction) {
@@ -969,6 +1281,59 @@ export class ChatgptController {
     }
 
     const parts = interaction.customId.split(':');
+    if (['hfiles', 'hfilepage', 'hfileget'].includes(parts[1])) {
+      const conversation = this.stateStore.chatgptConversationByChannel(interaction.channelId);
+      if (!conversation) throw new Error('この履歴添付操作は連携済みChatGPTチャンネルにありません。');
+      if (!this.#canExecuteInteraction(interaction)) return this.#rejectInteraction(interaction, false);
+      const roleCode = parts[2];
+      if (!['u', 'a'].includes(roleCode)) throw new Error('履歴添付のroleが不正です。');
+      const turnId = parts[1] === 'hfilepage' ? parts.slice(4).join(':') : parts.slice(3).join(':');
+      const record = this.stateStore.chatgptHistoryRecord(conversation.conversationId, turnId);
+      if (!record) throw new Error('履歴同期記録がありません。もう一度履歴を同期してください。');
+      if (parts[1] === 'hfiles') {
+        await interaction.reply({
+          ...chatgptHistoryAttachmentPickerPayload(record, { turnId, role: roleCode }),
+          ephemeral: true,
+        });
+        return;
+      }
+      if (parts[1] === 'hfilepage') {
+        await interaction.update(chatgptHistoryAttachmentPickerPayload(record, {
+          turnId,
+          role: roleCode,
+          page: Number(parts[3]),
+        }));
+        return;
+      }
+      const selector = interaction.values?.[0];
+      if (!selector) throw new Error('取得する履歴添付を選択してください。');
+      await interaction.update(messageOptions('履歴添付を取得しています…', { components: [] }));
+      const result = await this.#deliverHistoryAttachment({
+        conversation,
+        channel: interaction.channel,
+        turnId,
+        roleCode,
+        selector,
+      });
+      let detail;
+      if (result.status === 'posted') detail = `履歴添付を投稿しました。\n${result.messageUrl}`;
+      else if (result.status === 'already-posted') detail = `この履歴添付は投稿済みです。\n${result.messageUrl}`;
+      else if (result.status === 'unavailable') {
+        detail = `この履歴添付は取得できませんでした（\`${result.code}\`）。自動再取得はしません。`;
+      } else if (result.status === 'acquisition-failed') {
+        detail = `履歴添付の取得に失敗しました（\`${result.code}\`）。不確実な自動再取得はしません。`;
+      } else if (result.status === 'busy') {
+        detail = 'このChatGPT会話では別の操作が進行中です。完了後にもう一度選んでください。';
+      } else {
+        detail = [
+          `Discordへの投稿を完了できませんでした（\`${result.code}\`）。`,
+          '取得済みのローカルコピーは保持しています。もう一度選ぶと再取得せず投稿を再開します。',
+        ].join('\n');
+      }
+      await interaction.editReply(messageOptions(detail));
+      return;
+    }
+
     const conversationId = parts[2];
     const conversation = this.stateStore.chatgptConversation(conversationId);
     if (!conversation || conversation.channelId !== interaction.channelId) {

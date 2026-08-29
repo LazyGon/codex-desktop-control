@@ -107,8 +107,18 @@ attachment. It stores the stable `(conversationId, turnId)` identity, so pressin
 the button again or observing an `INCOMPLETE` turn become `COMPLETED` edits the
 existing projection instead of appending another copy. Turns already delivered
 live by the Bridge are recognized from their source message IDs and are not
-posted again. History attachment descriptors remain informational; this read-only
-API does not materialize historical files.
+posted again. History sync initially renders attachment descriptors only; the
+read-only history request does not materialize historical files automatically. When a
+synced user or assistant message has selectable descriptors, press
+`添付を選ぶ`, page through the menu when necessary, and choose exactly one file.
+The Bridge then invokes reviewer-accessor's one-file history materialization
+API for that stable selector. Images are posted inline, ordinary files are
+attached directly, and large files use split 7z volumes plus a SHA-256 manifest.
+Unselected files are not fetched. A posted selection is not acquired or posted
+again; `UNAVAILABLE` and acquisition failures are not retried automatically.
+If Discord upload fails after acquisition, the READY local copy is retained and
+the same selection resumes upload without another Accessor acquisition. The
+caller-owned copy is removed after all corresponding Discord posts succeed.
 If Bridge state becomes uncertain after ChatGPT submission, the message is
 marked uncertain and is not retried automatically; manually inspect the
 ChatGPT conversation before deciding whether to send again.

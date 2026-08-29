@@ -185,6 +185,14 @@ outbound connection to Discord.
   exact durable assistant finals, and upserts by the stable
   `(conversationId, turnId)` key. Repeated syncs and an incomplete-to-completed
   transition edit the existing two-message projection instead of duplicating it.
+  A synced message with safe attachment descriptors provides `添付を選ぶ`;
+  the user chooses one descriptor from a paged menu, and only that selection is
+  materialized through reviewer-accessor and posted. Images render inline,
+  ordinary files use the normal Discord upload, and larger files use the same
+  split-7z transfer. A stable selector prevents stale choices from resolving to
+  another file. `UNAVAILABLE` and uncertain acquisition failures are recorded
+  without automatic retry; a locally READY copy is reused after an upload
+  failure and is removed only after all of its Discord posts succeed.
 - When completion reporting is enabled for the task, mentions the configured
   user with `タスクが完了しました。` on the first line in `codex-completions`,
   posts a one-line final-answer summary on the second line, and uses the bare
@@ -262,7 +270,9 @@ outbound connection to Discord.
 | `/chatgpt status` | Inspect reviewer-accessor and linked-conversation session state |
 
 Each linked conversation panel also provides `最近5ターン同期`. It never sends a
-Chat message and does not retry a failed history read.
+Chat message and does not retry a failed history read. Synced messages that
+contain selectable attachment descriptors provide `添付を選ぶ`; selecting one
+fetches only that file and never the unselected descriptors.
 
 Each user instruction remains one orange card with `Task`, `Turn`, and `Message`
 identity fields. Live commentary uses the same identity fields with a distinct
