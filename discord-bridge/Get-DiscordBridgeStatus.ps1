@@ -52,6 +52,12 @@ try {
 catch {
     $readyStatus = $_.Exception.Message
 }
+$gateway = if ($runtime -and $runtime.PSObject.Properties.Name -contains 'discordGateway') {
+    $runtime.discordGateway
+}
+else {
+    $null
+}
 
 $status = [ordered]@{
     ProcessAlive = $processAlive
@@ -59,10 +65,13 @@ $status = [ordered]@{
     HostProcessAlive = $hostProcess.Count -eq 1
     HostPid = if ($hostProcess.Count -eq 1) { $hostProcess[0].Id } else { $null }
     HostProcessName = if ($hostProcess.Count -eq 1) { $hostProcess[0].ProcessName } else { $null }
-    Phase = if ($runtime) { $runtime.phase } else { 'not-started' }
-    DiscordReady = if ($runtime) { $runtime.discordReady } else { $false }
+    Phase = if (-not $runtime) { 'not-started' } elseif (-not $processAlive -and $runtime.phase -eq 'running') { 'stopped-unexpectedly' } else { $runtime.phase }
+    DiscordReady = if ($processAlive -and $runtime) { $runtime.discordReady } else { $false }
     DiscordUser = if ($runtime) { $runtime.discordUser } else { $null }
-    CodexConnected = if ($runtime -and $runtime.codex) { $runtime.codex.connected } else { $false }
+    DiscordGatewayState = if (-not $processAlive) { 'offline' } elseif ($gateway) { $gateway.state } elseif ($runtime.discordReady) { 'ready' } else { 'starting' }
+    DiscordGatewayErrorCount = if ($processAlive -and $gateway) { $gateway.errorCount } else { 0 }
+    DiscordGatewayRecycleDueAt = if ($processAlive -and $gateway) { $gateway.recycleDueAt } else { $null }
+    CodexConnected = if ($processAlive -and $runtime -and $runtime.codex) { $runtime.codex.connected } else { $false }
     AppServerReady = $ready
     AppServerStatus = $readyStatus
     Endpoint = $endpoint

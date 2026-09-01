@@ -160,8 +160,13 @@ outbound connection to Discord.
   REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and TLS as
   recoverable. Initial Discord login and setup retry with exponential backoff
   up to 300 seconds; a network timeout reaching the process error boundary is
-  logged without terminating the Bridge. Authentication, certificate,
-  configuration, and programming errors remain fatal.
+  logged without terminating the Bridge. A continuous high-frequency Gateway
+  handshake failure is different: status changes to `reconnecting`, duplicate
+  errors are summarized at most once per minute, and only after a full five
+  minutes the Bridge exits gracefully with failure so the installed Scheduled
+  Task creates a fresh Gateway session. Healthy connections are never recycled
+  on a timer. Authentication, certificate, configuration, and programming
+  errors remain fatal.
 - Uses `reviewer-accessor`'s explicit conversation URL, response-performance,
   cross-process turn lock, shared Chrome-for-Testing profile, and exported
   `chat-direct-client/discord-bridge` wrapper for ordinary ChatGPT. The Bridge

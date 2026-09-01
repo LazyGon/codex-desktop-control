@@ -32,6 +32,7 @@ const TRANSIENT_NAMES = new Set([
 ]);
 
 const TRANSIENT_MESSAGES = [
+  /unexpected server response:\s*5\d\d\b/i,
   /opening handshake has timed out/i,
   /websocket open timed out/i,
   /unable to connect to (?:wss?|https?):\/\//i,

@@ -16,6 +16,7 @@ import { ChatgptService } from './chatgpt-service.mjs';
 import { ChatgptController } from './chatgpt-controller.mjs';
 import { isTransientCommunicationError } from './communication-error.mjs';
 import { DiscordController } from './discord-controller.mjs';
+import { DiscordGatewayHealth } from './discord-gateway-health.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
 import { StateStore } from './state-store.mjs';
 import {
@@ -98,14 +99,20 @@ const chatgptController = new ChatgptController({
   config,
   logDir,
 });
+const gatewayHealth = new DiscordGatewayHealth({
+  recycleAfterMs: config.discordConnectTimeoutMs,
+});
 controller.attach();
 chatgptController.attach();
 
 let shuttingDown = false;
 let runtimeTimer = null;
 let stopTimer = null;
+let runtimePhase = 'starting';
 
 function writeRuntime(phase, extra = {}) {
+  runtimePhase = phase;
+  const discordGateway = gatewayHealth.snapshot();
   atomicWriteJson(runtimePath, {
     schemaVersion: 1,
     phase,
@@ -113,8 +120,9 @@ function writeRuntime(phase, extra = {}) {
     bridgeRoot,
     startedAt: startupAt,
     updatedAt: nowIso(),
-    discordReady: client.isReady(),
+    discordReady: client.isReady() && discordGateway.ready,
     discordUser: client.user?.tag ?? null,
+    discordGateway,
     codex: codex.status(),
     chatgpt: chatgptController.status(),
     ...extra,
@@ -165,7 +173,11 @@ async function shutdown(reason, exitCode = 0) {
     'chatgpt-controller-stop-error',
     { error: error.message },
   ));
-  client.destroy();
+  await client.destroy().catch((error) => appendJsonLine(
+    processLog,
+    'discord-client-destroy-error',
+    { error: error.message },
+  ));
   await discordRestAgent.close().catch((error) => appendJsonLine(
     processLog,
     'discord-agent-close-error',
@@ -232,8 +244,49 @@ async function loginDiscord() {
   }
 }
 
+function markGatewayReady(source, shardId) {
+  const result = gatewayHealth.markReady({ shardId });
+  if (result.recovery) {
+    appendJsonLine(processLog, 'discord-gateway-recovered', {
+      source,
+      shardId,
+      ...result.recovery,
+    });
+  }
+  writeRuntime(runtimePhase);
+}
+
 client.on('error', (error) => appendJsonLine(processLog, 'discord-error', { error: error.stack ?? error.message }));
-client.on('shardError', (error, shardId) => appendJsonLine(processLog, 'discord-shard-error', { shardId, error: error.message }));
+client.on('shardReady', (shardId) => markGatewayReady('shard-ready', shardId));
+client.on('shardResume', (shardId) => markGatewayReady('shard-resume', shardId));
+client.on('shardReconnecting', (shardId) => {
+  gatewayHealth.markReconnecting({ shardId });
+  writeRuntime(runtimePhase);
+});
+client.on('shardError', (error, shardId) => {
+  const result = gatewayHealth.recordError(error, { shardId });
+  if (result.shouldLog) {
+    appendJsonLine(processLog, 'discord-shard-error', {
+      shardId,
+      error: error.message,
+      tracked: result.tracked,
+      errorCount: result.snapshot.errorCount,
+      suppressedErrors: result.suppressedErrors,
+      firstErrorAt: result.snapshot.firstErrorAt,
+      recycleDueAt: result.snapshot.recycleDueAt,
+    });
+  }
+  if (result.snapshot.errorCount === 1) writeRuntime(runtimePhase);
+  if (result.shouldRecycle) {
+    appendJsonLine(processLog, 'discord-gateway-recycle-requested', {
+      shardId,
+      errorCount: result.snapshot.errorCount,
+      firstErrorAt: result.snapshot.firstErrorAt,
+      lastErrorAt: result.snapshot.lastErrorAt,
+    });
+    shutdown('Discord gateway remained unavailable for five minutes', 1).catch(() => {});
+  }
+});
 
 process.on('SIGINT', () => shutdown('SIGINT').catch(() => {}));
 process.on('SIGTERM', () => shutdown('SIGTERM').catch(() => {}));

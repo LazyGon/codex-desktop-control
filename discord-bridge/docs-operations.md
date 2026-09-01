@@ -357,9 +357,18 @@ reconciliation backfills user cards and final assistant cards only. Commentary
 is captured while the turn is actively subscribed; already-persisted
 commentary cards are preserved by task, turn, and item identity.
 Transient gateway, REST, app-server, attachment-fetch, DNS, TCP, and TLS
-failures do not terminate the Bridge even if they reach the process error
-boundary. Initial Discord login and setup retry with exponential backoff capped
-at five minutes. Authentication, certificate, configuration, and programming
+failures are retried without terminating the Bridge when they are isolated or
+already making progress. Initial Discord login and setup retry with exponential
+backoff capped at five minutes. If one Gateway shard instead emits continuous
+transient handshake errors with no Ready/Resume recovery, runtime status changes
+to `reconnecting` immediately and reports the error count and recycle deadline.
+After—not before—five uninterrupted minutes and at least 30 errors, the Bridge
+performs its normal graceful shutdown with a failure result. The installed
+Scheduled Task starts a clean Gateway session after its one-minute failure
+interval; the delivery outbox then recovers messages received during the gap.
+There is no periodic reconnect while Gateway heartbeats are healthy. Recovered
+error floods are summarized at most once per minute rather than writing every
+duplicate error. Authentication, certificate, configuration, and programming
 errors remain fatal and rely on the scheduled-task restart policy.
 The confirmed `履歴復元` control is the only bounded exception: it can backfill
 commentary and available reasoning summaries for completed turns from the last
@@ -372,7 +381,11 @@ persisted separately, and visible identity markers are checked during recovery,
 so interruption between Discord delivery and local state persistence does not
 duplicate a turn.
 
-Use `Get-DiscordBridgeStatus.ps1` when the bot appears offline. Relevant files:
+Use `Get-DiscordBridgeStatus.ps1` when the bot appears offline. Its
+`DiscordGatewayState`, `DiscordGatewayErrorCount`, and
+`DiscordGatewayRecycleDueAt` fields distinguish a healthy connection from a
+stale reconnect loop; `DiscordReady` and `CodexConnected` are forced false when
+the Bridge PID is no longer alive. Relevant files:
 
 - `data\runtime.json`: process, Discord, and app-server status.
 - `data\state.json`: project/category, task/channel, and turn/message identity

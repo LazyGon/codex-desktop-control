@@ -259,9 +259,12 @@ task result.
 Transient communication failures are recoverable across the Discord gateway,
 Discord REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and
 TLS. Initial login/setup retries use exponential backoff capped at five
-minutes, and a network timeout reaching the process error boundary is logged
-without terminating the Bridge. Authentication, certificate, configuration,
-and programming errors remain fatal.
+minutes, and an isolated network timeout reaching the process error boundary is
+logged without terminating the Bridge. A continuous high-frequency Gateway
+handshake failure marks Discord unready and, only after five uninterrupted
+minutes, gracefully recycles the Bridge through the Scheduled Task. Healthy
+Gateway sessions are not periodically reconnected. Authentication, certificate,
+configuration, and programming errors remain fatal.
 
 No Discord project registration or catch-up command is required. The bridge
 paginates through active and archived task lists, reconciles categories every

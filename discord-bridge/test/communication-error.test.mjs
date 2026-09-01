@@ -4,6 +4,7 @@ import { codexRetryStatusText, isTransientCommunicationError } from '../src/comm
 
 test('classifies transient failures across every Bridge communication transport', () => {
   const gatewayHandshake = new Error('Opening handshake has timed out');
+  const gatewayUnavailable = new Error('Unexpected server response: 503');
   const discordRest = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
   const appServer = new Error('Codex app-server disconnected (1006).');
   const attachmentFetch = new TypeError('fetch failed', {
@@ -18,6 +19,7 @@ test('classifies transient failures across every Bridge communication transport'
 
   for (const error of [
     gatewayHandshake,
+    gatewayUnavailable,
     discordRest,
     appServer,
     attachmentFetch,
