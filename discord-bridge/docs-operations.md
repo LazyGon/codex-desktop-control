@@ -225,9 +225,11 @@ generically:
   `send_message_to_thread`, `list_projects`, local-project `create_thread`,
   `set_thread_archived`, `set_thread_title`, and same-directory `fork_thread`.
 - Supported through the bounded local store: `automation_update`.
+- Supported from the validated installed Codex runtime directly through the Bridge:
+  `load_workspace_dependencies`.
 - Rejected with a specific reason: Desktop-only pinning, projectless/worktree
   creation, worktree/remote handoff, cursor-based background waits, Desktop
-  navigation/terminal/runtime-dependency operations, unknown `codex_app` tools,
+  navigation/terminal operations, unknown `codex_app` tools,
   and tools owned by external connectors.
 
 This rejection is intentional: the Bridge does not inherit a Desktop UI

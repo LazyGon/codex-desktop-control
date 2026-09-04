@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DiscordController } from '../src/discord-controller.mjs';
+import { ClientToolUnavailableError } from '../src/client-tool-router.mjs';
 
 test('codex_app automation_update is handled through the local automation store', async (context) => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-automation-routing-'));
@@ -124,6 +125,111 @@ test('automation errors are returned to Codex without posting the generic Discor
   assert.equal(response.result.success, false);
   assert.match(response.result.contentItems[0].text, /Automation not found/);
   assert.equal(channelFetches, 0);
+});
+
+test('unavailable client tools post a bounded Japanese notice without internal error text', async (context) => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-client-tool-notice-'));
+  context.after(() => fs.rmSync(logDir, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  const codex = new EventEmitter();
+  codex.status = () => ({ endpoint: 'ws://127.0.0.1:8798' });
+  const messages = [];
+  client.channels = {
+    fetch: async () => ({
+      send: async (options) => {
+        messages.push(options);
+        return { id: 'notice' };
+      },
+    }),
+  };
+  const ledger = new Map();
+  const stateStore = {
+    binding: () => ({ channelId: 'task-channel' }),
+    clientToolRequest: (key) => ledger.get(key) ?? null,
+    setClientToolRequest: (key, value) => ledger.set(key, { ...ledger.get(key), ...value }),
+  };
+  const completed = new Promise((resolve) => {
+    codex.respondToServerRequest = (requestId, result) => resolve({ requestId, result });
+  });
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore,
+    config: {},
+    logDir,
+    clientToolRouter: {
+      execute: async () => {
+        throw new ClientToolUnavailableError('raw internal client-tool detail');
+      },
+    },
+    desktopClientInspector: () => ({
+      state: 'absent',
+      generation: 'test-server',
+      reason: 'no-desktop-process-alive',
+    }),
+  });
+  controller.attach();
+
+  codex.emit('serverRequest', {
+    id: 44,
+    method: 'item/tool/call',
+    params: {
+      threadId: 'thread-123',
+      namespace: 'codex_app',
+      tool: 'load_workspace_dependencies',
+      arguments: {},
+    },
+  });
+  const response = await completed;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(response.result.success, false);
+  assert.match(response.result.contentItems[0].text, /raw internal client-tool detail/);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].content, /Desktop機能を利用できませんでした/);
+  assert.doesNotMatch(messages[0].content, /raw internal|Client tool unavailable/);
+  await controller.stop();
+});
+
+test('workspace dependencies return plain text immediately without Desktop ownership arbitration', async (context) => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-workspace-dependency-routing-'));
+  context.after(() => fs.rmSync(logDir, { recursive: true, force: true }));
+  const client = new EventEmitter();
+  const codex = new EventEmitter();
+  const completed = new Promise((resolve) => {
+    codex.respondToServerRequest = (requestId, result) => resolve({ requestId, result });
+  });
+  let ownershipInspections = 0;
+  const controller = new DiscordController({
+    client,
+    codex,
+    stateStore: { binding: () => null },
+    config: {},
+    logDir,
+    clientToolRouter: { execute: async () => 'workspace dependency paths' },
+    desktopClientInspector: () => {
+      ownershipInspections += 1;
+      return { state: 'ambiguous', generation: null, reason: 'should-not-run' };
+    },
+  });
+  controller.attach();
+
+  codex.emit('serverRequest', {
+    id: 45,
+    method: 'item/tool/call',
+    params: {
+      threadId: 'thread-123',
+      namespace: 'codex_app',
+      tool: 'load_workspace_dependencies',
+      arguments: {},
+    },
+  });
+  const response = await completed;
+
+  assert.equal(ownershipInspections, 0);
+  assert.equal(response.result.success, true);
+  assert.equal(response.result.contentItems[0].text, 'workspace dependency paths');
+  await controller.stop();
 });
 
 test('effectful codex_app tools are left to a verified Desktop owner', async (context) => {

@@ -1,4 +1,5 @@
 import { randomKey } from './util.mjs';
+import { loadWorkspaceDependencies } from './workspace-dependencies.mjs';
 
 const OUTPUT_FIELDS = new Set(['aggregatedOutput', 'output', 'stdout', 'stderr']);
 
@@ -83,9 +84,14 @@ function targetThreadId(args, context) {
 }
 
 export class ClientToolRouter {
-  constructor({ codex, automationStore }) {
+  constructor({
+    codex,
+    automationStore,
+    workspaceDependencyLoader = loadWorkspaceDependencies,
+  }) {
     this.codex = codex;
     this.automationStore = automationStore;
+    this.workspaceDependencyLoader = workspaceDependencyLoader;
   }
 
   async execute(namespace, tool, rawArguments, context = {}) {
@@ -114,6 +120,8 @@ export class ClientToolRouter {
         return { projects: this.automationStore.listProjects() };
       case 'create_thread':
         return this.#createThread(args);
+      case 'load_workspace_dependencies':
+        return this.#loadWorkspaceDependencies();
       case 'set_thread_pinned':
         throw new ClientToolUnavailableError(
           'set_thread_pinned is Desktop-local UI state and has no equivalent Codex app-server operation.',
@@ -129,7 +137,6 @@ export class ClientToolRouter {
         );
       case 'navigate_to_codex_page':
       case 'read_thread_terminal':
-      case 'load_workspace_dependencies':
         throw new ClientToolUnavailableError(
           `${tool} operates on the interactive Codex Desktop client and is not meaningful through Discord.`,
         );
@@ -156,6 +163,16 @@ export class ClientToolRouter {
       threads.push(...(archived.data ?? []).map((thread) => threadSummary(thread, true)));
     }
     return { threads };
+  }
+
+  async #loadWorkspaceDependencies() {
+    try {
+      return await this.workspaceDependencyLoader();
+    } catch (error) {
+      throw new ClientToolUnavailableError(
+        `Bundled workspace dependencies could not be located: ${error.message}`,
+      );
+    }
   }
 
   async #readThread(args) {

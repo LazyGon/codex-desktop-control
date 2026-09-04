@@ -143,7 +143,9 @@ outbound connection to Discord.
 - Handles app-server-backed Codex Desktop client tools for task/project
   listing, task reads, follow-up delivery, local-project task creation,
   archive/restore, rename, same-directory fork, and confirmed automation
-  create/update/view/delete. Automation files are validated, written atomically
+  create/update/view/delete. The read-only workspace dependency locator returns
+  the validated installed bundled runtime paths directly through the Bridge.
+  Automation files are validated, written atomically
   under the current Codex home, and heartbeat targets default to the calling
   task. Desktop-only pinning, projectless/worktree creation, handoff/wait
   orchestration, interactive Desktop navigation/terminal access, and tools

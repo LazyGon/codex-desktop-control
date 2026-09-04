@@ -3,6 +3,7 @@ import { readJsonIfPresent } from './util.mjs';
 const READ_ONLY_CODEX_APP_TOOLS = new Set([
   'list_projects',
   'list_threads',
+  'load_workspace_dependencies',
   'read_thread',
 ]);
 

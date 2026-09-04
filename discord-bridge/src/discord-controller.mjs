@@ -8557,7 +8557,10 @@ export class DiscordController {
         );
         response = {
           success: true,
-          contentItems: [{ type: 'inputText', text: JSON.stringify(result) }],
+          contentItems: [{
+            type: 'inputText',
+            text: typeof result === 'string' ? result : JSON.stringify(result),
+          }],
         };
         this.#setClientToolRequest(ledgerKey, { status: 'completed', response });
         this.codex.respondToServerRequest(request.id, response);
@@ -8582,7 +8585,7 @@ export class DiscordController {
         if (binding && error instanceof ClientToolUnavailableError) {
           await this.#postTaskMessage(
             binding,
-            `**Client tool unavailable through Discord**\n\`${namespace}/${tool}\`\n${error.message}`,
+            `**Desktop機能を利用できませんでした**\n\`${namespace}/${tool}\`\nこの機能だけを実行できませんでした。エージェントには失敗理由を返しているため、別の方法で続行できます。`,
           );
         }
       }

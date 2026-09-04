@@ -5,7 +5,7 @@ import {
   ClientToolUnavailableError,
 } from '../src/client-tool-router.mjs';
 
-function fixture() {
+function fixture({ workspaceDependencyLoader = async () => 'workspace dependency paths' } = {}) {
   const calls = [];
   const codex = {
     listThreads: async (args) => {
@@ -74,7 +74,7 @@ function fixture() {
   };
   return {
     calls,
-    router: new ClientToolRouter({ codex, automationStore }),
+    router: new ClientToolRouter({ codex, automationStore, workspaceDependencyLoader }),
   };
 }
 
@@ -138,6 +138,25 @@ test('client tool router covers app-server-backed Codex Desktop tools', async ()
     { threadId: 'active-1' },
   );
   assert.equal(automation.automation.id, 'youtube');
+
+  assert.equal(
+    await router.execute('codex_app', 'load_workspace_dependencies', {}),
+    'workspace dependency paths',
+  );
+});
+
+test('workspace dependency loader failures remain bounded client-tool failures', async () => {
+  const { router } = fixture({
+    workspaceDependencyLoader: async () => {
+      throw new Error('runtime manifest unavailable');
+    },
+  });
+
+  await assert.rejects(
+    router.execute('codex_app', 'load_workspace_dependencies', {}),
+    (error) => error instanceof ClientToolUnavailableError
+      && /runtime manifest unavailable/.test(error.message),
+  );
 });
 
 test('client tool router fails closed for Desktop-only and connector tools', async () => {

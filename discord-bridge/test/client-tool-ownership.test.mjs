@@ -10,7 +10,12 @@ import {
 } from '../src/client-tool-ownership.mjs';
 
 test('only known read-only codex_app tools can run without an exclusive owner', () => {
-  for (const tool of ['list_projects', 'list_threads', 'read_thread']) {
+  for (const tool of [
+    'list_projects',
+    'list_threads',
+    'load_workspace_dependencies',
+    'read_thread',
+  ]) {
     assert.equal(requiresExclusiveClientToolOwner('codex_app', tool), false);
   }
   for (const tool of [
