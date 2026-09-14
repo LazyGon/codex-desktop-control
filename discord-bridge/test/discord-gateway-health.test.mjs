@@ -5,31 +5,27 @@ import {
   DiscordGatewayHealth,
 } from '../src/discord-gateway-health.mjs';
 
-test('sustained transient Gateway errors request one recycle only after five minutes', () => {
+test('one unresolved transient Gateway error requests one recycle after five minutes', () => {
   const health = new DiscordGatewayHealth();
   health.markReady({ at: 0, shardId: 0 });
-  let result = null;
-  for (let index = 0; index <= 30; index += 1) {
-    result = health.recordError(new Error('Unexpected server response: 503'), {
-      at: index * 10_000,
-      shardId: 0,
-    });
-    if (index < 30) assert.equal(result.shouldRecycle, false);
-  }
+  const first = health.recordError(new Error('Opening handshake has timed out'), {
+    at: 1_000,
+    shardId: 0,
+  });
+  assert.equal(first.shouldRecycle, false);
+  assert.equal(health.claimRecycleIfDue({ at: 300_999 }).shouldRecycle, false);
+  const result = health.claimRecycleIfDue({ at: 301_000 });
   assert.equal(result.shouldRecycle, true);
   assert.equal(result.snapshot.state, 'recycling');
-  assert.equal(result.snapshot.errorCount, 31);
+  assert.equal(result.snapshot.errorCount, 1);
   assert.equal(result.snapshot.recycleIssued, true);
   assert.equal(result.snapshot.recycleDueAt, null);
 
-  const repeated = health.recordError(new Error('Unexpected server response: 503'), {
-    at: DEFAULT_GATEWAY_RECYCLE_AFTER_MS + 10_000,
-    shardId: 0,
-  });
+  const repeated = health.claimRecycleIfDue({ at: DEFAULT_GATEWAY_RECYCLE_AFTER_MS + 10_000 });
   assert.equal(repeated.shouldRecycle, false);
 });
 
-test('Gateway health rate-limits error logs and resets only after recovery or a quiet gap', () => {
+test('Gateway health rate-limits error logs and keeps the incident across a quiet gap', () => {
   const health = new DiscordGatewayHealth();
   health.markReady({ at: 0, shardId: 0 });
   const first = health.recordError(new Error('Unexpected server response: 503'), { at: 1_000, shardId: 0 });
@@ -49,8 +45,16 @@ test('Gateway health rate-limits error logs and resets only after recovery or a 
 
   health.recordError(new Error('Unexpected server response: 503'), { at: 70_000, shardId: 0 });
   const afterGap = health.recordError(new Error('Unexpected server response: 503'), { at: 101_000, shardId: 0 });
-  assert.equal(afterGap.snapshot.errorCount, 1);
-  assert.equal(afterGap.snapshot.firstErrorAt, new Date(101_000).toISOString());
+  assert.equal(afterGap.snapshot.errorCount, 2);
+  assert.equal(afterGap.snapshot.firstErrorAt, new Date(70_000).toISOString());
+});
+
+test('Gateway recovery cancels a pending deadline claim', () => {
+  const health = new DiscordGatewayHealth();
+  health.markReady({ at: 0, shardId: 0 });
+  health.recordError(new Error('Opening handshake has timed out'), { at: 1_000, shardId: 0 });
+  health.markReady({ at: 20_000, shardId: 0 });
+  assert.equal(health.claimRecycleIfDue({ at: 301_000 }).shouldRecycle, false);
 });
 
 test('non-transient Gateway errors remain visible without entering automatic recycle state', () => {

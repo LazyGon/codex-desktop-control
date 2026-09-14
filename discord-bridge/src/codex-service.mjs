@@ -90,6 +90,16 @@ export function subscriptionRestoreThread(runtimeThread, turns) {
   };
 }
 
+export function subscriptionRestoreNeedsFullItems(binding, thread) {
+  const turns = thread?.turns ?? [];
+  if (turns.some((turn) => turn.status === 'inProgress')) return true;
+  const completed = [...turns].reverse().find((turn) => turn.status !== 'inProgress');
+  if (!completed) return false;
+  return completed.id !== binding.lastCompletedTurnId
+    || (completed.status === 'completed'
+      && completed.id !== binding.lastNotifiedCompletedTurnId);
+}
+
 export class CodexService extends EventEmitter {
   constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn }) {
     super();
@@ -105,6 +115,8 @@ export class CodexService extends EventEmitter {
     this.connectionAttempt = 0;
     this.connectedAt = null;
     this.subscriptionRestoreInProgress = false;
+    this.subscribedThreadIds = new Set();
+    this.subscriptionChangePollPromise = null;
     this.lastLauncherStartAt = 0;
     this.stopPromise = new Promise((resolve) => {
       this.resolveStop = resolve;
@@ -204,7 +216,17 @@ export class CodexService extends EventEmitter {
 
   async resumeThread(threadId) {
     this.#requireClient();
-    return this.client.call('thread/resume', { threadId, excludeTurns: true }, APP_SERVER_OPERATION_TIMEOUT_MS);
+    const result = await this.client.call(
+      'thread/resume',
+      { threadId, excludeTurns: true },
+      APP_SERVER_OPERATION_TIMEOUT_MS,
+    );
+    this.subscribedThreadIds.add(threadId);
+    return result;
+  }
+
+  isSubscribed(threadId) {
+    return this.subscribedThreadIds.has(threadId);
   }
 
   async updateThreadSettings(threadId, patch) {
@@ -566,6 +588,7 @@ export class CodexService extends EventEmitter {
         if (!connected) break;
         this.connectionAttempt = 0;
         this.connectedAt = new Date().toISOString();
+        this.subscribedThreadIds.clear();
         this.subscriptionRestoreInProgress = true;
         this.emit('connectionState', { state: 'connected', ...this.status(), source: endpoint.source });
         this.#log('connected', { endpoint: endpoint.url });
@@ -585,6 +608,7 @@ export class CodexService extends EventEmitter {
         if (this.client === client) this.client = null;
         this.connectedAt = null;
         this.subscriptionRestoreInProgress = false;
+        this.subscribedThreadIds.clear();
       }
 
       if (this.stopping) break;
@@ -595,22 +619,52 @@ export class CodexService extends EventEmitter {
   }
 
   async #restoreSubscriptions() {
-    const bindings = subscriptionRestoreBindings(this.stateStore.bindings());
+    const bindings = subscriptionRestoreBindings(this.stateStore.bindings())
+      .filter((binding) => !this.isSubscribed(binding.threadId));
     // A reconnect must not hydrate several unbounded histories on one
     // WebSocket. Newer app-server builds can close that overloaded connection,
-    // causing every restore to restart from the beginning. Resume one task at
-    // a time and request only the bounded recent turns needed for live-card and
-    // missed-completion reconciliation.
-    const outcome = { total: bindings.length, restored: 0, failed: 0 };
+    // causing every restore to restart from the beginning. Inspect bounded
+    // metadata first, and resume only a task with an active turn or a missed
+    // completion. Unchanged idle tasks remain lazy until delivery or a later
+    // metadata poll observes activity.
+    const outcome = {
+      total: bindings.length,
+      restored: 0,
+      skipped: 0,
+      failed: 0,
+    };
     await forEachConcurrent(bindings, 1, async (binding) => {
       try {
+        const summaryResult = await this.recentTurns(binding.threadId, {
+          limit: 2,
+          itemsView: 'notLoaded',
+        });
+        const summaryThread = threadForSubscriptionRestore(
+          binding,
+          subscriptionRestoreThread({
+            id: binding.threadId,
+            name: binding.name ?? null,
+            cwd: binding.cwd ?? null,
+            path: binding.sessionPath ?? null,
+            status: {
+              type: (summaryResult.data ?? []).some((turn) => turn.status === 'inProgress')
+                ? 'active'
+                : 'idle',
+            },
+          }, summaryResult.data),
+        );
+        if (!subscriptionRestoreNeedsFullItems(binding, summaryThread)) {
+          outcome.skipped += 1;
+          return;
+        }
         const runtime = await this.resumeThread(binding.threadId);
-        const result = await this.recentTurns(binding.threadId);
+        const hydratedResult = await this.recentTurns(binding.threadId);
         const thread = threadForSubscriptionRestore(
           binding,
-          subscriptionRestoreThread(runtime.thread, result.data),
+          subscriptionRestoreThread(runtime.thread, hydratedResult.data),
         );
-        const completed = [...(thread.turns ?? [])].reverse().find((turn) => turn.status !== 'inProgress');
+        const completed = [...(thread.turns ?? [])].reverse()
+          .find((turn) => turn.status !== 'inProgress');
         const finalText = finalTextFromTurn(
           completed,
           completionTextFromSession(thread.path, completed?.id),
@@ -639,6 +693,21 @@ export class CodexService extends EventEmitter {
       }
     });
     return outcome;
+  }
+
+  restoreChangedSubscriptions() {
+    if (this.stopping || !this.connected || this.subscriptionRestoreInProgress) {
+      return Promise.resolve(null);
+    }
+    if (this.subscriptionChangePollPromise) return this.subscriptionChangePollPromise;
+    const poll = this.#restoreSubscriptions()
+      .finally(() => {
+        if (this.subscriptionChangePollPromise === poll) {
+          this.subscriptionChangePollPromise = null;
+        }
+      });
+    this.subscriptionChangePollPromise = poll;
+    return poll;
   }
 
   #requireClient() {

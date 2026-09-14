@@ -548,6 +548,9 @@ function Get-ReusableRuntimeState {
         ) {
             throw 'The recorded runtime does not match the installed Codex package and this launcher cache.'
         }
+        if ($state.desktopConnectionVerified -ne $true) {
+            throw 'The recorded shared runtime has not completed Desktop connection verification.'
+        }
 
         $listener = @(
             Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |

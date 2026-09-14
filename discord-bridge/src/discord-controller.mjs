@@ -113,7 +113,6 @@ import {
 } from './client-tool-ownership.mjs';
 import { TextTransferStore } from './text-transfer-store.mjs';
 import {
-  appServerProjectKey,
   projectDescriptorForThread,
   projectDescriptorsFromSnapshot,
   projectForThread,
@@ -324,6 +323,15 @@ export function managedProjectCategoryCleanupPlan(categories, active) {
     remove: categories.filter((category) => !keepIds.has(category.id)),
     removeProject: false,
   };
+}
+
+export function activeProjectCategoryKeys(state) {
+  return new Set(Object.values(state?.bindings ?? {})
+    .filter((binding) => !binding.hidden
+      && !binding.archived
+      && binding.projectKey
+      && !state?.hiddenProjects?.[binding.projectKey])
+    .map((binding) => binding.projectKey));
 }
 
 export function managedArchiveCategoryCleanupPlan(categories, capacity = 50) {
@@ -3976,7 +3984,9 @@ export class DiscordController {
         this.#log('task-sync-deferred-for-subscription-restore', { reason: 'poll' });
         return;
       }
-      this.#queueDeliveryOutboxDrain('task-sync-poll').then(() => {
+      this.codex.restoreChangedSubscriptions().then(() => (
+        this.#queueDeliveryOutboxDrain('task-sync-poll')
+      )).then(() => {
         if (this.stopping || !this.codex.connected || this.codex.subscriptionRestoreInProgress) return null;
         return this.#syncAllTasks();
       }).then(async (result) => {
@@ -4276,24 +4286,6 @@ export class DiscordController {
     markPhase('activeTasks');
     await syncThreads(archived, true);
     markPhase('archivedTasks');
-    for (const project of context.projectState?.appServerProjects?.values?.() ?? []) {
-      const descriptor = projectDescriptorForThread(
-        { projectId: project.projectId, cwd: project.rootPaths[0] ?? null },
-        context.projectState,
-        this.config.projectCategoryPrefix,
-      );
-      if (this.#isProjectHidden(descriptor.key)) continue;
-      try {
-        await this.#ensureProjectCategories(descriptor, context);
-      } catch (error) {
-        result.failed += 1;
-        this.#log('app-server-project-category-sync-error', {
-          projectId: project.projectId,
-          projectKey: descriptor.key,
-          error: error.stack ?? error.message,
-        });
-      }
-    }
     markPhase('appServerProjects');
     const subagents = await this.#syncSubagentsForTasks(active);
     result.subagentsCreated = subagents.created;
@@ -5056,16 +5048,7 @@ export class DiscordController {
 
   async #cleanupEmptyManagedCategories(context) {
     let state = this.stateStore.snapshot();
-    const activeProjectKeys = new Set(Object.values(state.bindings ?? {})
-      .filter((binding) => !binding.hidden
-        && !binding.archived
-        && binding.projectKey
-        && !state.hiddenProjects?.[binding.projectKey])
-      .map((binding) => binding.projectKey));
-    for (const project of context.projectState?.appServerProjects?.values?.() ?? []) {
-      const projectKey = appServerProjectKey(project.projectId);
-      if (!state.hiddenProjects?.[projectKey]) activeProjectKeys.add(projectKey);
-    }
+    const activeProjectKeys = activeProjectCategoryKeys(state);
     let removed = 0;
     for (const [projectKey, project] of Object.entries(state.projectCategories ?? {})) {
       const categories = (project.categoryIds ?? [])

@@ -97,10 +97,11 @@ Windows PowerShell 5.1. It never supplies an execution-policy override and does
 not propagate a parent process-level override.
 
 If this checkout's healthy app-server is already listening, the launcher
-validates its state, listener PID, executable, supervisor, package version, and
-`/readyz` response. It then skips app-server startup and opens only Codex
-Desktop on that existing connection. A server owned by another checkout or an
-inconsistent state file is never adopted.
+validates its state, completed Desktop connection verification, listener PID,
+executable, supervisor, package version, and `/readyz` response. It then skips
+app-server startup and opens only Codex Desktop on that existing connection. A
+server owned by another checkout, an incomplete startup, or an inconsistent
+state file is never adopted.
 
 The launcher caches the package's `codex.exe` and
 `codex-code-mode-host.exe` together in a version-specific directory. Current
@@ -145,8 +146,9 @@ paths and the app-server's active and archived task lists. While Desktop is
 still stopped, it creates any missing local-project records and assigns tasks
 to the project whose path exactly matches the task working directory. The
 global Desktop state is backed up under `launcher/state/project-sync-backups/`
-before an atomic update. This keeps tasks created from Discord visible in the
-project sidebar after a restart without changing their Codex history or runtime
+with an exclusive millisecond-, process-, and retry-qualified name before an
+atomic update. This keeps tasks created from Discord visible in the project
+sidebar after a restart without changing their Codex history or runtime
 settings.
 
 For a one-shot repair that waits for the current task to finish, gracefully

@@ -9,6 +9,11 @@ host by its dedicated executable name. Its tray menu provides `Show status` and
 a confirmation-protected `Stop safely...` action. If the shared
 app-server is absent, the bridge starts
 `launcher\CodexSharedLauncher.exe` and retries with exponential backoff. The
+host also restarts the Bridge after an abnormal nonzero exit, waiting one minute
+between attempts and stopping after ten consecutive failed starts. A Bridge that
+remains alive for one minute resets that consecutive-failure count. A graceful
+zero exit is never restarted. The existing Scheduled Task failure policy remains
+the final fallback if the host itself exits nonzero.
 launcher remains the owner of the Desktop/app-server lifecycle.
 
 Use the Start menu folder **Codex Remote** for manual start, status, or graceful
@@ -268,7 +273,10 @@ preferred over Desktop root containment. Native identity uses the durable key
 their existing keys, so matching names or IDs across the two namespaces remain
 distinct. Native Project names drive their Discord category names and native
 Projects remain visible in `プロジェクト表示` even when they currently have no
-active task channel.
+active task channel. A Discord project category is materialized only when a
+task channel actually needs it. After task synchronization, a managed project
+category is removed only when it is empty and has no visible active task
+binding; occupied categories are preserved.
 
 For tasks without either explicit assignment or native Project identity, the
 most specific saved Desktop local-project root containing the cwd is used.
@@ -346,12 +354,14 @@ live view. The completion-report selector independently controls
 ## Connection recovery
 
 The Discord gateway and Codex app-server both reconnect automatically. When
-app-server reconnects, every visible, non-archived task is resumed serially on
-the same server and only the bounded recent full turns needed for live-card and
-missed-completion repair are loaded. Task-list reconciliation and outbox drain
-wait until that subscription restoration is ready, preventing concurrent bulk
-RPC load from repeatedly closing the shared WebSocket. Global, active,
-archived, and native-project inventories are fetched serially. A parent task's
+app-server reconnects, the Bridge first reads bounded turn ID/status metadata
+for every visible, non-archived task. Only tasks with an active turn or a
+missed completion are resumed and hydrated; unchanged idle tasks remain lazy
+and are checked by the existing task-sync poll before later work. Task-list
+reconciliation and outbox drain wait for this bounded initial restoration,
+preventing old large idle tasks from delaying Discord readiness or repeatedly
+closing the shared WebSocket. Global, active, archived, and native-project
+inventories are fetched serially. A parent task's
 first subagent discovery still scans its complete history; later scans preserve
 the known child IDs and inspect only the newest ten full turns for additions.
 Historical
@@ -361,11 +371,11 @@ commentary cards are preserved by task, turn, and item identity.
 Transient gateway, REST, app-server, attachment-fetch, DNS, TCP, and TLS
 failures are retried without terminating the Bridge when they are isolated or
 already making progress. Initial Discord login and setup retry with exponential
-backoff capped at five minutes. If one Gateway shard instead emits continuous
-transient handshake errors with no Ready/Resume recovery, runtime status changes
-to `reconnecting` immediately and reports the error count and recycle deadline.
-After—not before—five uninterrupted minutes and at least 30 errors, the Bridge
-performs its normal graceful shutdown with a failure result. The installed
+backoff capped at five minutes. If one Gateway shard emits a transient handshake
+error with no Ready/Resume recovery, runtime status changes to `reconnecting`
+immediately and reports the error count and recycle deadline. After—not before—
+five uninterrupted minutes, a dedicated deadline timer makes the Bridge perform
+its normal graceful shutdown with a failure result. The installed
 Scheduled Task starts a clean Gateway session after its one-minute failure
 interval; the delivery outbox then recovers messages received during the gap.
 There is no periodic reconnect while Gateway heartbeats are healthy. Recovered

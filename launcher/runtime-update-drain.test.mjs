@@ -186,6 +186,20 @@ test('shared launcher drains turns and replaces the server on package updates', 
   assert.doesNotMatch(source, /Updated Desktop attached automatically to the existing shared app-server/);
 });
 
+test('shared launcher reuses only a runtime whose Desktop connection was verified', () => {
+  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
+  const reusableRuntime = extractPowerShellFunction(
+    source,
+    'Get-ReusableRuntimeState',
+    'Start-DesktopOnRuntime',
+  );
+  assert.match(reusableRuntime, /\$state\.desktopConnectionVerified -ne \$true/);
+  assert.match(
+    reusableRuntime,
+    /has not completed Desktop connection verification/,
+  );
+});
+
 test('one-shot refresh waits the exact turn before replacing the owned runtime', () => {
   const source = fs.readFileSync(refreshScriptPath, 'utf8');
   assert.match(source, /WaitForTurnId/);

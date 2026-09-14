@@ -51,19 +51,34 @@ internal static class CodexDiscordRemoteBootstrap
     }
 }
 
+internal static class CodexDiscordRemoteRestartPolicy
+{
+    public const int MaximumAttempts = 10;
+    public const int RetryDelayMilliseconds = 60000;
+    public const int StableRunMilliseconds = 60000;
+
+    public static bool ShouldRestart(int exitCode, int attemptsStarted)
+    {
+        return exitCode != 0 && attemptsStarted < MaximumAttempts;
+    }
+}
+
 internal sealed class CodexDiscordRemoteContext : ApplicationContext
 {
     private readonly string root;
+    private readonly string startScript;
     private readonly NotifyIcon notifyIcon;
     private readonly Timer processTimer;
     private Process bridgeProcess;
+    private DateTime bridgeStartedAtUtc;
+    private int restartAttempts;
 
     public int BridgeExitCode { get; private set; }
 
     public CodexDiscordRemoteContext()
     {
         root = AppDomain.CurrentDomain.BaseDirectory;
-        string startScript = Path.Combine(root, "Start-DiscordBridge.ps1");
+        startScript = Path.Combine(root, "Start-DiscordBridge.ps1");
         if (!File.Exists(startScript))
             throw new FileNotFoundException("The Bridge start script was not found.", startScript);
 
@@ -84,10 +99,11 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
 
         StartSharedDesktopIfConfigured();
         bridgeProcess = StartPowerShell(startScript, true);
+        bridgeStartedAtUtc = DateTime.UtcNow;
 
         processTimer = new Timer();
         processTimer.Interval = 500;
-        processTimer.Tick += delegate { CheckBridgeProcess(); };
+        processTimer.Tick += CheckBridgeProcess;
         processTimer.Start();
     }
 
@@ -194,14 +210,66 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
             ToolTipIcon.Info);
     }
 
-    private void CheckBridgeProcess()
+    private void CheckBridgeProcess(object sender, EventArgs eventArgs)
     {
-        if (bridgeProcess == null || !bridgeProcess.HasExited)
+        if (bridgeProcess == null)
             return;
 
-        processTimer.Stop();
+        if (!bridgeProcess.HasExited)
+        {
+            if (restartAttempts > 0 &&
+                (DateTime.UtcNow - bridgeStartedAtUtc).TotalMilliseconds >=
+                    CodexDiscordRemoteRestartPolicy.StableRunMilliseconds)
+                restartAttempts = 0;
+            return;
+        }
+
         BridgeExitCode = bridgeProcess.ExitCode;
-        ExitThread();
+        bridgeProcess.Dispose();
+        bridgeProcess = null;
+
+        if (!CodexDiscordRemoteRestartPolicy.ShouldRestart(BridgeExitCode, restartAttempts))
+        {
+            processTimer.Stop();
+            ExitThread();
+            return;
+        }
+
+        ScheduleBridgeRestart();
+    }
+
+    private void ScheduleBridgeRestart()
+    {
+        restartAttempts++;
+        processTimer.Stop();
+        processTimer.Tick -= CheckBridgeProcess;
+        processTimer.Tick -= RestartBridgeProcess;
+        processTimer.Interval = CodexDiscordRemoteRestartPolicy.RetryDelayMilliseconds;
+        processTimer.Tick += RestartBridgeProcess;
+        processTimer.Start();
+    }
+
+    private void RestartBridgeProcess(object sender, EventArgs eventArgs)
+    {
+        processTimer.Stop();
+        processTimer.Tick -= RestartBridgeProcess;
+
+        try
+        {
+            bridgeProcess = StartPowerShell(startScript, true);
+            bridgeStartedAtUtc = DateTime.UtcNow;
+            processTimer.Interval = 500;
+            processTimer.Tick += CheckBridgeProcess;
+            processTimer.Start();
+        }
+        catch
+        {
+            BridgeExitCode = 1;
+            if (CodexDiscordRemoteRestartPolicy.ShouldRestart(BridgeExitCode, restartAttempts))
+                ScheduleBridgeRestart();
+            else
+                ExitThread();
+        }
     }
 
     protected override void ExitThreadCore()

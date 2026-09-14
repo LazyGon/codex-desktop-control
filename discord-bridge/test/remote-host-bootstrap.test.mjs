@@ -54,6 +54,41 @@ function compileHarness(directory) {
   return executable;
 }
 
+function compileRestartPolicyHarness(directory) {
+  const compiler = compilerPath();
+  assert.ok(compiler, 'The .NET Framework C# compiler must be available.');
+  const executable = path.join(directory, 'RestartPolicyHarness.exe');
+  const harness = path.join(directory, 'RestartPolicyHarness.cs');
+  fs.writeFileSync(harness, [
+    'using System;',
+    'internal static class RestartPolicyHarness',
+    '{',
+    '    private static int Main(string[] args)',
+    '    {',
+    '        int exitCode = Int32.Parse(args[0]);',
+    '        int attempts = Int32.Parse(args[1]);',
+    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.ShouldRestart(exitCode, attempts));',
+    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.MaximumAttempts);',
+    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.RetryDelayMilliseconds);',
+    '        Console.Write(CodexDiscordRemoteRestartPolicy.StableRunMilliseconds);',
+    '        return 0;',
+    '    }',
+    '}',
+  ].join('\r\n'), 'utf8');
+  execFileSync(compiler, [
+    '/nologo',
+    '/target:exe',
+    `/out:${executable}`,
+    '/main:RestartPolicyHarness',
+    '/reference:System.Drawing.dll',
+    '/reference:System.Web.Extensions.dll',
+    '/reference:System.Windows.Forms.dll',
+    sourcePath,
+    harness,
+  ], { stdio: 'pipe' });
+  return executable;
+}
+
 test('logon host prepares the configured shared launcher before Bridge cold start', (context) => {
   if (process.platform !== 'win32') {
     context.skip('The Discord Remote host is Windows-only.');
@@ -98,4 +133,20 @@ test('logon host honors autoStartSharedDesktop=false', (context) => {
 
   const executable = compileHarness(directory);
   assert.equal(execFileSync(executable, [bridge], { encoding: 'utf8' }), 'NONE');
+});
+
+test('logon host retries only abnormal Bridge exits within the bounded policy', (context) => {
+  if (process.platform !== 'win32') {
+    context.skip('The Discord Remote host is Windows-only.');
+    return;
+  }
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-remote-restart-policy-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const executable = compileRestartPolicyHarness(directory);
+
+  const abnormal = execFileSync(executable, ['134', '0'], { encoding: 'utf8' }).trim().split(/\r?\n/);
+  assert.deepEqual(abnormal, ['True', '10', '60000', '60000']);
+  assert.equal(execFileSync(executable, ['0', '0'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0], 'False');
+  assert.equal(execFileSync(executable, ['134', '10'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0], 'False');
 });

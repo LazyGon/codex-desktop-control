@@ -3,7 +3,6 @@ import { isTransientCommunicationError } from './communication-error.mjs';
 export const DEFAULT_GATEWAY_RECYCLE_AFTER_MS = 300_000;
 export const DEFAULT_GATEWAY_ERROR_GAP_MS = 30_000;
 export const DEFAULT_GATEWAY_LOG_INTERVAL_MS = 60_000;
-export const DEFAULT_GATEWAY_MIN_ERRORS = 30;
 
 function isoTime(value) {
   return Number.isFinite(value) ? new Date(value).toISOString() : null;
@@ -14,7 +13,6 @@ export class DiscordGatewayHealth {
     recycleAfterMs = DEFAULT_GATEWAY_RECYCLE_AFTER_MS,
     continuousErrorGapMs = DEFAULT_GATEWAY_ERROR_GAP_MS,
     logIntervalMs = DEFAULT_GATEWAY_LOG_INTERVAL_MS,
-    minimumErrors = DEFAULT_GATEWAY_MIN_ERRORS,
   } = {}) {
     if (!Number.isInteger(recycleAfterMs) || recycleAfterMs < DEFAULT_GATEWAY_RECYCLE_AFTER_MS) {
       throw new Error(`Gateway recycle timeout must be at least ${DEFAULT_GATEWAY_RECYCLE_AFTER_MS}ms.`);
@@ -25,13 +23,9 @@ export class DiscordGatewayHealth {
     if (!Number.isInteger(logIntervalMs) || logIntervalMs <= 0) {
       throw new Error('Gateway error log interval must be a positive integer.');
     }
-    if (!Number.isInteger(minimumErrors) || minimumErrors <= 0) {
-      throw new Error('Gateway minimum error count must be a positive integer.');
-    }
     this.recycleAfterMs = recycleAfterMs;
     this.continuousErrorGapMs = continuousErrorGapMs;
     this.logIntervalMs = logIntervalMs;
-    this.minimumErrors = minimumErrors;
     this.state = 'starting';
     this.readyAt = null;
     this.firstErrorAt = null;
@@ -89,12 +83,15 @@ export class DiscordGatewayHealth {
         snapshot: this.snapshot(at),
       };
     }
-    if (this.lastErrorAt == null || at - this.lastErrorAt > this.continuousErrorGapMs) {
+    if (this.firstErrorAt == null) {
       this.firstErrorAt = at;
       this.errorCount = 0;
       this.loggedErrorCount = 0;
       this.lastLogAt = null;
       this.recycleIssued = false;
+    } else if (this.lastErrorAt != null && at - this.lastErrorAt > this.continuousErrorGapMs) {
+      this.loggedErrorCount = this.errorCount;
+      this.lastLogAt = null;
     }
     this.state = 'reconnecting';
     this.readyAt = null;
@@ -108,13 +105,7 @@ export class DiscordGatewayHealth {
       this.lastLogAt = at;
       this.loggedErrorCount = this.errorCount;
     }
-    const shouldRecycle = !this.recycleIssued
-      && this.errorCount >= this.minimumErrors
-      && at - this.firstErrorAt >= this.recycleAfterMs;
-    if (shouldRecycle) {
-      this.recycleIssued = true;
-      this.state = 'recycling';
-    }
+    const { shouldRecycle } = this.claimRecycleIfDue({ at });
     return {
       tracked: true,
       shouldLog,
@@ -122,6 +113,18 @@ export class DiscordGatewayHealth {
       suppressedErrors,
       snapshot: this.snapshot(at),
     };
+  }
+
+  claimRecycleIfDue({ at = Date.now() } = {}) {
+    const shouldRecycle = !this.recycleIssued
+      && this.state === 'reconnecting'
+      && this.firstErrorAt != null
+      && at - this.firstErrorAt >= this.recycleAfterMs;
+    if (shouldRecycle) {
+      this.recycleIssued = true;
+      this.state = 'recycling';
+    }
+    return { shouldRecycle, snapshot: this.snapshot(at) };
   }
 
   snapshot(at = Date.now()) {

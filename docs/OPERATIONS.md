@@ -28,10 +28,11 @@ launch is not required after an app update or reboot.
 
 The most recent reconciliation result is stored in
 `launcher\state\project-sync-last.json`. Backups of the Desktop global state
-are stored in `launcher\state\project-sync-backups\`. A reconciliation failure
-stops startup before Desktop opens, so the existing Desktop state is not
-silently replaced or partially updated. On a first installation, reconciliation
-is skipped until both Desktop and Bridge have created their initial state files.
+are stored in `launcher\state\project-sync-backups\` with exclusive names that
+remain collision-free if launch attempts overlap. A reconciliation failure stops
+startup before Desktop opens, so the existing Desktop state is not silently
+replaced or partially updated. On a first installation, reconciliation is
+skipped until both Desktop and Bridge have created their initial state files.
 
 Launcher self-tests use a port-specific runtime-state file and never replace
 the live `launcher\state\current.json`.
@@ -233,9 +234,11 @@ scan visible task channels after their per-channel cursor and recover missed
 post-cutover messages. Pre-mutation `queued` entries resume after subscription restore;
 post-mutation uncertainty is reconciled by exact request ID and otherwise stops
 without automatic resend. Delivery and reaction callback receipts are atomic
-and exact-attempt-bound. On reconnect, the bridge restores visible task
-subscriptions serially with bounded recent turns before outbox and task-list
-work. Task inventories are fetched serially; after one complete subagent scan,
+and exact-attempt-bound. On reconnect, the bridge checks bounded turn metadata
+for every visible task, then resumes only active tasks or tasks with a missed
+completion before outbox and task-list work. Unchanged idle tasks remain lazy
+and the existing task-sync poll detects later activity before reconciliation.
+Task inventories are fetched serially; after one complete subagent scan,
 known child IDs are retained and only the newest ten full turns are inspected
 for additions. The bridge then reconciles task history against both persisted
 message IDs and visible identity fields. Long user and final-answer text
@@ -260,9 +263,10 @@ Transient communication failures are recoverable across the Discord gateway,
 Discord REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and
 TLS. Initial login/setup retries use exponential backoff capped at five
 minutes, and an isolated network timeout reaching the process error boundary is
-logged without terminating the Bridge. A continuous high-frequency Gateway
+logged without terminating the Bridge. An unresolved transient Gateway
 handshake failure marks Discord unready and, only after five uninterrupted
-minutes, gracefully recycles the Bridge through the Scheduled Task. Healthy
+minutes, a dedicated deadline timer gracefully recycles the Bridge through the
+Scheduled Task. Healthy
 Gateway sessions are not periodically reconnected. Authentication, certificate,
 configuration, and programming errors remain fatal.
 

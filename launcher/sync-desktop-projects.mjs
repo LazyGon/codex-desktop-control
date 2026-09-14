@@ -300,7 +300,27 @@ export function loadBridgeProjects(bridgeStatePath) {
 }
 
 function timestampForPath(date = new Date()) {
-  return date.toISOString().replaceAll(':', '').replaceAll('-', '').replace(/\.\d{3}Z$/, 'Z');
+  return date.toISOString().replaceAll(':', '').replaceAll('-', '').replace('.', '');
+}
+
+export function createExclusiveBackup(
+  sourcePath,
+  backupDirectory,
+  { date = new Date(), processId = process.pid } = {},
+) {
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  const stem = `${path.basename(sourcePath)}.${timestampForPath(date)}.${processId}`;
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const retrySuffix = attempt === 0 ? '' : `.${attempt}`;
+    const backupPath = path.join(backupDirectory, `${stem}${retrySuffix}.bak`);
+    try {
+      fs.copyFileSync(sourcePath, backupPath, fs.constants.COPYFILE_EXCL);
+      return backupPath;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+  }
+  throw new Error(`Could not reserve a unique Desktop state backup in ${backupDirectory}`);
 }
 
 function atomicWriteJson(targetPath, value) {
@@ -356,12 +376,7 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     const backupDirectory = path.resolve(
       options.backupDirectory ?? path.join(path.dirname(globalStatePath), 'desktop-project-sync-backups'),
     );
-    fs.mkdirSync(backupDirectory, { recursive: true });
-    backupPath = path.join(
-      backupDirectory,
-      `${path.basename(globalStatePath)}.${timestampForPath()}.bak`,
-    );
-    fs.copyFileSync(globalStatePath, backupPath, fs.constants.COPYFILE_EXCL);
+    backupPath = createExclusiveBackup(globalStatePath, backupDirectory);
     atomicWriteJson(globalStatePath, state);
     JSON.parse(fs.readFileSync(globalStatePath, 'utf8'));
   }

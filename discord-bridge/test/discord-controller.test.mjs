@@ -8,6 +8,7 @@ import path from 'node:path';
 import { ChannelType, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
 import {
   ATTACHMENT_ONLY_PROMPT,
+  activeProjectCategoryKeys,
   completionRecoveryCandidate,
   DiscordController,
   emptyDuplicateUserEntryIds,
@@ -68,6 +69,33 @@ test('managed project category cleanup removes empty overflow categories but pre
   assert.deepEqual(
     managedProjectCategoryCleanupPlan([emptyOverflow], false),
     { keep: [], remove: [emptyOverflow], removeProject: true },
+  );
+});
+
+test('only visible active task bindings keep a managed project category active', () => {
+  const active = activeProjectCategoryKeys({
+    bindings: {
+      visible: { projectKey: 'app-server:visible' },
+      archived: { projectKey: 'app-server:archived', archived: true },
+      hiddenBinding: { projectKey: 'app-server:hidden-binding', hidden: true },
+      hiddenProject: { projectKey: 'app-server:hidden-project' },
+    },
+    hiddenProjects: { 'app-server:hidden-project': true },
+  });
+
+  assert.deepEqual([...active], ['app-server:visible']);
+  assert.equal(active.has('app-server:catalog-only'), false);
+});
+
+test('task synchronization does not eagerly create categories for catalog-only projects', () => {
+  const source = fs.readFileSync(new URL('../src/discord-controller.mjs', import.meta.url), 'utf8');
+  const archivedSyncEnd = source.indexOf("markPhase('archivedTasks');");
+  const appServerProjectsPhase = source.indexOf("markPhase('appServerProjects');", archivedSyncEnd);
+  assert.notEqual(archivedSyncEnd, -1);
+  assert.notEqual(appServerProjectsPhase, -1);
+  assert.doesNotMatch(
+    source.slice(archivedSyncEnd, appServerProjectsPhase),
+    /#ensureProjectCategories/,
   );
 });
 

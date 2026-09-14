@@ -108,6 +108,8 @@ chatgptController.attach();
 let shuttingDown = false;
 let runtimeTimer = null;
 let stopTimer = null;
+let gatewayRecycleTimer = null;
+let gatewayRecycleDeadline = null;
 let runtimePhase = 'starting';
 
 function writeRuntime(phase, extra = {}) {
@@ -160,6 +162,9 @@ async function shutdown(reason, exitCode = 0) {
   writeRuntime('stopping', { reason });
   clearInterval(runtimeTimer);
   clearInterval(stopTimer);
+  clearTimeout(gatewayRecycleTimer);
+  gatewayRecycleTimer = null;
+  gatewayRecycleDeadline = null;
   const controllerStop = controller.stop();
   const chatgptControllerStop = chatgptController.stop();
   await codex.stop().catch((error) => appendJsonLine(processLog, 'codex-stop-error', { error: error.message }));
@@ -245,6 +250,9 @@ async function loginDiscord() {
 }
 
 function markGatewayReady(source, shardId) {
+  clearTimeout(gatewayRecycleTimer);
+  gatewayRecycleTimer = null;
+  gatewayRecycleDeadline = null;
   const result = gatewayHealth.markReady({ shardId });
   if (result.recovery) {
     appendJsonLine(processLog, 'discord-gateway-recovered', {
@@ -254,6 +262,37 @@ function markGatewayReady(source, shardId) {
     });
   }
   writeRuntime(runtimePhase);
+}
+
+function requestGatewayRecycle(source, shardId) {
+  const result = gatewayHealth.claimRecycleIfDue();
+  writeRuntime(runtimePhase);
+  if (!result.shouldRecycle) {
+    scheduleGatewayRecycle(result.snapshot, shardId);
+    return;
+  }
+  appendJsonLine(processLog, 'discord-gateway-recycle-requested', {
+    source,
+    shardId,
+    errorCount: result.snapshot.errorCount,
+    firstErrorAt: result.snapshot.firstErrorAt,
+    lastErrorAt: result.snapshot.lastErrorAt,
+  });
+  shutdown('Discord gateway remained unavailable for five minutes', 1).catch(() => {});
+}
+
+function scheduleGatewayRecycle(snapshot, shardId) {
+  const deadline = snapshot.recycleDueAt;
+  if (!deadline || shuttingDown) return;
+  if (gatewayRecycleTimer && gatewayRecycleDeadline === deadline) return;
+  clearTimeout(gatewayRecycleTimer);
+  gatewayRecycleDeadline = deadline;
+  gatewayRecycleTimer = setTimeout(() => {
+    gatewayRecycleTimer = null;
+    gatewayRecycleDeadline = null;
+    requestGatewayRecycle('deadline', shardId);
+  }, Math.max(0, Date.parse(deadline) - Date.now()));
+  gatewayRecycleTimer.unref?.();
 }
 
 client.on('error', (error) => appendJsonLine(processLog, 'discord-error', { error: error.stack ?? error.message }));
@@ -279,12 +318,15 @@ client.on('shardError', (error, shardId) => {
   if (result.snapshot.errorCount === 1) writeRuntime(runtimePhase);
   if (result.shouldRecycle) {
     appendJsonLine(processLog, 'discord-gateway-recycle-requested', {
+      source: 'shard-error',
       shardId,
       errorCount: result.snapshot.errorCount,
       firstErrorAt: result.snapshot.firstErrorAt,
       lastErrorAt: result.snapshot.lastErrorAt,
     });
     shutdown('Discord gateway remained unavailable for five minutes', 1).catch(() => {});
+  } else if (result.tracked) {
+    scheduleGatewayRecycle(result.snapshot, shardId);
   }
 });
 

@@ -4,9 +4,28 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  createExclusiveBackup,
   loadBridgeProjects,
   reconcileDesktopProjectState,
 } from './sync-desktop-projects.mjs';
+
+test('creates distinct exclusive backups for concurrent launches in the same millisecond', context => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-backup-'));
+  context.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const source = path.join(temporary, '.codex-global-state.json');
+  const backups = path.join(temporary, 'backups');
+  fs.writeFileSync(source, '{"version":1}', 'utf8');
+  const identity = { date: new Date('2026-09-07T11:45:36.123Z'), processId: 42 };
+
+  const first = createExclusiveBackup(source, backups, identity);
+  const second = createExclusiveBackup(source, backups, identity);
+
+  assert.notEqual(first, second);
+  assert.match(path.basename(first), /20260907T114536123Z\.42\.bak$/);
+  assert.match(path.basename(second), /20260907T114536123Z\.42\.1\.bak$/);
+  assert.equal(fs.readFileSync(first, 'utf8'), '{"version":1}');
+  assert.equal(fs.readFileSync(second, 'utf8'), '{"version":1}');
+});
 
 test('creates missing projects and assigns active and archived threads by cwd', () => {
   const ids = ['local-attendance', 'local-economic'];
