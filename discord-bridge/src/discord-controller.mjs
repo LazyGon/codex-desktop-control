@@ -7210,18 +7210,39 @@ export class DiscordController {
     const view = this.#view(binding.threadId, turnId, binding.channelId);
     view.status = 'inProgress';
     view.startedAt = turnTimestampMs(params.turn ?? { id: turnId }) ?? view.startedAt ?? Date.now();
-    const channel = await this.client.channels.fetch(binding.channelId);
-    const messages = await this.#fetchChannelHistory(channel, 100);
-    await this.#queueTurnViewMutation(
-      view,
-      () => this.#ensureLiveTurnCard(
-        binding,
-        { id: turnId, status: 'inProgress' },
+    const reservation = this.#bindUserInputReservationToStartedTurn(binding.threadId, turnId);
+    if (reservation && !reservation.liveCardOrderPromise) {
+      reservation.liveCardOrderPromise = reservation.userCardBarrier.then(async () => {
+        const channel = await this.client.channels.fetch(binding.channelId);
+        const messages = await this.#fetchChannelHistory(channel, 100);
+        await this.#queueTurnViewMutation(
+          view,
+          () => this.#ensureLiveTurnCard(
+            binding,
+            { id: turnId, status: 'inProgress' },
+            view,
+            channel,
+            messages,
+          ),
+        );
+      });
+    }
+    if (reservation?.liveCardOrderPromise) {
+      await reservation.liveCardOrderPromise;
+    } else {
+      const channel = await this.client.channels.fetch(binding.channelId);
+      const messages = await this.#fetchChannelHistory(channel, 100);
+      await this.#queueTurnViewMutation(
         view,
-        channel,
-        messages,
-      ),
-    );
+        () => this.#ensureLiveTurnCard(
+          binding,
+          { id: turnId, status: 'inProgress' },
+          view,
+          channel,
+          messages,
+        ),
+      );
+    }
     this.#startElapsedUpdates(binding, view);
     this.#scheduleTaskSync('turn/started');
   }
@@ -9069,10 +9090,13 @@ export class DiscordController {
       return;
     }
 
-    if (callback.state !== 'accepted' || !callback.receipt?.turnId) return;
     let reservation = this.recentUserInputs.find((candidate) => (
       candidate.clientUserMessageId === callback.requestId
     ));
+    if (callback.state !== 'accepted' || !callback.receipt?.turnId) {
+      this.#releaseUserInputCardBarrier(reservation, false);
+      return;
+    }
     if (!reservation) {
       reservation = this.#reserveUserInput(
         callback.threadId,
@@ -9198,6 +9222,10 @@ export class DiscordController {
     clientUserMessageId = null,
   } = {}) {
     this.#pruneUserInputReservations();
+    let releaseUserCardBarrier;
+    const userCardBarrier = new Promise((resolve) => {
+      releaseUserCardBarrier = resolve;
+    });
     const record = {
       threadId,
       text: String(text).trim(),
@@ -9212,6 +9240,10 @@ export class DiscordController {
       userItemId: null,
       clientUserMessageId: clientUserMessageId ?? `discord-${randomKey()}`,
       postedItemId: null,
+      userCardBarrier,
+      releaseUserCardBarrier,
+      userCardBarrierReleased: false,
+      userCardPostedBeforeLiveCard: false,
       at: Date.now(),
     };
     this.recentUserInputs.push(record);
@@ -9219,6 +9251,7 @@ export class DiscordController {
   }
 
   #removeUserInputReservation(record) {
+    this.#releaseUserInputCardBarrier(record, false);
     const index = this.recentUserInputs.indexOf(record);
     if (index >= 0) this.recentUserInputs.splice(index, 1);
   }
@@ -9233,6 +9266,29 @@ export class DiscordController {
       ));
     if (record) record.echoSeen = true;
     return record ?? null;
+  }
+
+  #bindUserInputReservationToStartedTurn(threadId, turnId) {
+    this.#pruneUserInputReservations();
+    const exact = this.recentUserInputs.find((candidate) => (
+      candidate.threadId === threadId && candidate.turnId === turnId
+    ));
+    if (exact) return exact;
+    const pending = this.recentUserInputs.find((candidate) => (
+      candidate.threadId === threadId
+      && !candidate.turnId
+      && candidate.state !== 'failed'
+    ));
+    if (pending) pending.turnId = turnId;
+    return pending ?? null;
+  }
+
+  #releaseUserInputCardBarrier(record, posted) {
+    if (!record || record.userCardBarrierReleased) return;
+    record.userCardBarrierReleased = true;
+    record.userCardPostedBeforeLiveCard = posted;
+    record.releaseUserCardBarrier?.();
+    record.releaseUserCardBarrier = null;
   }
 
   async #ensureReservedUserInputPosted(record) {
@@ -9283,11 +9339,13 @@ export class DiscordController {
         .then((mirrored) => {
           record.state = 'posted';
           record.at = Date.now();
+          this.#releaseUserInputCardBarrier(record, mirrored);
           return mirrored;
         })
         .catch((error) => {
           record.state = 'failed';
           record.postPromise = null;
+          this.#releaseUserInputCardBarrier(record, false);
           throw error;
         });
     }
@@ -9296,6 +9354,10 @@ export class DiscordController {
 
   async #moveLiveCardAfterReservedInput(record) {
     if (!record.turnId) return;
+    if (record.liveCardOrderPromise) {
+      await record.liveCardOrderPromise;
+      if (record.userCardPostedBeforeLiveCard) return;
+    }
     if (!record.liveCardMovePromise) {
       record.liveCardMovePromise = (async () => {
         const binding = this.stateStore.binding(record.threadId);
@@ -9321,6 +9383,9 @@ export class DiscordController {
 
   #pruneUserInputReservations() {
     const cutoff = Date.now() - 120_000;
+    for (const record of this.recentUserInputs) {
+      if (record.at < cutoff) this.#releaseUserInputCardBarrier(record, false);
+    }
     this.recentUserInputs = this.recentUserInputs.filter((record) => record.at >= cutoff);
   }
 

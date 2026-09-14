@@ -2777,6 +2777,14 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
       clientUserMessageId,
       target,
     };
+    codex.emit('notification', {
+      method: 'turn/started',
+      params: {
+        threadId,
+        turn: { id: 'turn-1', status: 'inProgress' },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
     resolveDelivery();
     return { mode: 'steer', turnId: 'turn-1' };
   };
@@ -2964,11 +2972,20 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   assert.deepEqual(reactions, ['⏳', '✅'], JSON.stringify(replies));
   assert.deepEqual(replies, []);
   assert.equal(originalDeleted, true);
+  for (let attempt = 0; attempt < 50
+    && !sent.some((message) => message.embeds[0]?.title === 'Codex running');
+    attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   const userCard = sent.find((message) => message.embeds[0]?.title === 'User message');
   assert.ok(userCard);
   const runningAfterInput = sent.at(-1);
   assert.equal(runningAfterInput.embeds[0]?.title, 'Codex running');
   assert.ok(sent.indexOf(runningAfterInput) > sent.indexOf(userCard));
+  assert.deepEqual(
+    sent.map((message) => message.embeds[0]?.title),
+    ['User message', 'Codex running'],
+  );
   const trailingCard = await channel.send({ embeds: [new EmbedBuilder().setTitle('Trailing test card')] });
   binding.transcriptVersion = 11;
   binding.runtimeSettings = {};

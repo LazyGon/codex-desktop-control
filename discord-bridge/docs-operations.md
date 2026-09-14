@@ -44,7 +44,10 @@ discovery or status reconciliation for other channels.
    task IDs, search, and attachments.
    With `plainMessageInputEnabled`, an ordinary message in the task channel is
    equivalent to `deliver`. After app-server accepts it, the original message is
-   replaced with an orange user card; `❌` includes an error reply. Up to ten
+   replaced with an orange user card. When that input starts a new turn, the
+   orange card is finalized before the green running card is created, avoiding
+   a transient green card that is immediately deleted and reposted. `❌`
+   includes an error reply. Up to ten
    Discord attachments may be added to one ordinary message. Images are passed
    as local image inputs. PDFs, Office documents, spreadsheets, presentations,
    archives, audio, video, source files, and other regular files are stored in
