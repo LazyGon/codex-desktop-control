@@ -48,8 +48,9 @@ on the other PC.
 not treated as empty and are not replaced by stale snapshots.
 
 The peer listener binds only to the configured Tailscale IPv4 address (or
-loopback for tests). It exposes only `POST /v1/tasks/list`, never AppServer
-JSON-RPC or task mutations. Requests are HMAC-authenticated using a key derived
+loopback for tests). Its default route is `POST /v1/tasks/list`; enabling task
+control adds only the fixed `POST /v1/tasks/operate` route. Neither route exposes
+AppServer JSON-RPC, the WebSocket listener, or shell commands. Requests are HMAC-authenticated using a key derived
 in memory from the same Bot token and application/guild IDs. The raw token is
 never transmitted between PCs or stored in JSON. Peer source IP, instance ID,
 authorized operator, timestamp and one-use nonce are checked. Responses contain
@@ -59,7 +60,55 @@ tailnet ACL/firewall. Do not forward this listener to the internet.
 
 A missing Tailscale address does not stop ordinary local Discord execution.
 The listener retries every 30 seconds and remote lists remain unavailable until
-it can bind. Peers never resend, steer, or interrupt a task through this endpoint.
+it can bind. An offline peer cannot receive operations; an unavailable PC is
+reported explicitly rather than treated as an empty task list.
+
+## Opt-in cross-PC task control
+
+Both PCs must run this version of the Bridge. Each PC must set
+`taskControlEnabled: true` and mark the other configured peer with
+`allowTaskControl: true`. `Enable-MultiPcBridge.ps1 -EnableTaskControl` does that
+while the Bridge is stopped gracefully. The sender must possess its own
+DPAPI-protected Bot token under the current Windows user and choose an
+allowlisted operator ID. The receiver also checks the Tailscale source IP,
+peer identity, guild, operator allowlist, HMAC, timestamp, one-use nonce, and
+target PC identity. Both devices holding the same Bot token are trusted peers;
+the claimed operator ID is **not** independent proof of a Discord interaction.
+Keep both Windows users and both devices under the same trust boundary.
+
+From either PC, use `control/codex-peer.ps1` for an explicitly named other PC:
+
+```powershell
+.\control\codex-peer.ps1 --pc PC_B list
+.\control\codex-peer.ps1 --pc PC_B projects
+.\control\codex-peer.ps1 --pc PC_B read EXACT_TASK_ID
+.\control\codex-peer.ps1 --pc PC_B create --project REGISTERED_PROJECT_ID --message "Investigate the tests"
+.\control\codex-peer.ps1 --pc PC_B deliver EXACT_TASK_ID --message "Continue the work"
+.\control\codex-peer.ps1 --pc PC_B interrupt EXACT_TASK_ID
+.\control\codex-peer.ps1 --pc PC_B archive EXACT_TASK_ID
+```
+
+`send` and `steer` are available when the turn state is known; `deliver` chooses
+the appropriate one. `read` returns at most 16 recent messages, 4,000
+characters each. `create` uses only a visible project registered on the target
+PC, shown by `projects`. Task operations require an exact task ID in that PC's
+visible active inventory, and the owning AppServer confirms membership again
+before acting. No model, sandbox, approval, or working-directory overrides are
+sent. `archive` refuses an active turn; `interrupt` targets the current turn.
+
+Effectful requests write an operation record on the receiving PC **before**
+execution. Reusing the same `--operation-id UUID` returns its recorded result,
+including after Bridge restart; changing its payload is rejected. If an effect
+may have happened but the result was lost, the outcome is `unknown`. Do not send
+the same instruction under a new operation ID until you inspect the target task.
+No effect is automatically retried. The journal is flushed before an effect
+starts and is ignored by Git under `discord-bridge/data/task-control-journal.jsonl`.
+A damaged journal disables peer effects but leaves Discord and read-only lists
+running; inspect the failure before repairing it. The journal is never pruned
+automatically: after 10,000 distinct operation IDs, new effects fail closed.
+Archive the journal for manual review before a deliberate rotation, and do not
+reuse old operation IDs. Task control does not start or
+stop the AppServer process itself or answer task approval prompts remotely.
 
 ## Shared AppServer and credentials
 

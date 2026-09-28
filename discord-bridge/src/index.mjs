@@ -20,6 +20,7 @@ import { DiscordGatewayHealth } from './discord-gateway-health.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
 import { StateStore } from './state-store.mjs';
 import { TaskListFederation } from './task-list-federation.mjs';
+import { executeTaskOperation } from './task-peer-control.mjs';
 import {
   appendJsonLine,
   atomicWriteJson,
@@ -87,6 +88,10 @@ const controller = new DiscordController({
 });
 const taskListFederation = config.multiPcEnabled ? new TaskListFederation({
   config, token, getLocalTasks: (search) => controller.localTaskInventory(search),
+  executeLocalOperation: (operation) => executeTaskOperation(operation, {
+    codex, stateStore, getLocalTasks: (search) => controller.localTaskInventory(search),
+  }),
+  operationJournalPath: path.join(dataDir, 'task-control-journal.jsonl'),
 }) : null;
 controller.taskListFederation = taskListFederation;
 let taskListListenerRetryTimer = null;
@@ -139,6 +144,11 @@ function writeRuntime(phase, extra = {}) {
     discordUser: client.user?.tag ?? null,
     discordGateway,
     codex: codex.status(),
+    taskControl: taskListFederation ? {
+      enabled: config.taskControlEnabled,
+      ready: taskListFederation.controlReady,
+      failureCode: taskListFederation.controlFailureCode,
+    } : null,
     chatgpt: chatgptController.status(),
     ...extra,
   });

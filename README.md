@@ -11,7 +11,9 @@ Codex Desktop, local controller commands, and a private Discord remote UI.
   with Desktop's local-project sidebar state before Desktop starts, verifies
   the Desktop connection, and owns cleanup.
 - `control/`: lists, reads, resumes, starts, steers, interrupts, and watches
-  tasks on the shared app-server.
+  tasks on the shared app-server. The opt-in `codex-peer.ps1` sends an explicit,
+  authenticated task operation to another PC's Bridge over Tailscale; see
+  `discord-bridge/MULTI-PC.md`.
 - `discord-bridge/`: persistent private Discord UI for task display, control,
   approvals, Desktop message mirroring, archive synchronization, reconnect
   recovery, phone operation, and explicitly linked ordinary ChatGPT

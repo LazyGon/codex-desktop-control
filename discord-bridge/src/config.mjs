@@ -37,6 +37,8 @@ const defaults = {
   taskListListenPort: 18799,
   taskListPeers: [],
   taskListPeerTimeoutMs: 8000,
+  taskControlEnabled: false,
+  taskControlTimeoutMs: 60000,
   controlCategoryName: 'Codex Control',
   archiveCategoryName: 'Codex Archived',
   projectCategoryPrefix: 'Codex - ',

@@ -26,8 +26,22 @@ test('multi-PC config helper preserves existing settings, keeps a backup and ref
   assert.deepEqual(updated.authorizedUserIds, initial.authorizedUserIds);
   assert.deepEqual(updated.custom, initial.custom);
   assert.equal(updated.plainMessageInputEnabled, true);
+  assert.equal(updated.taskControlEnabled, false);
+  assert.equal(updated.taskListPeers[0].allowTaskControl, false);
   const backup = fs.readdirSync(path.join(directory, 'config')).find((file) => file.endsWith('.bak'));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'config', backup), 'utf8')), initial);
+  execFileSync(powershell, [...args, '-EnableTaskControl'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const controlEnabled = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(controlEnabled.taskControlEnabled, true);
+  assert.equal(controlEnabled.taskControlTimeoutMs, 60000);
+  assert.equal(controlEnabled.taskListPeers[0].allowTaskControl, true);
+  execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-File', script,
+    '-InstanceId', 'A', '-ListenHost', '100.75.107.79',
+    '-PeerInstanceId', 'C', '-PeerHost', '100.104.140.75'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const changedPeer = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(changedPeer.taskControlEnabled, false);
+  assert.equal(changedPeer.taskListPeers[0].allowTaskControl, false);
+  execFileSync(powershell, [...args, '-EnableTaskControl'], { stdio: ['ignore', 'pipe', 'pipe'] });
   const before = fs.readFileSync(configPath, 'utf8');
   fs.writeFileSync(path.join(directory, 'data/bridge.lock'), String(process.pid));
   assert.throws(() => execFileSync(powershell, args, { stdio: ['ignore', 'pipe', 'pipe'] }));

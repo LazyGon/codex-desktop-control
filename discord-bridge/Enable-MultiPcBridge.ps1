@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$ListenHost,
     [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$')][string]$PeerInstanceId,
     [Parameter(Mandatory)][string]$PeerHost,
-    [ValidateRange(1,65535)][int]$Port = 18799
+    [ValidateRange(1,65535)][int]$Port = 18799,
+    [switch]$EnableTaskControl
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -28,13 +29,23 @@ if (Test-Path -LiteralPath $lockPath) {
 $configPath = Join-Path $PSScriptRoot 'config\config.json'
 $original = [IO.File]::ReadAllText($configPath)
 $config = $original | ConvertFrom-Json
+$existingPeer = if ($null -ne $config.PSObject.Properties['taskListPeers']) {
+    @($config.taskListPeers | Where-Object { $_.instanceId -eq $PeerInstanceId }) | Select-Object -First 1
+} else { $null }
+$taskControl = $EnableTaskControl -or ($null -ne $existingPeer -and
+    $null -ne $existingPeer.PSObject.Properties['allowTaskControl'] -and
+    $existingPeer.allowTaskControl -eq $true -and
+    $null -ne $config.PSObject.Properties['taskControlEnabled'] -and
+    $config.taskControlEnabled -eq $true)
 $changes = @{
     multiPcEnabled = $true
     instanceId = $InstanceId
     taskListListenHost = $ListenHost
     taskListListenPort = $Port
     taskListPeerTimeoutMs = 8000
-    taskListPeers = @(@{ instanceId = $PeerInstanceId; url = "http://${PeerHost}:$Port" })
+    taskControlEnabled = [bool]$taskControl
+    taskControlTimeoutMs = 60000
+    taskListPeers = @(@{ instanceId = $PeerInstanceId; url = "http://${PeerHost}:$Port"; allowTaskControl = [bool]$taskControl })
     launcherStatePath = '..\launcher\state\current.json'
     appServerUrl = $null
 }
