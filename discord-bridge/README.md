@@ -2,7 +2,9 @@
 
 This is a private Discord control surface for the shared Codex Desktop
 app-server. It keeps the app-server on `127.0.0.1`; only the bot makes an
-outbound connection to Discord.
+outbound connection to Discord in single-PC mode. Optional independent multi-PC
+routing and merged task lists use a separate authenticated, read-only Tailscale
+listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI-PC.md).
 
 ## Capabilities
 

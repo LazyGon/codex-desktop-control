@@ -1234,10 +1234,17 @@ export class ChatgptController {
   }
 
   async #handleInteraction(interaction) {
+    if (this.config.chatgptEnabled === false) return;
     const isCommand = interaction.isChatInputCommand?.() && interaction.commandName === 'chatgpt';
     const isComponent = String(interaction.customId ?? '').startsWith('cg:');
     if (!isCommand && !isComponent) return;
     if (interaction.guildId !== this.config.guildId) return;
+    if (this.config.multiPcEnabled) {
+      const infrastructure = this.stateStore.infrastructure();
+      const owned = interaction.channelId === infrastructure.chatgptControlChannelId
+        || Boolean(this.stateStore.chatgptConversationByChannel(interaction.channelId));
+      if (!owned) return;
+    }
 
     if (isCommand) {
       if (!this.#isAuthorizedUser(interaction.user.id)) return this.#rejectInteraction(interaction, true);

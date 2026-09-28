@@ -1,0 +1,17 @@
+{
+  "applicationId": "DISCORD_APPLICATION_ID",
+  "guildId": "DISCORD_GUILD_ID",
+  "authorizedUserIds": ["DISCORD_USER_ID"],
+  "multiPcEnabled": true,
+  "instanceId": "PC_A",
+  "taskListListenHost": "100.64.0.1",
+  "taskListListenPort": 18799,
+  "taskListPeerTimeoutMs": 8000,
+  "taskListPeers": [{ "instanceId": "PC_B", "url": "http://100.64.0.2:18799" }],
+  "plainMessageInputEnabled": true,
+  "chatgptEnabled": false,
+  "textTransferEnabled": true,
+  "autoStartSharedDesktop": true,
+  "launcherStatePath": "..\\launcher\\state\\current.json",
+  "appServerUrl": null
+}

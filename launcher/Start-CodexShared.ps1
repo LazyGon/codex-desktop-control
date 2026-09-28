@@ -50,6 +50,8 @@ if (-not (Test-Path -LiteralPath $runtimeUpdateDrainScript -PathType Leaf)) {
 . $desktopPackageScript
 . $processEnvironmentScript
 . $codexAppToolsConfigScript
+. (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
+$null = Initialize-CodexNodeRuntime -StateRoot $stateRoot
 
 $cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
 
@@ -942,6 +944,8 @@ try {
             if ($readyResponse.StatusCode -ne 200) {
                 throw "Self-test ready endpoint returned HTTP $($readyResponse.StatusCode)."
             }
+            & $nodeExecutable (Join-Path $launcherRoot 'verify-shared-connection.mjs') $runtimeState.websocketUrl | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Self-test failed during App Server initialization or thread/list.' }
             Write-LauncherLog 'SELFTEST_OK app-server accepted connections and returned HTTP 200.'
             Write-Output "SELFTEST_OK port=$Port serverPid=$serverProcessId log=$logPath"
             $exitCode = 0

@@ -19,6 +19,7 @@ import { DiscordController } from './discord-controller.mjs';
 import { DiscordGatewayHealth } from './discord-gateway-health.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
 import { StateStore } from './state-store.mjs';
+import { TaskListFederation } from './task-list-federation.mjs';
 import {
   appendJsonLine,
   atomicWriteJson,
@@ -84,6 +85,18 @@ const controller = new DiscordController({
   logDir,
   deliveryOutboxDirectory: path.join(dataDir, 'delivery-outbox'),
 });
+const taskListFederation = config.multiPcEnabled ? new TaskListFederation({
+  config, token, getLocalTasks: (search) => controller.localTaskInventory(search),
+}) : null;
+controller.taskListFederation = taskListFederation;
+let taskListListenerRetryTimer = null;
+const startTaskListListener = async () => {
+  if (!taskListFederation || shuttingDown) return;
+  try { await taskListFederation.start(); }
+  catch (error) {
+    appendJsonLine(processLog, 'task-list-listener-unavailable', { code: error.code ?? 'UNAVAILABLE' });
+  }
+};
 const chatgptService = new ChatgptService({
   config,
   onStatus: (scope, message, identity = null) => appendJsonLine(processLog, 'chatgpt-transport-status', {
@@ -163,9 +176,11 @@ async function shutdown(reason, exitCode = 0) {
   clearInterval(runtimeTimer);
   clearInterval(stopTimer);
   clearTimeout(gatewayRecycleTimer);
+  clearInterval(taskListListenerRetryTimer);
   gatewayRecycleTimer = null;
   gatewayRecycleDeadline = null;
   const controllerStop = controller.stop();
+  await taskListFederation?.stop();
   const chatgptControllerStop = chatgptController.stop();
   await codex.stop().catch((error) => appendJsonLine(processLog, 'codex-stop-error', { error: error.message }));
   await controllerStop.catch((error) => appendJsonLine(
@@ -205,6 +220,11 @@ client.once('clientReady', () => {
       try {
         await controller.ready();
         await chatgptController.ready();
+        await startTaskListListener();
+        if (taskListFederation && !taskListListenerRetryTimer) {
+          taskListListenerRetryTimer = setInterval(() => { startTaskListListener().catch(() => {}); }, 30000);
+          taskListListenerRetryTimer.unref();
+        }
         codex.start().catch((error) => appendJsonLine(processLog, 'codex-loop-failed', { error: error.stack ?? error.message }));
         writeRuntime('running');
         return;

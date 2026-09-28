@@ -146,6 +146,16 @@ test('shared bridge derives and verifies the installed Desktop plugin layout', (
 
   assert.equal(derivePackageFamilyName(desktop), 'OpenAI.Codex_2p2nqsd0c76g0');
   assert.equal(resolveBundledPaths(desktop).pluginRoot, plugin);
+  const modernManifest = path.join(plugin, '.mcp.json');
+  fs.copyFileSync(path.join(plugin, 'desktop-mcp.json'), modernManifest);
+  assert.equal(resolveBundledPaths(desktop).definitionPath, modernManifest);
+  fs.writeFileSync(modernManifest, JSON.stringify({ mcpServers: { codex_app: { command: 'foreign.exe', args: [] } } }));
+  assert.throws(() => resolveBundledPaths(desktop), /definition is not recognized/);
+  fs.rmSync(path.join(plugin, 'desktop-mcp.json'));
+  fs.writeFileSync(modernManifest, JSON.stringify({ mcpServers: { codex_app: {
+    command: 'cmd.exe', args: ['./scripts/launch_codex_app_tools_mcp.cmd', './server.mjs'],
+  } } }));
+  assert.equal(resolveBundledPaths(desktop).definitionPath, modernManifest);
 });
 
 test('shared bridge allows a bounded startup race without accepting uncertainty', async () => {

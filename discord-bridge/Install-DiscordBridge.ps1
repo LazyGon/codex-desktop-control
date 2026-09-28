@@ -26,6 +26,7 @@ param(
     [Security.SecureString]$BotToken,
 
     [switch]$SkipScheduledTask,
+    [switch]$SkipDependencyInstall,
     [switch]$EnablePlainMessageInput,
     [switch]$NoStart
 )
@@ -34,6 +35,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
+. (Join-Path $root 'DiscordBotToken.ps1')
 $configDir = Join-Path $root 'config'
 $configPath = Join-Path $configDir 'config.json'
 $tokenPath = Join-Path $configDir 'token.dpapi'
@@ -46,6 +48,12 @@ $sharedLauncherPath = Join-Path (Split-Path -Parent $root) 'launcher\CodexShared
 $sharedLauncherIcon = Join-Path (Split-Path -Parent $root) 'launcher\CodexSharedLauncher.ico'
 $taskName = 'Codex Discord Remote'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$launcherRoot = Join-Path (Split-Path -Parent $root) 'launcher'
+. (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
+$node = Initialize-CodexNodeRuntime -StateRoot (Join-Path $launcherRoot 'state')
+$existingConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+    Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
+} else { $null }
 
 if (-not (Test-Path -LiteralPath $sharedLauncherPath -PathType Leaf)) {
     throw "Shared Desktop launcher is missing: $sharedLauncherPath. Run the repository root Install.ps1."
@@ -93,7 +101,7 @@ try {
     $env:DISCORD_BOT_TOKEN = $plainToken
     Push-Location $root
     try {
-        $diagnosticText = (& node.exe 'scripts\diagnose-discord.mjs' $GuildId | Out-String).Trim()
+        $diagnosticText = (& $node 'scripts\diagnose-discord.mjs' $GuildId | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) { throw "Discord Gateway diagnostic failed with exit code $LASTEXITCODE" }
         $diagnostic = $diagnosticText | ConvertFrom-Json
     }
@@ -178,32 +186,37 @@ try {
         sharedLauncherPath = [IO.Path]::GetFullPath($sharedLauncherPath)
         appServerUrl = $null
     }
+    # Preserve local endpoint/routing/customization when re-installing. Explicit
+    # identity and authorization parameters above remain authoritative.
+    if ($existingConfig) {
+        foreach ($property in $existingConfig.PSObject.Properties) {
+            if ($property.Name -notin @('applicationId', 'guildId', 'authorizedUserIds', 'completionMentionUserIds')) {
+                $config[$property.Name] = $property.Value
+            }
+        }
+        if ($PSBoundParameters.ContainsKey('EnablePlainMessageInput')) {
+            $config.plainMessageInputEnabled = [bool]$EnablePlainMessageInput
+        }
+    }
     $configJson = $config | ConvertTo-Json -Depth 10
     $configTemp = "$configPath.$PID.tmp"
     [IO.File]::WriteAllText($configTemp, "$configJson`n", [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $configTemp -Destination $configPath -Force
 
-    $protectedToken = ConvertFrom-SecureString $BotToken
-    $tokenTemp = "$tokenPath.$PID.tmp"
-    [IO.File]::WriteAllText($tokenTemp, "$protectedToken`n", [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $tokenTemp -Destination $tokenPath -Force
-
-    $acl = Get-Acl -LiteralPath $tokenPath
-    $acl.SetAccessRuleProtection($true, $false)
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')
-    $acl.SetAccessRule($rule)
-    Set-Acl -LiteralPath $tokenPath -AclObject $acl
+    Write-DiscordProtectedBotToken -TokenText $plainToken -TokenPath $tokenPath
 
     Push-Location $root
     try {
-        & npm.cmd install
-        if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
-        & npm.cmd run check
+        if (-not $SkipDependencyInstall) {
+            & npm.cmd ci --ignore-scripts --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+        }
+        & $node 'scripts\check.mjs'
         if ($LASTEXITCODE -ne 0) { throw "npm run check failed with exit code $LASTEXITCODE" }
-        & npm.cmd test
+        & $node --test
         if ($LASTEXITCODE -ne 0) { throw "npm test failed with exit code $LASTEXITCODE" }
         $env:DISCORD_BOT_TOKEN = $plainToken
-        & node.exe 'src\register-commands.mjs'
+        & $node 'src\register-commands.mjs'
         if ($LASTEXITCODE -ne 0) { throw "Discord command registration failed with exit code $LASTEXITCODE" }
     }
     finally {

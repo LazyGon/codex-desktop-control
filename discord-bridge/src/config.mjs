@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isSnowflake, readJsonIfPresent } from './util.mjs';
+import { multiPcConfigErrors, resolveMultiPcConfig } from './task-list-federation.mjs';
 
 export const bridgeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const configPath = path.join(bridgeRoot, 'config', 'config.json');
@@ -30,6 +31,12 @@ const defaultReviewerAccessorRoot = path.join(
 export const MIN_DISCORD_NETWORK_TIMEOUT_MS = 300_000;
 
 const defaults = {
+  multiPcEnabled: false,
+  instanceId: os.hostname(),
+  taskListListenHost: null,
+  taskListListenPort: 18799,
+  taskListPeers: [],
+  taskListPeerTimeoutMs: 8000,
   controlCategoryName: 'Codex Control',
   archiveCategoryName: 'Codex Archived',
   projectCategoryPrefix: 'Codex - ',
@@ -132,7 +139,7 @@ export function authorizationConfigErrors(config) {
 export function loadConfig() {
   const raw = readJsonIfPresent(configPath);
   if (!raw) throw new Error(`Missing or invalid configuration: ${configPath}`);
-  const config = resolveDiscordTimeoutConfig(resolveAuthorizationConfig({ ...defaults, ...raw }));
+  const config = resolveMultiPcConfig(resolveDiscordTimeoutConfig(resolveAuthorizationConfig({ ...defaults, ...raw })));
   if (!raw.initialSnapshotMessages && raw.catchupMessages) config.initialSnapshotMessages = raw.catchupMessages;
   if (!raw.taskSyncIntervalMs && raw.autoCatchupIntervalMs) config.taskSyncIntervalMs = raw.autoCatchupIntervalMs;
   if (config.sharedLauncherPath && !path.isAbsolute(config.sharedLauncherPath)) {
@@ -148,6 +155,7 @@ export function loadConfig() {
     config.reviewerAccessorRoot = path.resolve(bridgeRoot, config.reviewerAccessorRoot);
   }
   const errors = [];
+  errors.push(...multiPcConfigErrors(config));
   if (!isSnowflake(config.applicationId)) errors.push('applicationId must be a Discord snowflake.');
   if (!isSnowflake(config.guildId)) errors.push('guildId must be a Discord snowflake.');
   errors.push(...authorizationConfigErrors(config));
@@ -281,17 +289,22 @@ export function requireBotToken() {
   return token;
 }
 
+function localAppServerEndpoint(url, source) {
+  const parsed = new URL(url);
+  if (!['ws:', 'wss:'].includes(parsed.protocol) || !['127.0.0.1', 'localhost'].includes(parsed.hostname)
+    || parsed.username || parsed.password) throw new Error('AppServer endpoint must be loopback-only.');
+  return { url, source };
+}
+
 export function discoverEndpoint(config) {
-  if (config.appServerUrl) return { url: config.appServerUrl, source: 'config' };
-  if (process.env.CODEX_APP_SERVER_WS_URL) {
-    return { url: process.env.CODEX_APP_SERVER_WS_URL, source: 'environment' };
-  }
-  const candidates = [
-    path.join(path.dirname(bridgeRoot), 'launcher', 'state', 'current.json'),
-  ];
+  if (config.appServerUrl) return localAppServerEndpoint(config.appServerUrl, 'config');
+  const candidates = [config.launcherStatePath ?? defaultLauncherStatePath];
   for (const candidate of candidates) {
     const state = readJsonIfPresent(candidate);
-    if (state?.websocketUrl) return { url: state.websocketUrl, source: candidate };
+    if (state?.websocketUrl) return localAppServerEndpoint(state.websocketUrl, candidate);
+  }
+  if (process.env.CODEX_APP_SERVER_WS_URL) {
+    return localAppServerEndpoint(process.env.CODEX_APP_SERVER_WS_URL, 'environment');
   }
   return { url: 'ws://127.0.0.1:8798', source: 'default' };
 }

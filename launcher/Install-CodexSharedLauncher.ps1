@@ -2,12 +2,17 @@
 param(
     [switch]$Uninstall,
 
+    [switch]$RefreshIconOnly,
+
     [ValidateRange(1024, 65535)]
     [int]$Port = 8798
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($Uninstall -and $RefreshIconOnly) {
+    throw 'Uninstall and RefreshIconOnly cannot be used together.'
+}
 
 $launcherRoot = Split-Path -Parent $PSCommandPath
 $launcherScript = Join-Path $launcherRoot 'Start-CodexShared.ps1'
@@ -79,23 +84,30 @@ if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
     throw "Codex Desktop package helper was not found: $desktopPackageScript"
 }
 . $desktopPackageScript
+. (Join-Path $launcherRoot 'CodexLauncherIcon.ps1')
+
+# Record a verified runtime so a Start-menu/logon launch also works when
+# Node.js was supplied by Codex's workspace runtime, not the user's PATH.
+if (-not $RefreshIconOnly) {
+    . (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
+    $nodeStateRoot = Join-Path $launcherRoot 'state'
+    $nodeExecutable = Initialize-CodexNodeRuntime -StateRoot $nodeStateRoot
+    New-Item -ItemType Directory -Path $nodeStateRoot -Force | Out-Null
+    $nodeRecordPath = Join-Path $nodeStateRoot 'node-runtime.json'
+    $nodeRecordTemporaryPath = "$nodeRecordPath.$PID.tmp"
+    $nodeRecord = [ordered]@{ schemaVersion = 1; nodeExecutable = $nodeExecutable }
+    [IO.File]::WriteAllText($nodeRecordTemporaryPath, ($nodeRecord | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $nodeRecordTemporaryPath -Destination $nodeRecordPath -Force
+}
 
 $package = Get-CodexDesktopPackageInfo
-$desktopExecutable = $package.DesktopExecutable
-
-Add-Type -AssemblyName System.Drawing
-$icon = [System.Drawing.Icon]::ExtractAssociatedIcon($desktopExecutable)
-if ($null -eq $icon) {
-    throw "Unable to extract the Codex icon from: $desktopExecutable"
+$activeLaunchers = @(Get-Process -Name 'CodexSharedLauncher' -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -eq $launcherExecutable
+})
+if ($activeLaunchers.Count -gt 0) {
+    throw 'The launcher is briefly in use; retry after it finishes starting the shared Desktop.'
 }
-$iconStream = [IO.File]::Open($launcherIcon, [IO.FileMode]::Create)
-try {
-    $icon.Save($iconStream)
-}
-finally {
-    $iconStream.Dispose()
-    $icon.Dispose()
-}
+$iconInfo = Install-CodexLauncherIcon -InstallLocation $package.InstallLocation -LauncherRoot $launcherRoot
 
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
@@ -105,33 +117,60 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw 'The .NET Framework C# compiler was not found.'
 }
 
-$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$launcherExecutable" /reference:System.Windows.Forms.dll $launcherSource 2>&1
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcherExecutable -PathType Leaf)) {
+$temporaryExecutable = Join-Path $launcherRoot "CodexSharedLauncher.$PID.tmp"
+$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$temporaryExecutable" /reference:System.Windows.Forms.dll $launcherSource 2>&1
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryExecutable -PathType Leaf)) {
     throw "Launcher compilation failed: $($compilerOutput -join [Environment]::NewLine)"
 }
+Move-Item -LiteralPath $temporaryExecutable -Destination $launcherExecutable -Force
 
 $wsh = New-Object -ComObject WScript.Shell
+$updatedShortcuts = @()
 foreach ($destination in @($shortcutPath, $desktopShortcutPath)) {
+    if ($RefreshIconOnly -and -not (Test-Path -LiteralPath $destination -PathType Leaf)) { continue }
     $shortcut = $wsh.CreateShortcut($destination)
-    $shortcut.TargetPath = $launcherExecutable
-    $shortcut.Arguments = ''
-    $shortcut.WorkingDirectory = $launcherRoot
-    $shortcut.IconLocation = "$launcherExecutable,0"
-    $shortcut.Description = 'Start Codex Desktop on a shared local app-server'
+    if ($RefreshIconOnly) {
+        if ($shortcut.TargetPath -ne $launcherExecutable) { continue }
+    }
+    else {
+        $shortcut.TargetPath = $launcherExecutable
+        $shortcut.Arguments = ''
+        $shortcut.WorkingDirectory = $launcherRoot
+        $shortcut.Description = 'Start Codex Desktop on a shared local app-server'
+    }
+    $shortcut.IconLocation = "$($iconInfo.ShortcutIconPath),0"
     $shortcut.Save()
+    $updatedShortcuts += $destination
 }
 
 $pinnedTaskbarShortcut = Join-Path $taskbarRoot (Split-Path -Leaf $shortcutPath)
 $taskbarShortcutUpdated = $false
 if (Test-Path -LiteralPath $pinnedTaskbarShortcut -PathType Leaf) {
     $pinnedShortcut = $wsh.CreateShortcut($pinnedTaskbarShortcut)
-    $pinnedShortcut.TargetPath = $launcherExecutable
-    $pinnedShortcut.Arguments = ''
-    $pinnedShortcut.WorkingDirectory = $launcherRoot
-    $pinnedShortcut.IconLocation = "$launcherExecutable,0"
-    $pinnedShortcut.Description = 'Start Codex Desktop on a shared local app-server'
-    $pinnedShortcut.Save()
-    $taskbarShortcutUpdated = $true
+    if (-not $RefreshIconOnly) {
+        $pinnedShortcut.TargetPath = $launcherExecutable
+        $pinnedShortcut.Arguments = ''
+        $pinnedShortcut.WorkingDirectory = $launcherRoot
+        $pinnedShortcut.Description = 'Start Codex Desktop on a shared local app-server'
+    }
+    if ($pinnedShortcut.TargetPath -eq $launcherExecutable) {
+        $pinnedShortcut.IconLocation = "$($iconInfo.ShortcutIconPath),0"
+        $pinnedShortcut.Save()
+        $taskbarShortcutUpdated = $true
+        $updatedShortcuts += $pinnedTaskbarShortcut
+    }
+}
+Notify-CodexLauncherIconChanged -Paths (@($launcherExecutable, $iconInfo.ShortcutIconPath) + $updatedShortcuts)
+
+if ($RefreshIconOnly) {
+    [pscustomobject]@{
+        IconRefreshed = $true
+        IconPath = $iconInfo.ShortcutIconPath
+        FrameSizes = $iconInfo.FrameSizes
+        UpdatedShortcuts = $updatedShortcuts
+        RuntimeUnchanged = $true
+    }
+    exit 0
 }
 
 $registeredUrl = [Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')

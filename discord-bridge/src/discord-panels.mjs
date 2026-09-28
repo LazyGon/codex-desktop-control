@@ -26,6 +26,7 @@ export function controlPanelPayload({
   pendingCount,
   projectCount,
   hiddenProjectCount = 0,
+  multiPcEnabled = false,
 }) {
   const active = bindings.filter((binding) => !binding.archived);
   const archived = bindings.filter((binding) => binding.archived);
@@ -56,6 +57,10 @@ export function controlPanelPayload({
       .setLabel('プロジェクト表示')
       .setStyle(ButtonStyle.Secondary),
   ));
+  if (multiPcEnabled) {
+    components[1].addComponents(new ButtonBuilder()
+      .setCustomId('cx:ui:control:tasks').setLabel('全PCタスク一覧').setStyle(ButtonStyle.Secondary));
+  }
   components.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('cx:ui:control:resources')

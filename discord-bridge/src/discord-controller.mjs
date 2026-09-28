@@ -35,6 +35,7 @@ import {
   truncate,
 } from './util.mjs';
 import { commandPayload } from './commands.mjs';
+import { interactionOwned, selectedTask, taskIdFromTopic } from './task-routing.mjs';
 import {
   CONTROL_PANEL_MARKER,
   controlPanelPayload,
@@ -828,6 +829,10 @@ export class DiscordController {
     const guild = await this.client.guilds.fetch(this.config.guildId);
     const channels = await guild.channels.fetch();
     const infrastructure = stateInfrastructure(this.stateStore);
+    if (this.config.multiPcEnabled && infrastructure.bridgeInstanceId
+      && infrastructure.bridgeInstanceId !== this.config.instanceId) {
+      throw new Error('Bridge state belongs to another PC. Do not copy data/state.json between PCs.');
+    }
     this.canPinControlPanels = guild.members.me?.permissions.has(PermissionFlagsBits.PinMessages) ?? false;
     const completionNotificationsAlreadyConfigured = Boolean(infrastructure.completionsChannelId);
 
@@ -836,7 +841,8 @@ export class DiscordController {
       : null;
     if (!controlCategory || controlCategory.type !== ChannelType.GuildCategory) {
       controlCategory = channels.find((channel) => channel?.type === ChannelType.GuildCategory
-        && [this.config.controlCategoryName, 'Codex Remote'].includes(channel.name));
+        && [this.config.controlCategoryName,
+          ...(!this.config.multiPcEnabled ? ['Codex Remote'] : [])].includes(channel.name));
     }
     let controlCategoryCreated = false;
     if (!controlCategory) {
@@ -949,6 +955,7 @@ export class DiscordController {
       : null;
     this.transferTextChannelId = transferText?.id ?? null;
     this.stateStore.setInfrastructure({
+      ...(this.config.multiPcEnabled ? { bridgeInstanceId: this.config.instanceId } : {}),
       controlCategoryId: controlCategory.id,
       controlChannelId: control.id,
       syncChannelId: sync.id,
@@ -1027,6 +1034,14 @@ export class DiscordController {
   }
 
   async #handleInteraction(interaction) {
+    // This check must precede autocomplete, authorization rejection, and all ACKs.
+    // Never send an error response for an event belonging to another PC.
+    try {
+      if (!await interactionOwned({ interaction, config: this.config, stateStore: this.stateStore,
+        codex: this.codex, pendingActions: this.pendingActions, pendingRequests: this.pendingRequests })) return;
+    } catch {
+      return;
+    }
     try {
       if (interaction.commandName === 'chatgpt' || String(interaction.customId ?? '').startsWith('cg:')) return;
       if (interaction.isAutocomplete()) {
@@ -1181,7 +1196,10 @@ export class DiscordController {
       channel = message.channel ?? await this.client.channels.fetch(message.channelId).catch(() => null);
       project = this.#managedProjectForChannel(channel);
       if (!project) return;
+      // An existing task channel is not a request to create a replacement task.
+      if (this.config.multiPcEnabled && taskIdFromTopic(channel)) return;
     }
+    if (this.config.multiPcEnabled && binding && !await this.codex.hasLocalThread(binding.threadId)) return;
     const canExecuteTask = binding && this.#hasMessageExecutionPermission(message);
     const canCreateTask = !binding && this.#isAuthorizedUser(message.author.id);
     if (!canExecuteTask && !canCreateTask) {
@@ -2747,6 +2765,47 @@ export class DiscordController {
     await interaction.followUp(messageOptions(`Linked files were posted as a ZIP.\n${url}`, { ephemeral: true }));
   }
 
+  async localTaskInventory(search = null) {
+    const projectState = await this.#loadProjectState();
+    const threads = await this.#listAllThreadsWithProjects(projectState, false, search);
+    return threads.filter((thread) => {
+      if (!this.#isSyncableThread(thread)) return false;
+      const descriptor = projectDescriptorForThread(thread, projectState, this.config.projectCategoryPrefix);
+      return !this.#hiddenProjectDescriptorForThread(thread, descriptor, projectState);
+    });
+  }
+
+  async #showFederatedTaskList(interaction, search) {
+    if (!this.taskListFederation) throw new Error('PC間タスク一覧が未設定です。');
+    const inventory = await this.taskListFederation.collect({
+      requestId: interaction.id, userId: interaction.user.id, search,
+    });
+    const available = inventory.sources.filter((source) => source.available).map((source) => source.instanceId);
+    const unavailable = inventory.sources.filter((source) => !source.available).map((source) => source.instanceId);
+    const header = [
+      `タスク ${inventory.threads.length}件 / 取得済みPC: ${available.join(', ') || 'なし'}`,
+      ...(unavailable.length ? [`未取得PC（オフライン・接続失敗等）: ${unavailable.join(', ')}`] : []),
+    ];
+    const components = [];
+    if (inventory.threads.length) {
+      components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
+        .setCustomId('cx:open').setPlaceholder('PCを含む一覧からタスクを選択（最新25件）')
+        .addOptions(inventory.threads.slice(0, 25).map((thread) => new StringSelectMenuOptionBuilder()
+          .setLabel(truncate(`[${thread.instanceId}] ${thread.name}`, 100, ''))
+          .setDescription(truncate(`${threadStatusLabel(thread.status)} | ${thread.cwd}`, 100, ''))
+          .setValue(`${thread.instanceId}:${thread.id}`)))));
+    }
+    const list = inventory.threads.slice(0, 10).map((thread) =>
+      `- ${threadStatusEmoji(thread.status)} [${thread.instanceId}] ${truncate(thread.name, 80)}`);
+    const files = inventory.threads.length ? [new AttachmentBuilder(Buffer.from([
+      ...header, '', ...inventory.threads.map((thread) =>
+        `[${thread.instanceId}] ${thread.name}\nTask: ${thread.id}\nState: ${threadStatusLabel(thread.status)}\nDirectory: ${thread.cwd}\n`),
+    ].join('\n'), 'utf8'), { name: 'codex-tasks-all-pcs.txt' })] : [];
+    await interaction.editReply(messageOptions(truncate([...header, '', ...list].join('\n'), 1900), {
+      components, files,
+    }));
+  }
+
   async #handleCommand(interaction) {
     await this.infrastructureReady;
     const subcommand = interaction.options.getSubcommand();
@@ -2776,6 +2835,10 @@ export class DiscordController {
     if (subcommand === 'tasks') {
       await interaction.deferReply({ ephemeral: true });
       const search = interaction.options.getString('search');
+      if (this.config.multiPcEnabled) {
+        await this.#showFederatedTaskList(interaction, search);
+        return;
+      }
       const result = await this.codex.listThreads({ limit: 25, search });
       const projectState = await this.#loadProjectState();
       const threads = result.data.filter((thread) => {
@@ -3483,7 +3546,7 @@ export class DiscordController {
 
     if (interaction.customId === 'cx:open') {
       await interaction.deferUpdate();
-      const threadId = interaction.values[0];
+      const { threadId } = selectedTask(interaction.values[0], this.config.instanceId);
       const result = await this.codex.threadMetadata(threadId);
       const channel = await this.#openTaskChannel(result.thread);
       await interaction.followUp(messageOptions(`開きました: ${channelMention(channel.id)}`, { ephemeral: true }));
@@ -3590,6 +3653,12 @@ export class DiscordController {
       const action = parts[3];
       if (surface === 'control') {
         this.#assertControlPanelInteraction(interaction);
+        if (action === 'tasks' && this.config.multiPcEnabled) {
+          this.#assertControlOperator(interaction);
+          await interaction.deferReply({ ephemeral: true });
+          await this.#showFederatedTaskList(interaction, null);
+          return;
+        }
         if (action === 'status') {
           await interaction.deferReply({ ephemeral: true });
           await interaction.editReply({ embeds: [await this.#statusEmbed()] });
@@ -3961,14 +4030,14 @@ export class DiscordController {
     return Boolean(thread?.id) && !thread.ephemeral && !thread.parentThreadId;
   }
 
-  async #listAllThreadsWithProjects(projectState, archived) {
+  async #listAllThreadsWithProjects(projectState, archived, search = null) {
     const nativeProjectIds = [...(projectState?.appServerProjects?.keys?.() ?? [])];
-    const globalThreads = await this.codex.listAllThreads({ archived });
+    const globalThreads = await this.codex.listAllThreads({ archived, search });
     const projectResults = [];
     for (const projectId of nativeProjectIds) {
       projectResults.push({
         projectId,
-        threads: await this.codex.listAllThreads({ archived, projectId }),
+        threads: await this.codex.listAllThreads({ archived, projectId, search }),
       });
     }
     return mergeProjectScopedThreads(globalThreads, projectResults);
@@ -4515,6 +4584,7 @@ export class DiscordController {
     const storedInfrastructure = stateInfrastructure(this.stateStore);
     const projects = this.#projectVisibilityProjects();
     const payload = controlPanelPayload({
+      multiPcEnabled: Boolean(this.config.multiPcEnabled),
       bindings: stateBindingSummaries(this.stateStore),
       connected: this.codex.connected,
       pendingCount: this.#visiblePendingRequestCount(),

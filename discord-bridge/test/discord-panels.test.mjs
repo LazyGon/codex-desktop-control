@@ -17,6 +17,11 @@ function json(payload) {
   };
 }
 
+test('multi-PC control panel exposes request-scoped merged inventory without replacing local navigation', () => {
+  const payload = json(controlPanelPayload({ multiPcEnabled: true, bindings: [], connected: true, pendingCount: 0, projectCount: 0 }));
+  assert.equal(payload.components[1].components[1].custom_id, 'cx:ui:control:tasks');
+});
+
 test('control panel exposes status, usage, resources, sync, recent history, pending, and task navigation UI', () => {
   const payload = json(controlPanelPayload({
     connected: true,

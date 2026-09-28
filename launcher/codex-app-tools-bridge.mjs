@@ -179,7 +179,14 @@ export function resolveBundledPaths(desktopExecutable) {
   const bundledNode = path.win32.join(resourcesRoot, 'cua_node', 'bin', 'node.exe');
   const serverScript = path.win32.join(pluginRoot, 'server.mjs');
   const launchScript = path.win32.join(pluginRoot, 'scripts', 'launch_codex_app_tools_mcp.cmd');
-  const definitionPath = path.win32.join(pluginRoot, 'desktop-mcp.json');
+  // New Desktop packages use the standard plugin manifest name. Prefer it;
+  // an invalid new manifest must not be hidden by a legacy fallback.
+  const definitionPath = ['.mcp.json', 'desktop-mcp.json']
+    .map(name => path.win32.join(pluginRoot, name))
+    .find(candidate => fs.statSync(candidate, { throwIfNoEntry: false })?.isFile());
+  if (!definitionPath) {
+    throw new Error('The installed Desktop package has no recognized codex-app-tools MCP manifest.');
+  }
   for (const candidate of [bundledNode, serverScript, launchScript, definitionPath]) {
     if (!fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) {
       throw new Error('The installed Desktop package is missing a required codex-app-tools file.');
@@ -194,7 +201,7 @@ export function resolveBundledPaths(desktopExecutable) {
   ) {
     throw new Error('The installed codex-app-tools MCP definition is not recognized.');
   }
-  return { resourcesRoot, pluginRoot, bundledNode, serverScript };
+  return { resourcesRoot, pluginRoot, bundledNode, serverScript, definitionPath };
 }
 
 function windowsPowerShell() {

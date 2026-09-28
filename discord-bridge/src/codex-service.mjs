@@ -181,7 +181,7 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
-  async listAllThreads({ archived = false, projectId = null } = {}) {
+  async listAllThreads({ archived = false, projectId = null, search = null } = {}) {
     this.#requireClient();
     const threads = [];
     const seenCursors = new Set();
@@ -189,6 +189,7 @@ export class CodexService extends EventEmitter {
     do {
       const params = { limit: 100, archived, sortKey: 'recency_at', sortDirection: 'desc' };
       if (projectId) params.projectId = projectId;
+      if (search) params.searchTerm = search;
       if (cursor) params.cursor = cursor;
       const result = await this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
       threads.push(...(result.data ?? []));
@@ -212,6 +213,19 @@ export class CodexService extends EventEmitter {
   async threadMetadata(threadId) {
     this.#requireClient();
     return this.client.call('thread/read', { threadId, includeTurns: false }, APP_SERVER_OPERATION_TIMEOUT_MS);
+  }
+
+  async hasLocalThread(threadId) {
+    if (!this.connected || !threadId) return false;
+    try {
+      const result = await this.client.call(
+        'thread/read', { threadId, includeTurns: false }, 1200,
+      );
+      return result.thread?.id === threadId;
+    } catch {
+      // Missing, disconnected and indeterminate must all fail silently before ACK.
+      return false;
+    }
   }
 
   async resumeThread(threadId) {

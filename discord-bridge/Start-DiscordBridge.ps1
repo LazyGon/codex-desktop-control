@@ -8,7 +8,9 @@ $root = $PSScriptRoot
 $configPath = Join-Path $root 'config\config.json'
 $tokenPath = Join-Path $root 'config\token.dpapi'
 $lockPath = Join-Path $root 'data\bridge.lock'
-$node = (Get-Command node.exe -ErrorAction Stop).Source
+$launcherRoot = Join-Path (Split-Path -Parent $root) 'launcher'
+. (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
+$node = Initialize-CodexNodeRuntime -StateRoot (Join-Path $launcherRoot 'state')
 
 if (-not (Test-Path -LiteralPath $configPath)) {
     throw "Configuration is missing: $configPath"

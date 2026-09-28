@@ -41,6 +41,7 @@ export class AppServerClient extends EventEmitter {
       clientInfo: { name: 'codex-discord-bridge', version: '1.0.0' },
       capabilities: { experimentalApi: true },
     });
+    this.socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }));
     this.emit('ready', result);
     return result;
   }

@@ -96,6 +96,17 @@ standard PowerShell 7 installation, `powershell.exe` on `PATH`, and finally
 Windows PowerShell 5.1. It never supplies an execution-policy override and does
 not propagate a parent process-level override.
 
+Launcher icons preserve the installed Desktop package's full multi-resolution
+ICO, including its 256-pixel frame. To refresh an older low-resolution launcher
+and its existing shortcuts without restarting Desktop or the Bridge, run:
+
+```powershell
+.\launcher\Install-CodexSharedLauncher.ps1 -RefreshIconOnly
+```
+
+This changes only the launcher and icon references; it does not change endpoint
+configuration, logon tasks, or pin new shortcuts.
+
 If this checkout's healthy app-server is already listening, the launcher
 validates its state, completed Desktop connection verification, listener PID,
 executable, supervisor, package version, and `/readyz` response. It then skips
