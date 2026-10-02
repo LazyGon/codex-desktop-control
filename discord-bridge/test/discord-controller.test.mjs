@@ -14,6 +14,7 @@ import {
   emptyDuplicateUserEntryIds,
   forkOwnTurns,
   isActiveSubagentThread,
+  isLegacyMultiPcManagedCategoryName,
   isManagedProjectCategoryName,
   isSubagentCodexThread,
   managedArchiveCategoryCleanupPlan,
@@ -159,6 +160,42 @@ test('managed project category namespace includes orphaned overflow names only',
   assert.equal(isManagedProjectCategoryName('Codex Archived (3)', 'Codex - '), false);
   assert.equal(isManagedProjectCategoryName('Codex - ', 'Codex - '), false);
   assert.equal(isManagedProjectCategoryName('Personal category', 'Codex - '), false);
+});
+
+test('multi-PC cleanup recognizes only empty-category names from this PC legacy namespace', () => {
+  const config = {
+    multiPcEnabled: true,
+    instanceId: 'LAPTOP-A',
+    projectCategoryPrefix: 'Codex - LAPTOP-A - ',
+    archiveCategoryName: 'Codex Archived [LAPTOP-A]',
+  };
+  const currentProjectCategoryNames = [
+    'Codex - LAPTOP-A - attendance-automation',
+    'Codex - LAPTOP-A - other',
+  ];
+  const matches = (name) => isLegacyMultiPcManagedCategoryName(
+    name,
+    config,
+    currentProjectCategoryNames,
+  );
+
+  assert.equal(matches('Codex - attendance-automation'), true);
+  assert.equal(matches('Codex - attendance-automation (2)'), true);
+  assert.equal(matches('Codex - other'), true);
+  assert.equal(matches('Codex Archived'), true);
+  assert.equal(matches('Codex Archived (3)'), true);
+
+  assert.equal(matches('Codex - LAPTOP-A - attendance-automation'), false);
+  assert.equal(matches('Codex - DESKTOP-B - attendance-automation'), false);
+  assert.equal(matches('Codex Archived [DESKTOP-B]'), false);
+  assert.equal(matches('Codex - unknown-project'), false);
+  assert.equal(matches('Codex Control'), false);
+  assert.equal(matches('ChatGPT'), false);
+  assert.equal(isLegacyMultiPcManagedCategoryName(
+    'Codex Archived',
+    { ...config, multiPcEnabled: false },
+    currentProjectCategoryNames,
+  ), false);
 });
 
 test('managed project category names drop stale collision suffixes once the Desktop name is unique', () => {

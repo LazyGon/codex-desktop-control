@@ -19,6 +19,11 @@ AppServer. There is no parent, leader election, lease, or exclusion channel.
 - Taskless commands are handled only in locally registered channels/categories.
   The categories are scoped by PC ID so two PCs with the same project name do
   not adopt, rename, or clean up each other's categories.
+- After task synchronization, the Bridge removes empty pre-multi-PC project
+  categories only when their names can be derived from projects currently known
+  to this PC. It also removes empty pre-multi-PC archive categories. Categories
+  owned by another PC, unknown legacy names, and any nonempty category are left
+  unchanged.
 - Opaque confirmation/input/file sessions are handled only by the PC which
   owns that in-memory session. Reopen expired UI after a Bridge restart.
 - Task IDs are expected to be independent across PCs. A manually copied task

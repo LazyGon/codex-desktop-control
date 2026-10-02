@@ -377,6 +377,43 @@ export function isManagedProjectCategoryName(name, prefix) {
     && name.length > prefix.length;
 }
 
+function isCategoryBaseOrOverflow(name, baseName) {
+  if (name === baseName) return true;
+  if (!name.startsWith(`${baseName} (`)) return false;
+  const match = name.slice(baseName.length).match(/^ \(([1-9]\d*)\)$/);
+  return Boolean(match) && Number(match[1]) >= 2;
+}
+
+export function isLegacyMultiPcManagedCategoryName(
+  name,
+  config,
+  currentProjectCategoryNames = [],
+) {
+  if (typeof name !== 'string' || !config?.multiPcEnabled) return false;
+  const instanceId = String(config.instanceId ?? '');
+  if (!instanceId) return false;
+
+  const currentPrefix = String(config.projectCategoryPrefix ?? '');
+  const projectScope = `${instanceId} - `;
+  if (currentPrefix.endsWith(projectScope)) {
+    const legacyPrefix = currentPrefix.slice(0, -projectScope.length);
+    for (const currentName of currentProjectCategoryNames) {
+      if (typeof currentName !== 'string'
+        || !currentName.startsWith(currentPrefix)
+        || currentName.length <= currentPrefix.length) continue;
+      const legacyName = `${legacyPrefix}${currentName.slice(currentPrefix.length)}`;
+      if (isCategoryBaseOrOverflow(name, legacyName)) return true;
+    }
+  }
+
+  const currentArchiveName = String(config.archiveCategoryName ?? '');
+  const archiveScope = ` [${instanceId}]`;
+  if (!currentArchiveName.endsWith(archiveScope)) return false;
+  const legacyArchiveName = currentArchiveName.slice(0, -archiveScope.length);
+  return legacyArchiveName.length > 0
+    && isCategoryBaseOrOverflow(name, legacyArchiveName);
+}
+
 export function managedProjectCategoryNames(descriptor, projectCategories = [], count = 1) {
   const collision = projectCategories
     .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
@@ -5187,6 +5224,13 @@ export class DiscordController {
       ...(state.infrastructure.archiveCategoryIds ?? []),
       ...Object.values(state.projectCategories ?? {}).flatMap((project) => project.categoryIds ?? []),
     ].filter(Boolean));
+    const currentProjectCategoryNames = [...new Set([
+      ...Object.values(state.projectCategories ?? {}).map((project) => project.name),
+      ...projectDescriptorsFromSnapshot(
+        context.projectState,
+        this.config.projectCategoryPrefix,
+      ).map((project) => project.name),
+    ].filter(Boolean))];
     for (const category of context.channels.values()) {
       if (category?.type !== ChannelType.GuildCategory || referencedIds.has(category.id)) continue;
       const isDuplicateProject = isManagedProjectCategoryName(
@@ -5195,8 +5239,14 @@ export class DiscordController {
       );
       const isDuplicateArchive = category.name === this.config.archiveCategoryName
         || category.name.startsWith(`${this.config.archiveCategoryName} (`);
-      if ((!isDuplicateProject && !isDuplicateArchive) || category.children.cache.size > 0) continue;
-      await category.delete('Remove empty duplicate Codex category after task synchronization');
+      const isLegacyMultiPcCategory = isLegacyMultiPcManagedCategoryName(
+        category.name,
+        this.config,
+        currentProjectCategoryNames,
+      );
+      if ((!isDuplicateProject && !isDuplicateArchive && !isLegacyMultiPcCategory)
+        || category.children.cache.size > 0) continue;
+      await category.delete('Remove empty duplicate or legacy Codex category after task synchronization');
       context.channels.delete(category.id);
       removed += 1;
     }
