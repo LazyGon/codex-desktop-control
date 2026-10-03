@@ -396,13 +396,21 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     completedAt: new Date().toISOString(),
   };
   writeResult(options.resultPath, result);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  await new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(result)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (invokedPath === import.meta.url) {
   const options = parseArguments(process.argv.slice(2));
-  run(options).catch((error) => {
+  run(options).then(() => {
+    // A completed CLI must not hold the parent launcher behind a lingering WebSocket.
+    process.exit(0);
+  }).catch((error) => {
     const resultPathIndex = process.argv.indexOf('--result');
     const resultPath = resultPathIndex >= 0 ? process.argv[resultPathIndex + 1] : null;
     const result = {
@@ -415,7 +423,6 @@ if (invokedPath === import.meta.url) {
     } catch {
       // Preserve the original failure.
     }
-    process.stderr.write(`${error.stack ?? error.message}\n`);
-    process.exitCode = 1;
+    process.stderr.write(`${error.stack ?? error.message}\n`, () => process.exit(1));
   });
 }

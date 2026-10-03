@@ -36,6 +36,8 @@ remain collision-free if launch attempts overlap. A reconciliation failure stops
 startup before Desktop opens, so the existing Desktop state is not silently
 replaced or partially updated. On a first installation, reconciliation is
 skipped until both Desktop and Bridge have created their initial state files.
+After writing its result, the project-sync CLI flushes output and exits; a
+lingering App Server WebSocket close handshake must not hold Desktop activation.
 
 Launcher self-tests use a port-specific runtime-state file and never replace
 the live `launcher\state\current.json`.

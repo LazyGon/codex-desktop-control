@@ -3,11 +3,57 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 import {
   createExclusiveBackup,
   loadBridgeProjects,
   reconcileDesktopProjectState,
 } from './sync-desktop-projects.mjs';
+
+const requireBridgeDependency = createRequire(new URL('../discord-bridge/package.json', import.meta.url));
+const { WebSocketServer } = requireBridgeDependency('ws');
+const execFileAsync = promisify(execFile);
+
+test('successful project sync CLI exits after its durable result despite a live handle', async context => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-sync-cli-'));
+  context.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const globalState = path.join(temporary, 'global.json');
+  const bridgeState = path.join(temporary, 'bridge.json');
+  const resultPath = path.join(temporary, 'result.json');
+  const keepAlive = path.join(temporary, 'keep-alive.cjs');
+  fs.writeFileSync(globalState, '{}');
+  fs.writeFileSync(bridgeState, '{"projectCategories":{},"bindings":{}}');
+  fs.writeFileSync(keepAlive, 'setInterval(() => {}, 1000);');
+
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  context.after(() => server.close());
+  await once(server, 'listening');
+  server.on('connection', socket => {
+    socket.on('message', bytes => {
+      const request = JSON.parse(String(bytes));
+      if (!Object.hasOwn(request, 'id')) return;
+      const result = request.method === 'initialize' ? {} : { data: [], nextCursor: null };
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+    });
+  });
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    path.join(import.meta.dirname, 'sync-desktop-projects.mjs'),
+    '--dry-run',
+    '--endpoint', `ws://127.0.0.1:${server.address().port}`,
+    '--global-state', globalState,
+    '--bridge-state', bridgeState,
+    '--result', resultPath,
+  ], {
+    timeout: 5_000,
+    env: { ...process.env, NODE_OPTIONS: `--require=${keepAlive}` },
+  });
+  assert.equal(JSON.parse(stdout).ok, true);
+  assert.equal(JSON.parse(fs.readFileSync(resultPath, 'utf8')).ok, true);
+});
 
 test('creates distinct exclusive backups for concurrent launches in the same millisecond', context => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-backup-'));
