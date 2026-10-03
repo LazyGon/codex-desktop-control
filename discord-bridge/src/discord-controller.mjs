@@ -269,6 +269,12 @@ export function subagentScanPlan(binding) {
   };
 }
 
+export function transcriptReadWindowOptions({ activeOnly = false, forkCleanupOnly = false, recentSinceMs = null } = {}) {
+  return recentSinceMs === null
+    ? { maxTurns: activeOnly ? 2 : forkCleanupOnly ? 1 : 5 }
+    : { maxTurns: null, sinceMs: recentSinceMs };
+}
+
 export async function scanParentSubagentIds(codex, threadId, scanPlan) {
   const ids = new Set(scanPlan.knownThreadIds);
   if (scanPlan.mode === 'recent') {
@@ -3017,7 +3023,7 @@ export class DiscordController {
     if (subcommand === 'refresh') {
       await interaction.deferReply({ ephemeral: true });
       const threadId = this.#resolveThreadId(interaction);
-      const result = await this.codex.readThread(threadId);
+      const result = await this.codex.readRecentThread(threadId);
       const latest = [...(result.thread.turns ?? [])].reverse()[0];
       const embed = this.#threadEmbed(result.thread, latest);
       await interaction.editReply({ embeds: [embed] });
@@ -3205,7 +3211,7 @@ export class DiscordController {
   async #handleTaskPanelAction(interaction, action, threadId, binding) {
     if (action === 'refresh') {
       await interaction.deferReply({ ephemeral: true });
-      const result = await this.codex.readThread(threadId);
+      const result = await this.codex.readRecentThread(threadId);
       const channel = interaction.channel ?? await this.client.channels.fetch(binding.channelId);
       await this.#ensureTaskPanel(result.thread, channel, binding.archived);
       await this.#showTaskStatus(interaction, threadId);
@@ -5493,7 +5499,7 @@ export class DiscordController {
           return null;
         }
       }
-      const result = await this.codex.readThread(threadId);
+      const result = await this.codex.readRecentThread(threadId);
       const thread = result?.thread;
       if (!isSubagentCodexThread(thread)) {
         this.nonSubagentThreadIds.set(threadId, Date.now());
@@ -5521,10 +5527,10 @@ export class DiscordController {
     if (!parentThreadId) return null;
     let parent = this.stateStore.binding(parentThreadId);
     if (parent?.isSubagent && !parent.topLevelParentThreadId) {
-      const result = await this.codex.readThread(parentThreadId);
+      const result = await this.codex.readRecentThread(parentThreadId);
       parent = await this.#syncSubagentThread(result.thread);
     } else if (!parent) {
-      const result = await this.codex.readThread(parentThreadId);
+      const result = await this.codex.readRecentThread(parentThreadId);
       if (isSubagentCodexThread(result.thread)) parent = await this.#syncSubagentThread(result.thread);
       else parent = this.stateStore.binding(parentThreadId);
     }
@@ -6650,16 +6656,31 @@ export class DiscordController {
     const binding = this.stateStore.binding(threadId);
     if (!binding) throw new Error(`Task is not bound: ${threadId}`);
     const channel = knownChannel ?? await this.client.channels.fetch(binding.channelId);
-    // thread/list entries can omit historical turns and items. Reconciliation
-    // must only prune Discord messages against a fully hydrated transcript.
-    const hydratedThread = knownHydratedThread ?? (await this.codex.readThread(threadId)).thread;
+    // The automatic mirror intentionally keeps a small recent window. The
+    // explicit history-restore action retains its requested date window.
     const forked = !binding.isSubagent && binding.forkedFromThreadId;
+    const windowOptions = transcriptReadWindowOptions({ activeOnly, forkCleanupOnly, recentSinceMs });
+    const windowResult = knownHydratedThread
+      ? { thread: knownHydratedThread, truncated: false }
+      : await this.codex.readThreadWindow(threadId, windowOptions);
+    const hydratedThread = windowResult.thread;
+    if (windowResult.truncated && !activeOnly && recentSinceMs === null && !forkCleanupOnly) {
+      this.#log('transcript-auto-history-trimmed', { threadId, retainedTurns: hydratedThread.turns?.length ?? 0 });
+    }
     const thread = binding.isSubagent
       ? { ...hydratedThread, turns: subagentOwnTurns(hydratedThread) }
       : forked
         ? { ...hydratedThread, turns: forkOwnTurns(hydratedThread, binding.forkedAtMs) }
       : hydratedThread;
-    const ownTurnIds = new Set((thread.turns ?? []).map((turn) => turn.id));
+    const ownershipTurns = binding.isSubagent || forked
+      ? await this.codex.allTurnDescriptors(threadId)
+      : thread.turns ?? [];
+    const allOwnedTurns = binding.isSubagent
+      ? subagentOwnTurns({ ...hydratedThread, turns: ownershipTurns })
+      : forked
+        ? forkOwnTurns({ ...hydratedThread, turns: ownershipTurns }, binding.forkedAtMs)
+        : ownershipTurns;
+    const ownTurnIds = new Set(allOwnedTurns.map((turn) => turn.id));
     if (binding.isSubagent && typeof this.stateStore.retainSubagentTurnRecords === 'function') {
       this.stateStore.retainSubagentTurnRecords(threadId, ownTurnIds);
     }
@@ -7140,11 +7161,10 @@ export class DiscordController {
           this.completionRecoveryJobs.delete(key);
           return;
         }
-        const result = await this.codex.readThread(threadId);
-        const turns = result?.thread?.turns ?? [];
         const turn = turnId
-          ? turns.find((candidate) => candidate.id === turnId)
-          : [...turns].reverse().find((candidate) => candidate.status !== 'inProgress');
+          ? await this.codex.readTurn(threadId, turnId)
+          : (await this.codex.readRecentThread(threadId)).thread?.turns
+            ?.filter((candidate) => candidate.status !== 'inProgress').at(-1);
         if (!turn || turn.status === 'inProgress') {
           throw new Error(`Completed turn is not persisted yet: ${turnId ?? 'latest'}`);
         }
@@ -7949,9 +7969,8 @@ export class DiscordController {
       || turn.error?.message
       || 'このターンにはassistantメッセージが記録されていません。';
     let stableTurn = turn;
-    if (typeof this.codex.readThread === 'function') {
-      const persisted = await this.codex.readThread(binding.threadId).catch(() => null);
-      const persistedTurn = persisted?.thread?.turns?.find((candidate) => candidate.id === turn.id);
+    if (typeof this.codex.readTurn === 'function') {
+      const persistedTurn = await this.codex.readTurn(binding.threadId, turn.id).catch(() => null);
       if (persistedTurn?.items?.length) stableTurn = { ...turn, items: persistedTurn.items };
     }
     await this.#ensureTurnUserMessages(binding, stableTurn, channel, messages);

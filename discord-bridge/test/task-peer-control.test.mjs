@@ -60,7 +60,7 @@ test('owning PC verifies visible task and project before local AppServer effects
   const calls = [];
   const codex = { connected: true,
     threadMetadata: async (id) => ({ thread: { id } }),
-    readThread: async () => ({ thread: { name: 'Task', turns: [{ id: 'turn', status: 'completed',
+    readThreadWindow: async () => ({ thread: { name: 'Task', turns: [{ id: 'turn', status: 'completed',
       items: [{ type: 'agentMessage', text: 'done', secret: 'not exposed' }] }] } }),
     startThread: async (cwd) => { calls.push(['startThread', cwd]); return { thread: { id: taskId } }; },
     send: async (id, prompt) => { calls.push(['send', id, prompt]); return { mode: 'send', turnId: 'turn' }; },

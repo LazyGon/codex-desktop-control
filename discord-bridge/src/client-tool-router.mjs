@@ -191,7 +191,7 @@ export class ClientToolRouter {
       50_000,
       'maxOutputCharsPerItem',
     );
-    const result = await this.codex.readThread(threadId);
+    const result = await this.codex.readThreadWindow(threadId, { maxTurns: turnLimit });
     const thread = result.thread ?? {};
     const turns = (thread.turns ?? []).slice(-turnLimit).map((turn) => sanitizedValue(
       turn,

@@ -97,6 +97,12 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   commentary card after that turn's final card has been persisted. Late
   turn-scoped live notifications are also ignored once the final card exists.
   `履歴復元` is the bounded, confirmation-protected exception described above.
+- Automatic initial transcript mirroring reads at most the five newest turns
+  per visible task or subagent. Older unmirrored turns are intentionally omitted
+  so long conversations cannot monopolize the Bridge or flood Discord. Already
+  mirrored cards remain in the ledger, and live user messages and completions
+  continue normally. Explicit `履歴復元` still reads every turn in its selected
+  1-, 3-, or 7-day window, one App Server page at a time.
 - Shows current commentary, reasoning, plans, tool progress, and token usage
   only on the latest card. A past commentary card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.

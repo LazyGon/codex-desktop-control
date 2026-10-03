@@ -80,7 +80,7 @@ export async function executeTaskOperation(operation, { codex, stateStore, getLo
   if (metadata.thread?.id !== operation.threadId) throw new Error('The task is not owned by this AppServer.');
 
   if (operation.action === 'read') {
-    const result = await codex.readThread(operation.threadId);
+    const result = await codex.readThreadWindow(operation.threadId, { maxTurns: 5 });
     return { threadId: operation.threadId, name: result.thread?.name ?? null,
       status: result.thread?.status ?? null, messages: recentMessages(result.thread ?? {}) };
   }

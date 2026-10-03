@@ -15,6 +15,7 @@ import {
 } from './util.mjs';
 import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
+import { turnTimestampMs } from './recent-history.mjs';
 
 function attachmentValues(attachments) {
   if (!attachments) return [];
@@ -208,6 +209,74 @@ export class CodexService extends EventEmitter {
   async readThread(threadId) {
     this.#requireClient();
     return this.client.call('thread/read', { threadId, includeTurns: true }, APP_SERVER_OPERATION_TIMEOUT_MS);
+  }
+
+  async readRecentThread(threadId) {
+    return this.readThreadWindow(threadId, { maxTurns: 2 });
+  }
+
+  async readThreadWindow(threadId, { maxTurns = 5, sinceMs = null } = {}) {
+    if (maxTurns !== null && (!Number.isInteger(maxTurns) || maxTurns < 1)) {
+      throw new Error('maxTurns must be a positive integer or null.');
+    }
+    const metadata = await this.threadMetadata(threadId);
+    const turns = [];
+    const seenCursors = new Set();
+    let cursor = null;
+    let truncated = false;
+    do {
+      const page = await this.recentTurns(threadId, { limit: 1, itemsView: 'full', cursor });
+      for (const turn of page.data ?? []) {
+        const timestamp = turnTimestampMs(turn);
+        if (sinceMs !== null && timestamp !== null && timestamp < sinceMs) {
+          truncated = true;
+          cursor = null;
+          break;
+        }
+        turns.push(turn);
+        if (maxTurns !== null && turns.length >= maxTurns) {
+          truncated = Boolean(page.nextCursor);
+          cursor = null;
+          break;
+        }
+      }
+      if (cursor === null && (truncated || (maxTurns !== null && turns.length >= maxTurns))) break;
+      cursor = page.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) throw new Error(`thread/turns/list repeated cursor: ${cursor}`);
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return { thread: subscriptionRestoreThread(metadata.thread, turns), truncated };
+  }
+
+  async allTurnDescriptors(threadId) {
+    const turns = [];
+    const seenCursors = new Set();
+    let cursor = null;
+    do {
+      const page = await this.recentTurns(threadId, { limit: 100, itemsView: 'notLoaded', cursor });
+      turns.push(...(page.data ?? []));
+      cursor = page.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) throw new Error(`thread/turns/list repeated cursor: ${cursor}`);
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return turns;
+  }
+
+  async readTurn(threadId, turnId) {
+    if (!turnId) throw new Error('turnId is required.');
+    const seenCursors = new Set();
+    let cursor = null;
+    do {
+      const page = await this.recentTurns(threadId, { limit: 1, itemsView: 'notLoaded', cursor });
+      if ((page.data ?? []).some((turn) => turn.id === turnId)) {
+        const full = await this.recentTurns(threadId, { limit: 1, itemsView: 'full', cursor });
+        return (full.data ?? []).find((turn) => turn.id === turnId) ?? null;
+      }
+      cursor = page.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) throw new Error(`thread/turns/list repeated cursor: ${cursor}`);
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return null;
   }
 
   async threadMetadata(threadId) {

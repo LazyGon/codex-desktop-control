@@ -14,7 +14,7 @@ function fixture({ workspaceDependencyLoader = async () => 'workspace dependency
         ? { data: [{ id: 'archived-1', name: 'Archived', status: { type: 'notLoaded' } }] }
         : { data: [{ id: 'active-1', name: 'Active', cwd: 'C:\\work', status: { type: 'idle' } }] };
     },
-    readThread: async (threadId) => {
+    readThreadWindow: async (threadId) => {
       calls.push(['readThread', threadId]);
       return {
         thread: {

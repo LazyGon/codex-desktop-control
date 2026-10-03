@@ -36,6 +36,7 @@ import {
   subagentMetadata,
   subagentOwnTurns,
   subagentScanPlan,
+  transcriptReadWindowOptions,
 } from '../src/discord-controller.mjs';
 import {
   CONTROL_PANEL_COLOR,
@@ -1398,6 +1399,15 @@ test('subagent rescans preserve known children and bound later scans to recent t
   });
 });
 
+test('automatic transcript reads cap history without shortening explicit restoration', () => {
+  assert.deepEqual(transcriptReadWindowOptions(), { maxTurns: 5 });
+  assert.deepEqual(transcriptReadWindowOptions({ activeOnly: true }), { maxTurns: 2 });
+  assert.deepEqual(transcriptReadWindowOptions({ forkCleanupOnly: true }), { maxTurns: 1 });
+  assert.deepEqual(transcriptReadWindowOptions({ recentSinceMs: 1_000 }), {
+    maxTurns: null, sinceMs: 1_000,
+  });
+});
+
 test('first subagent scan pages full turns without hydrating one unbounded thread', async () => {
   const calls = [];
   const codex = {
@@ -1467,6 +1477,9 @@ test('an unknown live subagent notification creates an isolated Discord thread m
     assert.equal(threadId, childThread.id);
     return { thread: structuredClone(childThread) };
   };
+  codex.readRecentThread = codex.readThread;
+  codex.readThreadWindow = codex.readThread;
+  codex.allTurnDescriptors = async () => childThread.turns;
 
   const messages = new Map();
   const collection = () => {
@@ -2353,6 +2366,8 @@ test('completed turns retry transient delivery failure, do not backfill commenta
       }],
     },
   });
+  codex.readTurn = async (threadId, turnId) => (await codex.readThread(threadId)).thread.turns
+    .find((turn) => turn.id === turnId) ?? null;
   const binding = {
     threadId: 'thread-panel',
     channelId: 'task-channel',

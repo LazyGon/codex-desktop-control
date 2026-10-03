@@ -61,6 +61,116 @@ test('subscription restore normalizes newest-first paged turns to transcript ord
   });
 });
 
+test('live transcript hydration reads only two recent turns and metadata', async () => {
+  const calls = [];
+  const service = new CodexService({
+    config: {},
+    stateStore: {},
+    discoverEndpoint: () => null,
+    logDir: os.tmpdir(),
+  });
+  service.client = {
+    connected: true,
+    async call(method, params) {
+      calls.push({ method, params });
+      if (method === 'thread/read') {
+        assert.equal(params.includeTurns, false);
+        return { thread: { id: 'large-thread', path: 'session.jsonl', turns: [] } };
+      }
+      return params.cursor
+        ? { data: [{ id: 'completed', status: 'completed', items: [] }], nextCursor: null }
+        : { data: [{ id: 'active', status: 'inProgress', items: [] }], nextCursor: 'older-history' };
+    },
+  };
+  assert.deepEqual((await service.readRecentThread('large-thread')).thread, {
+    id: 'large-thread',
+    path: 'session.jsonl',
+    turns: [
+      { id: 'completed', status: 'completed', items: [] },
+      { id: 'active', status: 'inProgress', items: [] },
+    ],
+  });
+  assert.deepEqual(calls, [
+    { method: 'thread/read', params: { threadId: 'large-thread', includeTurns: false } },
+    { method: 'thread/turns/list', params: {
+      threadId: 'large-thread', limit: 1, sortDirection: 'desc', itemsView: 'full',
+    } },
+    { method: 'thread/turns/list', params: {
+      threadId: 'large-thread', limit: 1, sortDirection: 'desc', itemsView: 'full', cursor: 'older-history',
+    } },
+  ]);
+});
+
+test('automatic history is capped while explicit date restoration pages to its cutoff', async () => {
+  const calls = [];
+  const service = new CodexService({
+    config: {}, stateStore: {}, discoverEndpoint: () => null, logDir: os.tmpdir(),
+  });
+  const newest = Array.from({ length: 8 }, (_, index) => ({
+    id: `turn-${8 - index}`,
+    status: 'completed',
+    completedAt: (8 - index) * 1_000,
+    items: [],
+  }));
+  service.client = {
+    connected: true,
+    async call(method, params) {
+      calls.push({ method, params });
+      if (method === 'thread/read') {
+        assert.equal(params.includeTurns, false);
+        return { thread: { id: 'long-thread', turns: [] } };
+      }
+      const index = params.cursor ? Number(params.cursor) : 0;
+      return {
+        data: newest.slice(index, index + 1),
+        nextCursor: index + 1 < newest.length ? String(index + 1) : null,
+      };
+    },
+  };
+  const automatic = await service.readThreadWindow('long-thread');
+  assert.deepEqual(automatic.thread.turns.map((turn) => turn.id), [
+    'turn-4', 'turn-5', 'turn-6', 'turn-7', 'turn-8',
+  ]);
+  assert.equal(automatic.truncated, true);
+  assert.equal(calls.filter((call) => call.method === 'thread/turns/list').length, 5);
+
+  calls.length = 0;
+  const explicit = await service.readThreadWindow('long-thread', { maxTurns: null, sinceMs: 5_000_000 });
+  assert.deepEqual(explicit.thread.turns.map((turn) => turn.id), [
+    'turn-5', 'turn-6', 'turn-7', 'turn-8',
+  ]);
+  assert.equal(explicit.truncated, true);
+  assert.equal(calls.filter((call) => call.method === 'thread/turns/list').length, 5);
+});
+
+test('exact completion recovery reads one full page only after locating its turn', async () => {
+  const calls = [];
+  const service = new CodexService({
+    config: {}, stateStore: {}, discoverEndpoint: () => null, logDir: os.tmpdir(),
+  });
+  service.client = {
+    connected: true,
+    async call(method, params) {
+      calls.push(params);
+      assert.equal(method, 'thread/turns/list');
+      const index = params.cursor ? Number(params.cursor) : 0;
+      return {
+        data: [{ id: `turn-${index}`, status: 'completed', items: params.itemsView === 'full'
+          ? [{ id: 'final' }] : [] }],
+        nextCursor: index < 2 ? String(index + 1) : null,
+      };
+    },
+  };
+  assert.deepEqual(await service.readTurn('long-thread', 'turn-2'), {
+    id: 'turn-2', status: 'completed', items: [{ id: 'final' }],
+  });
+  assert.deepEqual(calls.map((call) => call.itemsView), [
+    'notLoaded', 'notLoaded', 'notLoaded', 'full',
+  ]);
+  assert.equal(calls.at(-1).cursor, '2');
+  assert.equal(await service.readTurn('long-thread', 'absent'), null);
+});
+
 test('subscription restore hydrates items only for active or missed turns', () => {
   const completed = { turns: [{ id: 'completed', status: 'completed' }] };
   assert.equal(subscriptionRestoreNeedsFullItems({
