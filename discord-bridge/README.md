@@ -98,7 +98,8 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   turn-scoped live notifications are also ignored once the final card exists.
   `履歴復元` is the bounded, confirmation-protected exception described above.
 - Automatic initial transcript mirroring reads at most the five newest turns
-  per visible task or subagent. Older unmirrored turns are intentionally omitted
+  per visible task or subagent; conversations with more than 20 turns read only
+  their newest turn. Older unmirrored turns are intentionally omitted
   so long conversations cannot monopolize the Bridge or flood Discord. Already
   mirrored cards remain in the ledger, and live user messages and completions
   continue normally. Explicit `履歴復元` still reads every turn in its selected

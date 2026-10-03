@@ -216,6 +216,12 @@ export class CodexService extends EventEmitter {
     return this.readThreadWindow(threadId, { maxTurns: 2 });
   }
 
+  async readAutomaticTranscript(threadId) {
+    const preview = await this.recentTurns(threadId, { limit: 21, itemsView: 'notLoaded' });
+    const maxTurns = (preview.data?.length ?? 0) > 20 || preview.nextCursor ? 1 : 5;
+    return this.readThreadWindow(threadId, { maxTurns });
+  }
+
   async readThreadWindow(threadId, { maxTurns = 5, sinceMs = null } = {}) {
     if (maxTurns !== null && (!Number.isInteger(maxTurns) || maxTurns < 1)) {
       throw new Error('maxTurns must be a positive integer or null.');

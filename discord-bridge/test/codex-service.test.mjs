@@ -143,6 +143,34 @@ test('automatic history is capped while explicit date restoration pages to its c
   assert.equal(calls.filter((call) => call.method === 'thread/turns/list').length, 5);
 });
 
+test('long conversations mirror one newest turn automatically and short ones keep five', async () => {
+  const service = new CodexService({
+    config: {}, stateStore: {}, discoverEndpoint: () => null, logDir: os.tmpdir(),
+  });
+  const requested = [];
+  let turnCount = 21;
+  let nextCursor = null;
+  service.recentTurns = async (threadId, options) => {
+    assert.equal(threadId, 'thread-1');
+    assert.deepEqual(options, { limit: 21, itemsView: 'notLoaded' });
+    return { data: Array.from({ length: turnCount }, (_, index) => ({ id: String(index) })), nextCursor };
+  };
+  service.readThreadWindow = async (threadId, options) => {
+    requested.push({ threadId, options });
+    return { thread: { id: threadId, turns: [] } };
+  };
+  await service.readAutomaticTranscript('thread-1');
+  turnCount = 20;
+  await service.readAutomaticTranscript('thread-1');
+  nextCursor = 'older';
+  await service.readAutomaticTranscript('thread-1');
+  assert.deepEqual(requested, [
+    { threadId: 'thread-1', options: { maxTurns: 1 } },
+    { threadId: 'thread-1', options: { maxTurns: 5 } },
+    { threadId: 'thread-1', options: { maxTurns: 1 } },
+  ]);
+});
+
 test('exact completion recovery reads one full page only after locating its turn', async () => {
   const calls = [];
   const service = new CodexService({

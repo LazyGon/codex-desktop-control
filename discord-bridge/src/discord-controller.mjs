@@ -6667,7 +6667,9 @@ export class DiscordController {
     const windowOptions = transcriptReadWindowOptions({ activeOnly, forkCleanupOnly, recentSinceMs });
     const windowResult = knownHydratedThread
       ? { thread: knownHydratedThread, truncated: false }
-      : await this.codex.readThreadWindow(threadId, windowOptions);
+      : !activeOnly && recentSinceMs === null && !forkCleanupOnly
+        ? await this.codex.readAutomaticTranscript(threadId)
+        : await this.codex.readThreadWindow(threadId, windowOptions);
     const hydratedThread = windowResult.thread;
     if (windowResult.truncated && !activeOnly && recentSinceMs === null && !forkCleanupOnly) {
       this.#log('transcript-auto-history-trimmed', { threadId, retainedTurns: hydratedThread.turns?.length ?? 0 });

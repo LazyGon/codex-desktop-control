@@ -1484,6 +1484,7 @@ test('an unknown live subagent notification creates an isolated Discord thread m
   };
   codex.readRecentThread = codex.readThread;
   codex.readThreadWindow = codex.readThread;
+  codex.readAutomaticTranscript = codex.readThread;
   codex.allTurnDescriptors = async () => childThread.turns;
 
   const messages = new Map();
