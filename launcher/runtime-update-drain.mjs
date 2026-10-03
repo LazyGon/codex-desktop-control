@@ -59,6 +59,14 @@ function threadIsActive(thread) {
   return thread?.status === 'active' || thread?.status?.type === 'active';
 }
 
+export function selectDrainStateForUpdate(previous, fromVersion, toVersion) {
+  if (previous?.phase === 'completed'
+    && (previous.fromVersion !== fromVersion || previous.toVersion !== toVersion)) {
+    return null;
+  }
+  return previous;
+}
+
 export class AppServerClient {
   constructor(url) {
     this.url = url;
@@ -287,14 +295,11 @@ async function main() {
       const statePath = path.resolve(requiredString(options.state, '--state'));
       const fromVersion = requiredString(options['from-version'], '--from-version');
       const toVersion = requiredString(options['to-version'], '--to-version');
-      let previous = fs.existsSync(statePath) ? readJson(statePath) : null;
-      if (
-        previous?.phase === 'completed' &&
-        previous.toVersion === fromVersion &&
-        previous.toVersion !== toVersion
-      ) {
-        previous = null;
-      }
+      let previous = selectDrainStateForUpdate(
+        fs.existsSync(statePath) ? readJson(statePath) : null,
+        fromVersion,
+        toVersion,
+      );
       previous ??= {
             schemaVersion: 1,
             phase: 'draining',

@@ -22,6 +22,9 @@ is `active`. It keeps the old shared app-server alive until all active turns
 have drained, then replaces the Desktop and app-server together. After the new
 shared connection is verified, it resumes only the goals that this update
 paused. Goals already paused, blocked, limited, or complete are not changed.
+The completed drain receipt from a prior package pair does not block a later
+update; an incomplete receipt for a different pair still stops recovery for
+inspection instead of being overwritten.
 After a Windows logon, the Discord Remote host starts the shared launcher before
 the full Bridge cold start when `autoStartSharedDesktop` is enabled. Manual
 launch is not required after an app update or reboot.

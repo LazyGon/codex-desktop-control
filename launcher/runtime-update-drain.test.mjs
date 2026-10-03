@@ -11,6 +11,7 @@ import {
   listAllThreads,
   pauseActiveGoals,
   resumePausedGoals,
+  selectDrainStateForUpdate,
   waitForTurnCompletion,
 } from './runtime-update-drain.mjs';
 
@@ -140,6 +141,28 @@ test('resumePausedGoals resumes only goals recorded by this update', async () =>
   assert.deepEqual(result.resumedThreadIds, ['PAUSED-BY-UPDATE']);
   assert.deepEqual(result.unchangedThreadIds, ['CHANGED-AFTER-PAUSE']);
   assert.equal(goals.get('CHANGED-AFTER-PAUSE'), 'blocked');
+});
+
+test('a completed drain from an earlier package update cannot block a later update', () => {
+  const completed = {
+    phase: 'completed',
+    fromVersion: '26.820.7780.0',
+    toVersion: '26.820.9563.0',
+    pausedThreadIds: [],
+  };
+  assert.equal(
+    selectDrainStateForUpdate(completed, '26.917.9434.0', '26.930.2377.0'),
+    null,
+  );
+  assert.equal(
+    selectDrainStateForUpdate(completed, '26.820.7780.0', '26.820.9563.0'),
+    completed,
+  );
+  const interrupted = { ...completed, phase: 'draining', pausedThreadIds: ['GOAL'] };
+  assert.equal(
+    selectDrainStateForUpdate(interrupted, '26.917.9434.0', '26.930.2377.0'),
+    interrupted,
+  );
 });
 
 test('waitForTurnCompletion closes the notification race using threadId from params', async () => {
