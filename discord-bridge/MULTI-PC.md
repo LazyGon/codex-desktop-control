@@ -9,6 +9,11 @@ AppServer. There is no parent, leader election, lease, or exclusion channel.
   An old Bridge still ACKs foreign commands and is not safe to run in parallel.
 - Assign each PC a stable, unique `instanceId` (at most 32 safe characters).
   Do not copy `data/state.json`, outbox files, or runtime files between PCs.
+- To show a friendly PC name in Discord category names, set
+  `instanceDisplayName` in that PC's ignored `config/config.json` (for example,
+  `"FriendlyPC"`). `null` uses the stable `instanceId`. Keep display names unique
+  across PCs; changing the display name does not change peer identity or routing.
+  Stored category IDs are reused and their names are refreshed on Bridge startup.
 - Task commands, task panels, and modals check local task membership with a
   bounded, read-only `thread/read` before any reply/defer/autocomplete. A foreign
   or indeterminate target is silently ignored. The original task settings and

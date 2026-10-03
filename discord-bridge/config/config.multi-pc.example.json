@@ -4,6 +4,7 @@
   "authorizedUserIds": ["DISCORD_USER_ID"],
   "multiPcEnabled": true,
   "instanceId": "PC_A",
+  "instanceDisplayName": null,
   "taskListListenHost": "100.64.0.1",
   "taskListListenPort": 18799,
   "taskListPeerTimeoutMs": 8000,

@@ -39,12 +39,13 @@ export function isTaskListHost(host) {
 export function resolveMultiPcConfig(config) {
   if (!config.multiPcEnabled) return config;
   // Preserve stored category IDs, but never adopt another PC's category by name.
-  const suffix = ` [${config.instanceId}]`;
+  const categoryPcName = config.instanceDisplayName ?? config.instanceId;
+  const suffix = ` [${categoryPcName}]`;
   const scoped = { ...config };
   for (const field of ['controlCategoryName', 'archiveCategoryName', 'transferCategoryName', 'chatgptCategoryName']) {
     scoped[field] = `${config[field]}${suffix}`;
   }
-  scoped.projectCategoryPrefix = `${config.projectCategoryPrefix}${config.instanceId} - `;
+  scoped.projectCategoryPrefix = `${config.projectCategoryPrefix}${categoryPcName} - `;
   return scoped;
 }
 
@@ -53,6 +54,9 @@ export function multiPcConfigErrors(config) {
   if (typeof config.multiPcEnabled !== 'boolean') errors.push('multiPcEnabled must be boolean.');
   if (!config.multiPcEnabled) return errors;
   if (!INSTANCE_PATTERN.test(config.instanceId ?? '')) errors.push('instanceId must be a unique safe ID of at most 32 characters.');
+  if (config.instanceDisplayName != null && !INSTANCE_PATTERN.test(config.instanceDisplayName)) {
+    errors.push('instanceDisplayName must be null or a safe name of at most 32 characters.');
+  }
   if (!isTaskListHost(config.taskListListenHost)) errors.push('taskListListenHost must be a Tailscale IPv4 address or 127.0.0.1.');
   if (!Number.isInteger(config.taskListListenPort) || config.taskListListenPort < 1 || config.taskListListenPort > 65535) {
     errors.push('taskListListenPort must be a TCP port.');

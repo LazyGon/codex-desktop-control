@@ -33,6 +33,7 @@ export const MIN_DISCORD_NETWORK_TIMEOUT_MS = 300_000;
 const defaults = {
   multiPcEnabled: false,
   instanceId: os.hostname(),
+  instanceDisplayName: null,
   taskListListenHost: null,
   taskListListenPort: 18799,
   taskListPeers: [],

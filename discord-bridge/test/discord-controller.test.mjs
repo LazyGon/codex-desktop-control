@@ -26,6 +26,7 @@ import {
   postTaskSyncSummary,
   projectCategoryCollisionCandidates,
   projectVisibilityCatalog,
+  refreshManagedArchiveCategoryNames,
   runAfterTranscriptBarrier,
   scanParentSubagentIds,
   sessionOrderRepairMessageIds,
@@ -157,6 +158,29 @@ test('managed archive category cleanup compacts occupied overflow and preserves 
   );
 });
 
+test('archive category display alias renames stored base and overflow categories in place', async () => {
+  const renamed = [];
+  const category = (id, name) => ({ id, name, setName: async (nextName) => {
+    renamed.push([id, nextName]);
+    return category(id, nextName);
+  } });
+  const categories = [
+    category('base', 'Codex Archived [LAPTOP-A]'),
+    category('overflow', 'Codex Archived [LAPTOP-A] (2)'),
+  ];
+  const refreshed = await refreshManagedArchiveCategoryNames(categories, 'Codex Archived [FriendlyPC]');
+  assert.deepEqual(refreshed.map(({ id, name }) => [id, name]), [
+    ['base', 'Codex Archived [FriendlyPC]'],
+    ['overflow', 'Codex Archived [FriendlyPC] (2)'],
+  ]);
+  assert.deepEqual(renamed, [
+    ['base', 'Codex Archived [FriendlyPC]'],
+    ['overflow', 'Codex Archived [FriendlyPC] (2)'],
+  ]);
+  await refreshManagedArchiveCategoryNames(refreshed, 'Codex Archived [FriendlyPC]');
+  assert.equal(renamed.length, 2);
+});
+
 test('managed project category namespace includes orphaned overflow names only', () => {
   assert.equal(isManagedProjectCategoryName('Codex - economic-support (2)', 'Codex - '), true);
   assert.equal(isManagedProjectCategoryName('Codex - other (2)', 'Codex - '), true);
@@ -199,6 +223,11 @@ test('multi-PC cleanup recognizes only empty-category names from this PC legacy 
     { ...config, multiPcEnabled: false },
     currentProjectCategoryNames,
   ), false);
+  assert.equal(isLegacyMultiPcManagedCategoryName(
+    'Codex - attendance-automation',
+    { ...config, instanceDisplayName: 'FriendlyPC', projectCategoryPrefix: 'Codex - FriendlyPC - ' },
+    ['Codex - FriendlyPC - attendance-automation'],
+  ), true);
 });
 
 test('managed project category names drop stale collision suffixes once the Desktop name is unique', () => {

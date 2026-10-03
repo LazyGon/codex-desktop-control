@@ -4,6 +4,7 @@
   "authorizedUserIds": [
     "DISCORD_USER_ID"
   ],
+  "instanceDisplayName": null,
   "controlCategoryName": "Codex Control",
   "archiveCategoryName": "Codex Archived",
   "projectCategoryPrefix": "Codex - ",

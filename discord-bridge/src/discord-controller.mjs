@@ -426,11 +426,11 @@ export function isLegacyMultiPcManagedCategoryName(
   currentProjectCategoryNames = [],
 ) {
   if (typeof name !== 'string' || !config?.multiPcEnabled) return false;
-  const instanceId = String(config.instanceId ?? '');
-  if (!instanceId) return false;
+  const categoryPcName = String(config.instanceDisplayName ?? config.instanceId ?? '');
+  if (!categoryPcName) return false;
 
   const currentPrefix = String(config.projectCategoryPrefix ?? '');
-  const projectScope = `${instanceId} - `;
+  const projectScope = `${categoryPcName} - `;
   if (currentPrefix.endsWith(projectScope)) {
     const legacyPrefix = currentPrefix.slice(0, -projectScope.length);
     for (const currentName of currentProjectCategoryNames) {
@@ -443,7 +443,7 @@ export function isLegacyMultiPcManagedCategoryName(
   }
 
   const currentArchiveName = String(config.archiveCategoryName ?? '');
-  const archiveScope = ` [${instanceId}]`;
+  const archiveScope = ` [${categoryPcName}]`;
   if (!currentArchiveName.endsWith(archiveScope)) return false;
   const legacyArchiveName = currentArchiveName.slice(0, -archiveScope.length);
   return legacyArchiveName.length > 0
@@ -460,6 +460,18 @@ export function managedProjectCategoryNames(descriptor, projectCategories = [], 
   return Array.from({ length: total }, (_, index) => (
     index === 0 ? baseName : truncate(`${baseName} (${index + 1})`, 100, '')
   ));
+}
+
+export async function refreshManagedArchiveCategoryNames(categories, baseName) {
+  const refreshed = [];
+  for (let index = 0; index < categories.length; index += 1) {
+    const category = categories[index];
+    const desiredName = index === 0 ? baseName : truncate(`${baseName} (${index + 1})`, 100, '');
+    refreshed.push(category.name === desiredName
+      ? category
+      : await category.setName(desiredName, 'Refresh Codex archive category name') ?? category);
+  }
+  return refreshed;
 }
 
 export function projectCategoryCollisionCandidates({
@@ -949,6 +961,14 @@ export class DiscordController {
       });
       await this.#copyCategoryPermissions(controlCategory, archiveCategory, guild);
       archiveCategories.push(archiveCategory);
+    }
+    const namedArchiveCategories = await refreshManagedArchiveCategoryNames(
+      archiveCategories,
+      this.config.archiveCategoryName,
+    );
+    for (let index = 0; index < archiveCategories.length; index += 1) {
+      archiveCategories[index] = namedArchiveCategories[index];
+      channels.set(archiveCategories[index].id, archiveCategories[index]);
     }
 
     let transferCategory = null;
