@@ -105,7 +105,8 @@ test('multi-PC config disallows public listeners, unsafe peers and duplicated in
   const scoped = resolveMultiPcConfig({ ...config, controlCategoryName: 'Codex Control', archiveCategoryName: 'Codex Archived',
     transferCategoryName: 'Others', chatgptCategoryName: 'ChatGPT', projectCategoryPrefix: 'Codex - ' });
   assert.equal(scoped.controlCategoryName, 'Codex Control [A]');
-  assert.equal(scoped.projectCategoryPrefix, 'Codex - A - ');
+  assert.equal(scoped.projectCategoryPrefix, 'Codex - ');
+  assert.equal(scoped.projectCategorySuffix, ' [A]');
   const aliased = resolveMultiPcConfig({ ...config, instanceDisplayName: 'FriendlyPC',
     controlCategoryName: 'Codex Control', archiveCategoryName: 'Codex Archived',
     transferCategoryName: 'Others', chatgptCategoryName: 'ChatGPT', projectCategoryPrefix: 'Codex - ' });
@@ -114,7 +115,10 @@ test('multi-PC config disallows public listeners, unsafe peers and duplicated in
   assert.equal(aliased.archiveCategoryName, 'Codex Archived [FriendlyPC]');
   assert.equal(aliased.transferCategoryName, 'Others [FriendlyPC]');
   assert.equal(aliased.chatgptCategoryName, 'ChatGPT [FriendlyPC]');
-  assert.equal(aliased.projectCategoryPrefix, 'Codex - FriendlyPC - ');
+  assert.equal(aliased.projectCategoryPrefix, 'Codex - ');
+  assert.equal(aliased.projectCategorySuffix, ' [FriendlyPC]');
+  assert.equal(resolveMultiPcConfig({ multiPcEnabled: false, projectCategorySuffix: ' [untrusted]' })
+    .projectCategorySuffix, '');
   for (const instanceDisplayName of ['', 'bad name', 'bad]', 'x'.repeat(33)]) {
     assert.ok(multiPcConfigErrors({ ...config, instanceDisplayName }).length);
   }

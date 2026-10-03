@@ -19,6 +19,7 @@ import {
   normalizeProjectPath,
   planDiscordCodeBlockDelivery,
   planDiscordTextDelivery,
+  projectCategoryName,
   projectDescriptor,
   reasoningSummaryFromTurn,
   sanitizeChannelName,
@@ -144,6 +145,11 @@ test('turn snapshots select assistant final text and project descriptors are sta
     path: 'C:\\git\\Example',
     name: 'Codex - Example',
   });
+  assert.equal(projectDescriptor('C:/git/Example', 'Codex - ', ' [Alias]').name,
+    'Codex - Example [Alias]');
+  const longCategory = projectCategoryName('x'.repeat(200), 'Codex - ', ' [Alias]');
+  assert.equal(longCategory.length, 100);
+  assert.match(longCategory, /^Codex - x+… \[Alias\]$/);
   assert.match(itemResultSummary({ type: 'commandExecution', command: 'npm test', exitCode: 0 }), /exit 0/);
 });
 

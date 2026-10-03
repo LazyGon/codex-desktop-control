@@ -195,4 +195,15 @@ test('same-name Desktop and App Server projects keep separate durable category i
     { key: 'shared', name: 'Codex - same-name' },
     { key: 'app-server:native', name: 'Codex - same-name' },
   ]);
+  assert.deepEqual(projectDescriptorsFromSnapshot(snapshot, 'Codex - ', ' [Alias]')
+    .map(({ key, name }) => ({ key, name })), [
+    { key: 'shared', name: 'Codex - same-name [Alias]' },
+    { key: 'app-server:native', name: 'Codex - same-name [Alias]' },
+  ]);
+  assert.equal(projectDescriptorForThread(
+    { id: 'native-task', cwd: 'C:\\native', projectId: 'native' },
+    snapshot,
+    'Codex - ',
+    ' [Alias]',
+  ).name, 'Codex - same-name [Alias]');
 });

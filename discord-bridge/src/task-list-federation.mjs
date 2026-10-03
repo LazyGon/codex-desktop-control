@@ -37,7 +37,7 @@ export function isTaskListHost(host) {
 }
 
 export function resolveMultiPcConfig(config) {
-  if (!config.multiPcEnabled) return config;
+  if (!config.multiPcEnabled) return { ...config, projectCategorySuffix: '' };
   // Preserve stored category IDs, but never adopt another PC's category by name.
   const categoryPcName = config.instanceDisplayName ?? config.instanceId;
   const suffix = ` [${categoryPcName}]`;
@@ -45,7 +45,7 @@ export function resolveMultiPcConfig(config) {
   for (const field of ['controlCategoryName', 'archiveCategoryName', 'transferCategoryName', 'chatgptCategoryName']) {
     scoped[field] = `${config[field]}${suffix}`;
   }
-  scoped.projectCategoryPrefix = `${config.projectCategoryPrefix}${categoryPcName} - `;
+  scoped.projectCategorySuffix = suffix;
   return scoped;
 }
 

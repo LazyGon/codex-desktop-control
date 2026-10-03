@@ -187,6 +187,11 @@ test('managed project category namespace includes orphaned overflow names only',
   assert.equal(isManagedProjectCategoryName('Codex Archived (3)', 'Codex - '), false);
   assert.equal(isManagedProjectCategoryName('Codex - ', 'Codex - '), false);
   assert.equal(isManagedProjectCategoryName('Personal category', 'Codex - '), false);
+  assert.equal(isManagedProjectCategoryName('Codex - project [Alias]', 'Codex - ', ' [Alias]'), true);
+  assert.equal(isManagedProjectCategoryName('Codex - project [Alias] (2)', 'Codex - ', ' [Alias]'), true);
+  assert.equal(isManagedProjectCategoryName('Codex - project [OtherPC]', 'Codex - ', ' [Alias]'), false);
+  assert.equal(isManagedProjectCategoryName('Codex - Alias - project', 'Codex - ', ' [Alias]'), false);
+  assert.equal(isManagedProjectCategoryName('Codex - [Alias]', 'Codex - ', ' [Alias]'), false);
 });
 
 test('multi-PC cleanup recognizes only empty-category names from this PC legacy namespace', () => {
@@ -227,6 +232,12 @@ test('multi-PC cleanup recognizes only empty-category names from this PC legacy 
     'Codex - attendance-automation',
     { ...config, instanceDisplayName: 'FriendlyPC', projectCategoryPrefix: 'Codex - FriendlyPC - ' },
     ['Codex - FriendlyPC - attendance-automation'],
+  ), true);
+  assert.equal(isLegacyMultiPcManagedCategoryName(
+    'Codex - attendance-automation',
+    { ...config, instanceDisplayName: 'FriendlyPC', projectCategoryPrefix: 'Codex - ',
+      projectCategorySuffix: ' [FriendlyPC]' },
+    ['Codex - attendance-automation [FriendlyPC]'],
   ), true);
 });
 
@@ -275,6 +286,17 @@ test('project category collision candidates ignore unused aliases after project 
     syncProjectKeys: [current.key, unusedAlias.key],
   });
   assert.match(managedProjectCategoryNames(current, bothRepresented, 1)[0], /^Codex - economic-support - /);
+});
+
+test('project category collision and overflow keep the PC suffix and visible truncation', () => {
+  const descriptor = { key: 'local-1', name: `Codex - ${'x'.repeat(80)}… [Alias]` };
+  const names = managedProjectCategoryNames(descriptor, [
+    { projectKey: 'local-2', name: descriptor.name },
+  ], 2, ' [Alias]');
+  assert.equal(names.length, 2);
+  assert.ok(names.every((name) => name.length <= 100));
+  assert.match(names[0], /^Codex - x+… - [a-z0-9_-]+ \[Alias\]$/);
+  assert.match(names[1], /^Codex - x+… - [a-z0-9_-]+ \[Alias\] \(2\)$/);
 });
 
 test('task sync summaries use the dedicated sync channel instead of the control panel channel', async () => {
@@ -461,6 +483,15 @@ test('project visibility catalog merges active and hidden projects without losin
     { key: 'c:\\git\\visible', hidden: false, tasks: 2 },
     { key: 'c:\\git\\hidden', hidden: true, tasks: 1 },
   ]);
+});
+
+test('project visibility fallback shows the configured PC suffix', () => {
+  const projects = projectVisibilityCatalog({
+    categoryPrefix: 'Codex - ',
+    categorySuffix: ' [Alias]',
+    bindings: [{ cwd: 'C:\\git\\visible' }],
+  });
+  assert.equal(projects[0].name, 'Codex - visible [Alias]');
 });
 
 test('project visibility catalog includes App Server native projects without conflating same-name Desktop projects', () => {

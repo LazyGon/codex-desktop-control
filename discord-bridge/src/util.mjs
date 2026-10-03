@@ -149,14 +149,19 @@ export function projectIdFromKey(projectKey) {
   return `prj_${createHash('sha256').update(String(projectKey)).digest('hex').slice(0, 12)}`;
 }
 
-export function projectDescriptor(cwd, categoryPrefix = 'Codex - ') {
+export function projectCategoryName(projectName, categoryPrefix = 'Codex - ', categorySuffix = '') {
+  const ellipsis = categorySuffix ? '…' : '';
+  return `${truncate(`${categoryPrefix}${projectName}`, 100 - categorySuffix.length, ellipsis)}${categorySuffix}`;
+}
+
+export function projectDescriptor(cwd, categoryPrefix = 'Codex - ', categorySuffix = '') {
   if (!cwd) {
     const key = '__no_project__';
     return {
       id: projectIdFromKey(key),
       key,
       path: '(no project)',
-      name: truncate(`${categoryPrefix}No Project`, 100, ''),
+      name: projectCategoryName('No Project', categoryPrefix, categorySuffix),
     };
   }
   const normalized = normalizeProjectPath(cwd);
@@ -166,7 +171,7 @@ export function projectDescriptor(cwd, categoryPrefix = 'Codex - ') {
     id: projectIdFromKey(key),
     key,
     path: normalized,
-    name: truncate(`${categoryPrefix}${projectName}`, 100, ''),
+    name: projectCategoryName(projectName, categoryPrefix, categorySuffix),
   };
 }
 

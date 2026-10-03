@@ -4,8 +4,8 @@ import {
   isPathWithinProject,
   normalizeProjectPath,
   projectDescriptor,
+  projectCategoryName,
   projectPathKey,
-  truncate,
 } from './util.mjs';
 
 function objectValue(value) {
@@ -190,30 +190,30 @@ export function projectCwdForThread(thread, snapshot) {
   return snapshot?.available ? null : thread?.cwd ?? null;
 }
 
-export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ') {
+export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ', categorySuffix = '') {
   const project = projectForThread(thread, snapshot);
   if (!project) {
-    return projectDescriptor(snapshot?.available ? null : thread?.cwd, categoryPrefix);
+    return projectDescriptor(snapshot?.available ? null : thread?.cwd, categoryPrefix, categorySuffix);
   }
-  const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd, categoryPrefix);
+  const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd, categoryPrefix, categorySuffix);
   return {
     ...descriptor,
     id: project.projectId,
     key: project.resolution === 'app-server-project-id'
       ? appServerProjectKey(project.projectId)
       : project.projectId,
-    name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+    name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
   };
 }
 
-export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ') {
+export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ', categorySuffix = '') {
   const descriptors = [];
   for (const project of snapshot?.projects?.values?.() ?? []) {
     descriptors.push({
       id: project.projectId,
       key: project.projectId,
       path: project.rootPaths[0] ?? '(no project)',
-      name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+      name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
     });
   }
   for (const project of snapshot?.appServerProjects?.values?.() ?? []) {
@@ -221,7 +221,7 @@ export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex
       id: project.projectId,
       key: appServerProjectKey(project.projectId),
       path: project.rootPaths[0] ?? '(no project)',
-      name: truncate(`${categoryPrefix}${project.name}`, 100, ''),
+      name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
     });
   }
   return descriptors;

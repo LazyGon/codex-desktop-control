@@ -21,6 +21,7 @@ import {
   withAppServerProjects,
 } from '../src/desktop-project-state.mjs';
 import { AppServerClient } from '../src/app-server-client.mjs';
+import { isManagedProjectCategoryName } from '../src/discord-controller.mjs';
 
 const config = loadConfig();
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -73,7 +74,9 @@ try {
   const controlCategory = categories.find((category) => category.name === config.controlCategoryName);
   const archiveCategories = categories.filter((category) => category.name === config.archiveCategoryName
     || category.name.startsWith(`${config.archiveCategoryName} (`));
-  const projectCategories = categories.filter((category) => category.name.startsWith(config.projectCategoryPrefix));
+  const projectCategories = categories.filter((category) => isManagedProjectCategoryName(
+    category.name, config.projectCategoryPrefix, config.projectCategorySuffix,
+  ));
   const controlChannel = textChannels.find((channel) => channel.name === config.controlChannelName);
   const syncChannel = textChannels.find((channel) => channel.name === config.syncChannelName);
   const chatgptCategory = config.chatgptEnabled
@@ -112,6 +115,7 @@ try {
       { id: threadId, cwd: binding.cwd, projectId: binding.projectId },
       projectState,
       config.projectCategoryPrefix,
+      config.projectCategorySuffix,
     ).key === '__no_project__'
   ));
   const noProjectRecord = state.projectCategories?.__no_project__ ?? null;

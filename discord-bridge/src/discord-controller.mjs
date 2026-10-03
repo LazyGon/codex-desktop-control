@@ -405,12 +405,15 @@ export function managedArchiveCategoryCleanupPlan(categories, capacity = 50) {
   };
 }
 
-export function isManagedProjectCategoryName(name, prefix) {
-  return typeof name === 'string'
-    && typeof prefix === 'string'
-    && prefix.length > 0
-    && name.startsWith(prefix)
-    && name.length > prefix.length;
+export function isManagedProjectCategoryName(name, prefix, suffix = '') {
+  if (typeof name !== 'string' || typeof prefix !== 'string' || !prefix
+    || !name.startsWith(prefix) || name.length <= prefix.length) return false;
+  if (!suffix) return true;
+  if (name.endsWith(suffix)) return name.length > prefix.length + suffix.length;
+  const overflow = name.match(/^(.*) \(([1-9]\d*)\)$/);
+  return Boolean(overflow && Number(overflow[2]) >= 2
+    && overflow[1].endsWith(suffix)
+    && overflow[1].length > prefix.length + suffix.length);
 }
 
 function isCategoryBaseOrOverflow(name, baseName) {
@@ -430,6 +433,15 @@ export function isLegacyMultiPcManagedCategoryName(
   if (!categoryPcName) return false;
 
   const currentPrefix = String(config.projectCategoryPrefix ?? '');
+  const currentSuffix = String(config.projectCategorySuffix ?? '');
+  if (currentSuffix) {
+    for (const currentName of currentProjectCategoryNames) {
+      if (typeof currentName !== 'string' || !currentName.startsWith(currentPrefix)
+        || !currentName.endsWith(currentSuffix)) continue;
+      const legacyName = currentName.slice(0, -currentSuffix.length);
+      if (isCategoryBaseOrOverflow(name, legacyName)) return true;
+    }
+  }
   const projectScope = `${categoryPcName} - `;
   if (currentPrefix.endsWith(projectScope)) {
     const legacyPrefix = currentPrefix.slice(0, -projectScope.length);
@@ -450,16 +462,25 @@ export function isLegacyMultiPcManagedCategoryName(
     && isCategoryBaseOrOverflow(name, legacyArchiveName);
 }
 
-export function managedProjectCategoryNames(descriptor, projectCategories = [], count = 1) {
+export function managedProjectCategoryNames(descriptor, projectCategories = [], count = 1, categorySuffix = '') {
   const collision = projectCategories
     .find((project) => project.projectKey !== descriptor.key && project.name === descriptor.name);
-  const baseName = collision
-    ? truncate(`${descriptor.name} - ${Buffer.from(descriptor.key, 'utf8').toString('base64url').slice(-6).toLowerCase()}`, 100, '')
+  const coreName = categorySuffix && descriptor.name.endsWith(categorySuffix)
+    ? descriptor.name.slice(0, -categorySuffix.length)
     : descriptor.name;
+  const collisionTag = collision
+    ? ` - ${Buffer.from(descriptor.key, 'utf8').toString('base64url').slice(-6).toLowerCase()}`
+    : '';
   const total = Math.max(0, Math.trunc(Number(count) || 0));
-  return Array.from({ length: total }, (_, index) => (
-    index === 0 ? baseName : truncate(`${baseName} (${index + 1})`, 100, '')
-  ));
+  return Array.from({ length: total }, (_, index) => {
+    const overflow = index === 0 ? '' : ` (${index + 1})`;
+    const core = truncate(
+      coreName,
+      100 - collisionTag.length - categorySuffix.length - overflow.length,
+      categorySuffix ? '…' : '',
+    );
+    return `${core}${collisionTag}${categorySuffix}${overflow}`;
+  });
 }
 
 export async function refreshManagedArchiveCategoryNames(categories, baseName) {
@@ -501,6 +522,7 @@ export function projectVisibilityCatalog({
   bindings = [],
   projectDescriptors = [],
   categoryPrefix = 'Codex - ',
+  categorySuffix = '',
 } = {}) {
   const projects = new Map();
   const merge = (projectKey, value) => {
@@ -522,9 +544,9 @@ export function projectVisibilityCatalog({
   for (const binding of bindings) {
     let descriptor;
     try {
-      descriptor = projectDescriptor(binding.cwd, categoryPrefix);
+      descriptor = projectDescriptor(binding.cwd, categoryPrefix, categorySuffix);
     } catch {
-      descriptor = projectDescriptor(null, categoryPrefix);
+      descriptor = projectDescriptor(null, categoryPrefix, categorySuffix);
     }
     const projectKey = binding.projectKey ?? descriptor.key;
     const current = projects.get(projectKey);
@@ -1707,6 +1729,7 @@ export class DiscordController {
         thread,
         projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       );
       return !this.#hiddenProjectDescriptorForThread(thread, descriptor, projectState);
     });
@@ -1798,8 +1821,10 @@ export class DiscordController {
       projectDescriptors: projectDescriptorsFromSnapshot(
         this.projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       ),
       categoryPrefix: this.config.projectCategoryPrefix,
+      categorySuffix: this.config.projectCategorySuffix,
     });
   }
 
@@ -1847,6 +1872,7 @@ export class DiscordController {
       thread,
       projectState,
       this.config.projectCategoryPrefix,
+      this.config.projectCategorySuffix,
     );
     if (this.#hiddenProjectDescriptorForThread(thread, descriptor, projectState)) {
       throw new Error('このプロジェクトはDiscordで非表示です。Codex Remoteの「プロジェクト表示」から再表示してください。');
@@ -2867,7 +2893,9 @@ export class DiscordController {
     const threads = await this.#listAllThreadsWithProjects(projectState, false, search);
     return threads.filter((thread) => {
       if (!this.#isSyncableThread(thread)) return false;
-      const descriptor = projectDescriptorForThread(thread, projectState, this.config.projectCategoryPrefix);
+      const descriptor = projectDescriptorForThread(
+        thread, projectState, this.config.projectCategoryPrefix, this.config.projectCategorySuffix,
+      );
       return !this.#hiddenProjectDescriptorForThread(thread, descriptor, projectState);
     });
   }
@@ -2943,6 +2971,7 @@ export class DiscordController {
           thread,
           projectState,
           this.config.projectCategoryPrefix,
+          this.config.projectCategorySuffix,
         );
         return !this.#hiddenProjectDescriptorForThread(thread, descriptor, projectState);
       });
@@ -4268,6 +4297,7 @@ export class DiscordController {
         thread,
         context.projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       );
       return {
         thread,
@@ -4370,6 +4400,7 @@ export class DiscordController {
         staleThread,
         context.projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       );
       const hiddenProject = this.#hiddenProjectDescriptorForThread(
         staleThread,
@@ -4827,6 +4858,7 @@ export class DiscordController {
     const projectDescriptors = projectDescriptorsFromSnapshot(
       this.projectState,
       this.config.projectCategoryPrefix,
+      this.config.projectCategorySuffix,
     )
       .filter((project) => !this.#isProjectHidden(project.key))
       .map((project) => ({ projectKey: project.key, ...project }));
@@ -4837,7 +4869,9 @@ export class DiscordController {
       bindings: stateBindingSummaries(this.stateStore),
       syncProjectKeys: context?.visibleProjectKeys ?? [],
     });
-    return managedProjectCategoryNames(descriptor, collisionCandidates, count);
+    return managedProjectCategoryNames(
+      descriptor, collisionCandidates, count, this.config.projectCategorySuffix,
+    );
   }
 
   async #projectCategories(thread, context) {
@@ -4845,6 +4879,7 @@ export class DiscordController {
       thread,
       context.projectState,
       this.config.projectCategoryPrefix,
+      this.config.projectCategorySuffix,
     );
     const pending = this.projectCategoryPromises.get(descriptor.key);
     if (pending) return pending;
@@ -4944,6 +4979,7 @@ export class DiscordController {
       thread,
       context.projectState,
       this.config.projectCategoryPrefix,
+      this.config.projectCategorySuffix,
     );
     const hiddenProject = this.#hiddenProjectDescriptorForThread(
       thread,
@@ -5046,6 +5082,7 @@ export class DiscordController {
         thread,
         context.projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       ),
       context.projectState,
     );
@@ -5289,6 +5326,7 @@ export class DiscordController {
       ...projectDescriptorsFromSnapshot(
         context.projectState,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       ).map((project) => project.name),
     ].filter(Boolean))];
     for (const category of context.channels.values()) {
@@ -5296,6 +5334,7 @@ export class DiscordController {
       const isDuplicateProject = isManagedProjectCategoryName(
         category.name,
         this.config.projectCategoryPrefix,
+        this.config.projectCategorySuffix,
       );
       const isDuplicateArchive = category.name === this.config.archiveCategoryName
         || category.name.startsWith(`${this.config.archiveCategoryName} (`);
