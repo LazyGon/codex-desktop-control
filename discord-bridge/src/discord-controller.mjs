@@ -24,6 +24,7 @@ import {
   formatReasoningField,
   itemResultSummary,
   itemSummary,
+  needsSessionCompletionFallback,
   planDiscordTextDelivery,
   projectDescriptor,
   randomKey,
@@ -588,6 +589,10 @@ export function orderedSessionCardItems(turn, userItems, detailItems, recordedOr
   for (const item of users.values()) ordered.push({ kind: 'user', item });
   for (const item of details.values()) ordered.push({ kind: 'detail', item });
   return ordered;
+}
+
+export function needsSessionCardOrder(userItems, detailItems) {
+  return (userItems?.length ?? 0) > 1 || (detailItems?.length ?? 0) > 0;
 }
 
 export function sessionOrderRepairMessageIds(messages, turnIds, botUserId) {
@@ -6803,7 +6808,9 @@ export class DiscordController {
         if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
         const detailItems = includeHistoricalDetails ? historicalAssistantItems(turn) : [];
         const userItems = this.#turnUserItems(turn);
-        const recordedOrder = await readSessionTurnCardOrder(thread.path, turn.id, userItems);
+        const recordedOrder = needsSessionCardOrder(userItems, detailItems)
+          ? await readSessionTurnCardOrder(thread.path, turn.id, userItems)
+          : [];
         const sessionItems = orderedSessionCardItems(turn, userItems, detailItems, recordedOrder);
         for (const { kind, item } of sessionItems) {
           if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
@@ -6816,10 +6823,9 @@ export class DiscordController {
         await this.#reconcileCodexImageItems(binding, turn, channel, messages, {
           onlyRecorded: !includeHistoricalDetails,
         });
-        const finalText = finalTextFromTurn(
-          turn,
-          completionTextFromSession(thread.path, turn.id),
-        ) || turn.error?.message;
+        const finalText = finalTextFromTurn(turn, needsSessionCompletionFallback(turn)
+          ? completionTextFromSession(thread.path, turn.id)
+          : '') || turn.error?.message;
         await this.#ensureTurnFinalMessages(binding, turn, finalText, channel, messages);
       }
     } else if (latestCompleted) {
@@ -6839,11 +6845,9 @@ export class DiscordController {
         ? historicalAssistantItems(activeTurn)
         : requiredByTurn.get(activeTurn.id) ?? [];
       const activeUserItems = this.#turnUserItems(activeTurn);
-      const activeRecordedOrder = await readSessionTurnCardOrder(
-        thread.path,
-        activeTurn.id,
-        activeUserItems,
-      );
+      const activeRecordedOrder = needsSessionCardOrder(activeUserItems, activeDetailItems)
+        ? await readSessionTurnCardOrder(thread.path, activeTurn.id, activeUserItems)
+        : [];
       const activeSessionItems = orderedSessionCardItems(
         activeTurn,
         activeUserItems,
@@ -7960,8 +7964,10 @@ export class DiscordController {
       sessionPath = result?.thread?.path ?? null;
       if (sessionPath) this.stateStore.setBinding(binding.threadId, { sessionPath });
     }
-    let completionText = completionTextFromSession(sessionPath, turn.id);
-    if (!completionText && !(turn.items ?? []).some((item) => item.type === 'agentMessage' && item.phase === 'final_answer')) {
+    const fallbackNeeded = !(turn.items ?? []).some((item) => item.type === 'agentMessage'
+      && item.phase === 'final_answer');
+    let completionText = fallbackNeeded ? completionTextFromSession(sessionPath, turn.id) : '';
+    if (!completionText && fallbackNeeded) {
       await sleep(100);
       completionText = completionTextFromSession(sessionPath, turn.id);
     }

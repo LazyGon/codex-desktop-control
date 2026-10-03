@@ -10,6 +10,7 @@ import {
   appendJsonLine,
   completionTextFromSession,
   finalTextFromTurn,
+  needsSessionCompletionFallback,
   sleep,
   threadStatusLabel,
 } from './util.mjs';
@@ -750,10 +751,9 @@ export class CodexService extends EventEmitter {
         );
         const completed = [...(thread.turns ?? [])].reverse()
           .find((turn) => turn.status !== 'inProgress');
-        const finalText = finalTextFromTurn(
-          completed,
-          completionTextFromSession(thread.path, completed?.id),
-        );
+        const finalText = finalTextFromTurn(completed, needsSessionCompletionFallback(completed)
+          ? completionTextFromSession(thread.path, completed?.id)
+          : '');
         const needsCompletionMessage = completed?.id !== binding.lastCompletedTurnId;
         const needsCompletionNotice = completed?.status === 'completed'
           && completed.id !== binding.lastNotifiedCompletedTurnId;

@@ -298,6 +298,11 @@ export function completionTextFromSession(sessionPath, turnId) {
   }
 }
 
+export function needsSessionCompletionFallback(turn) {
+  return !(turn?.items ?? []).some((item) => item.type === 'agentMessage'
+    && item.phase === 'final_answer' && item.text);
+}
+
 export function finalTextFromTurn(turn, completionText = '') {
   const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text);
   const final = messages.filter((item) => item.phase === 'final_answer');

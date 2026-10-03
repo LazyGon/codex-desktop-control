@@ -20,6 +20,7 @@ import {
   managedArchiveCategoryCleanupPlan,
   managedProjectCategoryCleanupPlan,
   managedProjectCategoryNames,
+  needsSessionCardOrder,
   mergeProjectScopedThreads,
   orderedSessionCardItems,
   postTaskSyncSummary,
@@ -500,6 +501,10 @@ test('project-scoped task inventory restores native tasks omitted from the globa
 });
 
 test('session card ordering keeps steer messages inside the active instruction sequence', () => {
+  assert.equal(needsSessionCardOrder([], []), false);
+  assert.equal(needsSessionCardOrder([{ id: 'user' }], []), false);
+  assert.equal(needsSessionCardOrder([{ id: 'first' }, { id: 'steer' }], []), true);
+  assert.equal(needsSessionCardOrder([{ id: 'user' }], [{ id: 'commentary' }]), true);
   const initial = { id: 'user-initial', text: 'start' };
   const steer = { id: 'user-steer', text: 'adjust' };
   const beforeSteer = { id: 'assistant-before', phase: 'commentary', text: 'working' };

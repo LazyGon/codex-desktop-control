@@ -14,6 +14,7 @@ import {
   formatReasoningField,
   finalTextFromTurn,
   itemResultSummary,
+  needsSessionCompletionFallback,
   isPathWithinProject,
   normalizeProjectPath,
   planDiscordCodeBlockDelivery,
@@ -128,6 +129,9 @@ test('turn snapshots select assistant final text and project descriptors are sta
   assert.equal(assistantTextFromTurn(turn, 'final_answer'), 'done');
   assert.equal(assistantTextFromTurn(turn, 'analysis'), '');
   assert.equal(finalTextFromTurn(turn), 'done');
+  assert.equal(needsSessionCompletionFallback(turn), false);
+  assert.equal(needsSessionCompletionFallback({ items: [{ type: 'agentMessage', phase: 'commentary', text: 'working' }] }), true);
+  assert.equal(needsSessionCompletionFallback({ items: [{ type: 'agentMessage', phase: 'final_answer', text: '' }] }), true);
   assert.equal(finalTextFromTurn({ items: [{ type: 'agentMessage', phase: 'commentary', text: 'last public update' }] }), 'last public update');
   assert.equal(finalTextFromTurn(turn, 'session completion'), 'done');
   assert.equal(finalTextFromTurn({ items: [{ type: 'agentMessage', phase: 'commentary', text: 'stale update' }] }, 'session completion'), 'session completion');
