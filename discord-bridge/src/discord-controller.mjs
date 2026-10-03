@@ -269,6 +269,35 @@ export function subagentScanPlan(binding) {
   };
 }
 
+export async function scanParentSubagentIds(codex, threadId, scanPlan) {
+  const ids = new Set(scanPlan.knownThreadIds);
+  if (scanPlan.mode === 'recent') {
+    const result = await codex.recentTurns(threadId, {
+      limit: scanPlan.recentTurnLimit,
+      itemsView: 'full',
+    });
+    for (const id of subagentIdsFromThread({ turns: result.data ?? [] })) ids.add(id);
+    return [...ids];
+  }
+
+  const seenCursors = new Set();
+  let cursor = null;
+  do {
+    const result = await codex.recentTurns(threadId, {
+      limit: 2,
+      itemsView: 'full',
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const id of subagentIdsFromThread({ turns: result.data ?? [] })) ids.add(id);
+    cursor = result.nextCursor ?? null;
+    if (cursor && seenCursors.has(cursor)) {
+      throw new Error(`thread/turns/list repeated cursor while scanning subagents: ${cursor}`);
+    }
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  return [...ids];
+}
+
 export function subagentOwnTurns(thread) {
   if (!isSubagentCodexThread(thread)) return thread?.turns ?? [];
   const childTimestamp = uuidV7TimestampMs(thread.id);
@@ -5380,19 +5409,7 @@ export class DiscordController {
       }
       try {
         const scanPlan = subagentScanPlan(binding);
-        const hydrated = scanPlan.mode === 'recent'
-          ? {
-            ...parent,
-            turns: (await this.codex.recentTurns(parent.id, {
-              limit: scanPlan.recentTurnLimit,
-              itemsView: 'full',
-            })).data ?? [],
-          }
-          : (await this.codex.readThread(parent.id)).thread;
-        const discoveredIds = [...new Set([
-          ...scanPlan.knownThreadIds,
-          ...subagentIdsFromThread(hydrated),
-        ])];
+        const discoveredIds = await scanParentSubagentIds(this.codex, parent.id, scanPlan);
         for (const childId of discoveredIds) addChildId(childId);
         this.stateStore.setBinding(parent.id, {
           subagentScanVersion: 1,

@@ -294,6 +294,14 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     sortDirection: 'desc',
     itemsView: 'notLoaded',
   }]);
+  await service.recentTurns('thread-1', { limit: 1, itemsView: 'full', cursor: 'older-page' });
+  assert.deepEqual(turnListCalls.at(-1), {
+    threadId: 'thread-1',
+    limit: 1,
+    sortDirection: 'desc',
+    itemsView: 'full',
+    cursor: 'older-page',
+  });
 
   currentTurnId = 'changed-turn';
   const changedRestored = new Promise((resolve) => {

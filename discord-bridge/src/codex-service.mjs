@@ -402,14 +402,16 @@ export class CodexService extends EventEmitter {
     return (result.data ?? []).find((turn) => turn.status === 'inProgress') ?? null;
   }
 
-  async recentTurns(threadId, { limit = 2, itemsView = 'full' } = {}) {
+  async recentTurns(threadId, { limit = 2, itemsView = 'full', cursor = null } = {}) {
     this.#requireClient();
-    return this.client.call('thread/turns/list', {
+    const params = {
       threadId,
       limit,
       sortDirection: 'desc',
       itemsView,
-    }, APP_SERVER_OPERATION_TIMEOUT_MS);
+    };
+    if (cursor) params.cursor = cursor;
+    return this.client.call('thread/turns/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
   async prepareDelivery(threadId) {

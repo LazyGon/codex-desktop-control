@@ -26,6 +26,7 @@ import {
   projectCategoryCollisionCandidates,
   projectVisibilityCatalog,
   runAfterTranscriptBarrier,
+  scanParentSubagentIds,
   sessionOrderRepairMessageIds,
   shouldUseHiddenBindingFallback,
   shouldCleanupOnlyExistingFork,
@@ -1395,6 +1396,38 @@ test('subagent rescans preserve known children and bound later scans to recent t
     recentTurnLimit: 10,
     knownThreadIds: ['child-old'],
   });
+});
+
+test('first subagent scan pages full turns without hydrating one unbounded thread', async () => {
+  const calls = [];
+  const codex = {
+    async recentTurns(threadId, options) {
+      calls.push({ threadId, options });
+      return options.cursor
+        ? {
+          data: [{ items: [{ type: 'collabAgentToolCall', receiverThreadIds: ['child-two', 'child-one'] }] }],
+          nextCursor: null,
+        }
+        : {
+          data: [{ items: [{ type: 'subAgentActivity', agentThreadId: 'child-one' }] }],
+          nextCursor: 'older-page',
+        };
+    },
+    async readThread() { throw new Error('unbounded hydration is forbidden'); },
+  };
+  assert.deepEqual(await scanParentSubagentIds(codex, 'parent', subagentScanPlan({})), [
+    'child-one', 'child-two',
+  ]);
+  assert.deepEqual(calls, [
+    { threadId: 'parent', options: { limit: 2, itemsView: 'full' } },
+    { threadId: 'parent', options: { limit: 2, itemsView: 'full', cursor: 'older-page' } },
+  ]);
+  await assert.rejects(
+    scanParentSubagentIds({
+      recentTurns: async () => ({ data: [], nextCursor: 'repeated-page' }),
+    }, 'parent', subagentScanPlan({})),
+    /repeated cursor/,
+  );
 });
 
 test('an unknown live subagent notification creates an isolated Discord thread mirror', async (context) => {
