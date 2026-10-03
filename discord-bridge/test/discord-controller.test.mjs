@@ -46,6 +46,7 @@ import {
   taskPanelMarker,
 } from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
+import { projectCategoryName } from '../src/util.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
 import { DeliveryOutbox } from '../src/delivery-outbox.mjs';
@@ -192,6 +193,8 @@ test('managed project category namespace includes orphaned overflow names only',
   assert.equal(isManagedProjectCategoryName('Codex - project [OtherPC]', 'Codex - ', ' [Alias]'), false);
   assert.equal(isManagedProjectCategoryName('Codex - Alias - project', 'Codex - ', ' [Alias]'), false);
   assert.equal(isManagedProjectCategoryName('Codex - [Alias]', 'Codex - ', ' [Alias]'), false);
+  assert.equal(isManagedProjectCategoryName('Codex [Alias] Task - project', 'Codex [Alias] Task - '), true);
+  assert.equal(isManagedProjectCategoryName('Codex [OtherPC] Task - project', 'Codex [Alias] Task - '), false);
 });
 
 test('multi-PC cleanup recognizes only empty-category names from this PC legacy namespace', () => {
@@ -239,6 +242,26 @@ test('multi-PC cleanup recognizes only empty-category names from this PC legacy 
       projectCategorySuffix: ' [FriendlyPC]' },
     ['Codex - attendance-automation [FriendlyPC]'],
   ), true);
+  const newStyle = { ...config, instanceDisplayName: 'FriendlyPC',
+    projectCategoryPrefix: 'Codex [FriendlyPC] Task - ', projectCategorySuffix: '',
+    projectCategoryBasePrefix: 'Codex - ', archiveCategoryName: 'Codex [FriendlyPC] Archived',
+    archiveCategoryBaseName: 'Codex Archived' };
+  for (const oldName of [
+    'Codex - attendance-automation',
+    'Codex - FriendlyPC - attendance-automation',
+    'Codex - attendance-automation [FriendlyPC]',
+    'Codex Archived',
+    'Codex Archived [FriendlyPC]',
+  ]) {
+    assert.equal(isLegacyMultiPcManagedCategoryName(
+      oldName, newStyle, ['Codex [FriendlyPC] Task - attendance-automation'],
+    ), true);
+  }
+  assert.equal(isLegacyMultiPcManagedCategoryName(
+    'Codex - attendance-automation [OtherPC]',
+    newStyle,
+    ['Codex [FriendlyPC] Task - attendance-automation'],
+  ), false);
 });
 
 test('managed project category names drop stale collision suffixes once the Desktop name is unique', () => {
@@ -297,6 +320,17 @@ test('project category collision and overflow keep the PC suffix and visible tru
   assert.ok(names.every((name) => name.length <= 100));
   assert.match(names[0], /^Codex - x+… - [a-z0-9_-]+ \[Alias\]$/);
   assert.match(names[1], /^Codex - x+… - [a-z0-9_-]+ \[Alias\] \(2\)$/);
+});
+
+test('new PC-first category names retain the collision tag and visible truncation', () => {
+  const descriptor = { key: 'local-1',
+    name: projectCategoryName('x'.repeat(200), 'Codex [Alias] Task - ', '', true) };
+  const names = managedProjectCategoryNames(descriptor, [
+    { projectKey: 'local-2', name: descriptor.name },
+  ], 2, '', true);
+  assert.ok(names.every((name) => name.length <= 100));
+  assert.match(names[0], /^Codex \[Alias\] Task - x+… - [a-z0-9_-]+$/);
+  assert.match(names[1], /^Codex \[Alias\] Task - x+… - [a-z0-9_-]+ \(2\)$/);
 });
 
 test('task sync summaries use the dedicated sync channel instead of the control panel channel', async () => {
@@ -492,6 +526,15 @@ test('project visibility fallback shows the configured PC suffix', () => {
     bindings: [{ cwd: 'C:\\git\\visible' }],
   });
   assert.equal(projects[0].name, 'Codex - visible [Alias]');
+});
+
+test('project visibility fallback shows the PC-first category style', () => {
+  const projects = projectVisibilityCatalog({
+    categoryPrefix: 'Codex [Alias] Task - ',
+    categoryEllipsis: true,
+    bindings: [{ cwd: 'C:\\git\\visible' }],
+  });
+  assert.equal(projects[0].name, 'Codex [Alias] Task - visible');
 });
 
 test('project visibility catalog includes App Server native projects without conflating same-name Desktop projects', () => {

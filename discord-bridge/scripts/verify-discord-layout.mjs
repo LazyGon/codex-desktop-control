@@ -116,6 +116,7 @@ try {
       projectState,
       config.projectCategoryPrefix,
       config.projectCategorySuffix,
+      config.projectCategoryEllipsis,
     ).key === '__no_project__'
   ));
   const noProjectRecord = state.projectCategories?.__no_project__ ?? null;

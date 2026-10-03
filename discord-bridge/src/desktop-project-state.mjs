@@ -190,30 +190,33 @@ export function projectCwdForThread(thread, snapshot) {
   return snapshot?.available ? null : thread?.cwd ?? null;
 }
 
-export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ', categorySuffix = '') {
+export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ', categorySuffix = '',
+  useEllipsis = Boolean(categorySuffix)) {
   const project = projectForThread(thread, snapshot);
   if (!project) {
-    return projectDescriptor(snapshot?.available ? null : thread?.cwd, categoryPrefix, categorySuffix);
+    return projectDescriptor(snapshot?.available ? null : thread?.cwd, categoryPrefix, categorySuffix, useEllipsis);
   }
-  const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd, categoryPrefix, categorySuffix);
+  const descriptor = projectDescriptor(project.rootPaths[0] ?? thread?.cwd,
+    categoryPrefix, categorySuffix, useEllipsis);
   return {
     ...descriptor,
     id: project.projectId,
     key: project.resolution === 'app-server-project-id'
       ? appServerProjectKey(project.projectId)
       : project.projectId,
-    name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
+    name: projectCategoryName(project.name, categoryPrefix, categorySuffix, useEllipsis),
   };
 }
 
-export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ', categorySuffix = '') {
+export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ', categorySuffix = '',
+  useEllipsis = Boolean(categorySuffix)) {
   const descriptors = [];
   for (const project of snapshot?.projects?.values?.() ?? []) {
     descriptors.push({
       id: project.projectId,
       key: project.projectId,
       path: project.rootPaths[0] ?? '(no project)',
-      name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
+      name: projectCategoryName(project.name, categoryPrefix, categorySuffix, useEllipsis),
     });
   }
   for (const project of snapshot?.appServerProjects?.values?.() ?? []) {
@@ -221,7 +224,7 @@ export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex
       id: project.projectId,
       key: appServerProjectKey(project.projectId),
       path: project.rootPaths[0] ?? '(no project)',
-      name: projectCategoryName(project.name, categoryPrefix, categorySuffix),
+      name: projectCategoryName(project.name, categoryPrefix, categorySuffix, useEllipsis),
     });
   }
   return descriptors;

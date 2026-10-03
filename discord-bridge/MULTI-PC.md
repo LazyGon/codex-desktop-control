@@ -13,10 +13,11 @@ AppServer. There is no parent, leader election, lease, or exclusion channel.
   `instanceDisplayName` in that PC's ignored `config/config.json` (for example,
   `"FriendlyPC"`). `null` uses the stable `instanceId`. Keep display names unique
   across PCs; changing the display name does not change peer identity or routing.
-  Project categories use `Codex - project [FriendlyPC]`, matching the fixed
-  categories' `[FriendlyPC]` suffix. Long project names are shortened with `…`
-  before the suffix. Stored category IDs are reused and their names are
-  refreshed on Bridge startup.
+  Codex categories use a shared `Codex [FriendlyPC]` prefix: for example,
+  `Codex [FriendlyPC] Task - project` and `Codex [FriendlyPC] Archived`.
+  `ChatGPT [FriendlyPC]` remains separate. Long project names are shortened
+  with `…`. Stored category IDs are reused and their names are refreshed on
+  Bridge startup.
 - Task commands, task panels, and modals check local task membership with a
   bounded, read-only `thread/read` before any reply/defer/autocomplete. A foreign
   or indeterminate target is silently ignored. The original task settings and
@@ -25,7 +26,7 @@ AppServer. There is no parent, leader election, lease, or exclusion channel.
   unbound text channel in a **locally registered project category**. A foreign
   task ID already present in its topic never creates a replacement task.
 - Taskless commands are handled only in locally registered channels/categories.
-  Category names use the PC's unique display suffix, and stored category IDs
+  Codex category names use the PC's unique display prefix, and stored category IDs
   remain locally owned, so two PCs with the same project name do not adopt,
   rename, or clean up each other's categories.
 - After task synchronization, the Bridge removes empty pre-multi-PC project

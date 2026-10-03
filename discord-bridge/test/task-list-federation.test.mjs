@@ -104,19 +104,26 @@ test('multi-PC config disallows public listeners, unsafe peers and duplicated in
   assert.ok(multiPcConfigErrors({ ...config, taskListPeers: [{ instanceId: 'A', url: 'http://100.104.140.74' }] }).length);
   const scoped = resolveMultiPcConfig({ ...config, controlCategoryName: 'Codex Control', archiveCategoryName: 'Codex Archived',
     transferCategoryName: 'Others', chatgptCategoryName: 'ChatGPT', projectCategoryPrefix: 'Codex - ' });
-  assert.equal(scoped.controlCategoryName, 'Codex Control [A]');
-  assert.equal(scoped.projectCategoryPrefix, 'Codex - ');
-  assert.equal(scoped.projectCategorySuffix, ' [A]');
+  assert.equal(scoped.controlCategoryName, 'Codex [A] Control');
+  assert.equal(scoped.archiveCategoryName, 'Codex [A] Archived');
+  assert.equal(scoped.transferCategoryName, 'Codex [A] Others');
+  assert.equal(scoped.chatgptCategoryName, 'ChatGPT [A]');
+  assert.equal(scoped.projectCategoryPrefix, 'Codex [A] Task - ');
+  assert.equal(scoped.projectCategorySuffix, '');
+  assert.equal(scoped.projectCategoryEllipsis, true);
   const aliased = resolveMultiPcConfig({ ...config, instanceDisplayName: 'FriendlyPC',
     controlCategoryName: 'Codex Control', archiveCategoryName: 'Codex Archived',
     transferCategoryName: 'Others', chatgptCategoryName: 'ChatGPT', projectCategoryPrefix: 'Codex - ' });
   assert.equal(aliased.instanceId, 'A');
-  assert.equal(aliased.controlCategoryName, 'Codex Control [FriendlyPC]');
-  assert.equal(aliased.archiveCategoryName, 'Codex Archived [FriendlyPC]');
-  assert.equal(aliased.transferCategoryName, 'Others [FriendlyPC]');
+  assert.equal(aliased.controlCategoryName, 'Codex [FriendlyPC] Control');
+  assert.equal(aliased.archiveCategoryName, 'Codex [FriendlyPC] Archived');
+  assert.equal(aliased.transferCategoryName, 'Codex [FriendlyPC] Others');
   assert.equal(aliased.chatgptCategoryName, 'ChatGPT [FriendlyPC]');
-  assert.equal(aliased.projectCategoryPrefix, 'Codex - ');
-  assert.equal(aliased.projectCategorySuffix, ' [FriendlyPC]');
+  assert.equal(aliased.projectCategoryPrefix, 'Codex [FriendlyPC] Task - ');
+  assert.equal(aliased.projectCategorySuffix, '');
+  assert.equal(aliased.projectCategoryEllipsis, true);
+  assert.equal(aliased.projectCategoryBasePrefix, 'Codex - ');
+  assert.equal(aliased.archiveCategoryBaseName, 'Codex Archived');
   assert.equal(resolveMultiPcConfig({ multiPcEnabled: false, projectCategorySuffix: ' [untrusted]' })
     .projectCategorySuffix, '');
   for (const instanceDisplayName of ['', 'bad name', 'bad]', 'x'.repeat(33)]) {

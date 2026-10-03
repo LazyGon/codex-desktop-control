@@ -150,6 +150,11 @@ test('turn snapshots select assistant final text and project descriptors are sta
   const longCategory = projectCategoryName('x'.repeat(200), 'Codex - ', ' [Alias]');
   assert.equal(longCategory.length, 100);
   assert.match(longCategory, /^Codex - x+… \[Alias\]$/);
+  assert.equal(projectDescriptor('C:/git/Example', 'Codex [Alias] Task - ', '', true).name,
+    'Codex [Alias] Task - Example');
+  const longPcFirstCategory = projectCategoryName('x'.repeat(200), 'Codex [Alias] Task - ', '', true);
+  assert.equal(longPcFirstCategory.length, 100);
+  assert.match(longPcFirstCategory, /^Codex \[Alias\] Task - x+…$/);
   assert.match(itemResultSummary({ type: 'commandExecution', command: 'npm test', exitCode: 0 }), /exit 0/);
 });
 

@@ -149,19 +149,21 @@ export function projectIdFromKey(projectKey) {
   return `prj_${createHash('sha256').update(String(projectKey)).digest('hex').slice(0, 12)}`;
 }
 
-export function projectCategoryName(projectName, categoryPrefix = 'Codex - ', categorySuffix = '') {
-  const ellipsis = categorySuffix ? '…' : '';
-  return `${truncate(`${categoryPrefix}${projectName}`, 100 - categorySuffix.length, ellipsis)}${categorySuffix}`;
+export function projectCategoryName(projectName, categoryPrefix = 'Codex - ', categorySuffix = '',
+  useEllipsis = Boolean(categorySuffix)) {
+  return `${truncate(`${categoryPrefix}${projectName}`, 100 - categorySuffix.length,
+    useEllipsis ? '…' : '')}${categorySuffix}`;
 }
 
-export function projectDescriptor(cwd, categoryPrefix = 'Codex - ', categorySuffix = '') {
+export function projectDescriptor(cwd, categoryPrefix = 'Codex - ', categorySuffix = '',
+  useEllipsis = Boolean(categorySuffix)) {
   if (!cwd) {
     const key = '__no_project__';
     return {
       id: projectIdFromKey(key),
       key,
       path: '(no project)',
-      name: projectCategoryName('No Project', categoryPrefix, categorySuffix),
+      name: projectCategoryName('No Project', categoryPrefix, categorySuffix, useEllipsis),
     };
   }
   const normalized = normalizeProjectPath(cwd);
@@ -171,7 +173,7 @@ export function projectDescriptor(cwd, categoryPrefix = 'Codex - ', categorySuff
     id: projectIdFromKey(key),
     key,
     path: normalized,
-    name: projectCategoryName(projectName, categoryPrefix, categorySuffix),
+    name: projectCategoryName(projectName, categoryPrefix, categorySuffix, useEllipsis),
   };
 }
 

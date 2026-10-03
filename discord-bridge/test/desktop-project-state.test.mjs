@@ -206,4 +206,11 @@ test('same-name Desktop and App Server projects keep separate durable category i
     'Codex - ',
     ' [Alias]',
   ).name, 'Codex - same-name [Alias]');
+  assert.equal(projectDescriptorForThread(
+    { id: 'native-task', cwd: 'C:\\native', projectId: 'native' },
+    snapshot,
+    'Codex [Alias] Task - ',
+    '',
+    true,
+  ).name, 'Codex [Alias] Task - same-name');
 });

@@ -37,15 +37,31 @@ export function isTaskListHost(host) {
 }
 
 export function resolveMultiPcConfig(config) {
-  if (!config.multiPcEnabled) return { ...config, projectCategorySuffix: '' };
+  if (!config.multiPcEnabled) return {
+    ...config,
+    projectCategorySuffix: '',
+    projectCategoryEllipsis: false,
+  };
   // Preserve stored category IDs, but never adopt another PC's category by name.
   const categoryPcName = config.instanceDisplayName ?? config.instanceId;
   const suffix = ` [${categoryPcName}]`;
-  const scoped = { ...config };
-  for (const field of ['controlCategoryName', 'archiveCategoryName', 'transferCategoryName', 'chatgptCategoryName']) {
-    scoped[field] = `${config[field]}${suffix}`;
-  }
-  scoped.projectCategorySuffix = suffix;
+  const brand = String(config.projectCategoryPrefix).replace(/\s*-\s*$/, '').trim() || 'Codex';
+  const scopedBrand = `${brand}${suffix}`;
+  const categoryRole = (name) => String(name).startsWith(`${brand} `)
+    ? String(name).slice(brand.length + 1)
+    : String(name);
+  const scoped = {
+    ...config,
+    controlCategoryName: `${scopedBrand} ${categoryRole(config.controlCategoryName)}`,
+    archiveCategoryName: `${scopedBrand} ${categoryRole(config.archiveCategoryName)}`,
+    transferCategoryName: `${scopedBrand} ${categoryRole(config.transferCategoryName)}`,
+    chatgptCategoryName: `${config.chatgptCategoryName}${suffix}`,
+    projectCategoryPrefix: `${scopedBrand} Task - `,
+    projectCategorySuffix: '',
+    projectCategoryEllipsis: true,
+    projectCategoryBasePrefix: config.projectCategoryPrefix,
+    archiveCategoryBaseName: config.archiveCategoryName,
+  };
   return scoped;
 }
 
