@@ -42,11 +42,11 @@ internal static class CodexDiscordRemoteBootstrap
 
         var startInfo = new ProcessStartInfo();
         startInfo.FileName = launcherPath;
-        startInfo.Arguments = "--no-dialogs";
+        startInfo.Arguments = String.Empty;
         startInfo.WorkingDirectory = Path.GetDirectoryName(launcherPath);
         startInfo.UseShellExecute = false;
-        startInfo.CreateNoWindow = true;
-        startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+        startInfo.CreateNoWindow = false;
+        startInfo.WindowStyle = ProcessWindowStyle.Normal;
         return startInfo;
     }
 }
@@ -111,13 +111,6 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
     {
         try
         {
-            Process[] desktopProcesses = Process.GetProcessesByName("ChatGPT");
-            if (desktopProcesses.Length > 0)
-            {
-                foreach (Process desktopProcess in desktopProcesses)
-                    desktopProcess.Dispose();
-                return;
-            }
             ProcessStartInfo startInfo = CodexDiscordRemoteBootstrap.CreateSharedLauncherStartInfo(root);
             if (startInfo == null)
                 return;
@@ -127,7 +120,7 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
         }
         catch
         {
-            // The Bridge still owns the bounded retry path if the early logon launch cannot start.
+            // Keep the Bridge available; launcher retries belong to the progress window.
         }
     }
 
@@ -151,6 +144,8 @@ internal sealed class CodexDiscordRemoteContext : ApplicationContext
         startInfo.UseShellExecute = false;
         startInfo.CreateNoWindow = hidden;
         startInfo.WindowStyle = hidden ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal;
+        if (String.Equals(scriptPath, startScript, StringComparison.OrdinalIgnoreCase))
+            startInfo.EnvironmentVariables["CODEX_SHARED_STARTUP_MANAGED"] = "1";
 
         var process = Process.Start(startInfo);
         if (process == null)

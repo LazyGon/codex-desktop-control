@@ -807,12 +807,15 @@ export class CodexService extends EventEmitter {
 
   #maybeStartSharedDesktop() {
     if (!this.config.autoStartSharedDesktop) return;
+    // The interactive logon host owns startup and exposes explicit per-step retries.
+    if (process.env.CODEX_SHARED_STARTUP_MANAGED === '1') return;
     const launcherPath = this.config.sharedLauncherPath;
     if (!launcherPath || !fs.existsSync(launcherPath)) {
       this.#log('shared-launcher-missing', { launcherPath });
       return;
     }
-    if (Date.now() - this.lastLauncherStartAt < 120_000) return;
+    // A direct Bridge start gets at most one initial launch, never a launch loop.
+    if (this.lastLauncherStartAt > 0) return;
     this.lastLauncherStartAt = Date.now();
     try {
       const child = this.spawnProcess(launcherPath, ['--no-dialogs'], {

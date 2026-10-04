@@ -116,6 +116,38 @@ app-server startup and opens only Codex Desktop on that existing connection. A
 server owned by another checkout, an incomplete startup, or an inconsistent
 state file is never adopted.
 
+If the same checkout is already starting that runtime, a concurrent launcher
+waits up to two minutes for the existing owner to complete the same exact
+Desktop-connection and ownership checks. It reports success only after those
+checks pass; timeout, ambiguity, and foreign ownership still fail closed, and
+the waiting launcher never starts or stops another process.
+
+At interactive logon, the Discord Remote host opens the shared launcher with a
+single table-style launcher window. It reports App Server readiness, Desktop
+connection, Discord Bridge connection, and elapsed time. Reopening the launcher
+focuses that window rather than starting another window or another launch.
+Each component has a manual retry button, enabled after the current operation
+settles. An already-running Desktop is reported as skipped; a private Desktop
+is clearly distinguished from a verified shared connection. The Desktop retry
+can request a normal close of that disconnected Desktop before relaunching;
+it never force-kills it.
+
+Elapsed time freezes when startup completes, is skipped, is cancelled, or fails;
+an explicit retry resets it. A successful or skipped startup keeps its result
+visible for ten seconds, then closes the launcher once its finite worker exits.
+The user can close it sooner. Failures keep the window open for diagnosis and
+manual retries. Closing it cancels an unfinished launch and waits for that operation
+to end. A completed startup worker exits; the separate runtime supervisor keeps
+the already-running Desktop/App Server alive independently of the window.
+Errors show their component, summary, and the exact invocation's log, whose
+filename includes its PID. The Bridge logon host owns startup; its reconnect
+loop does not repeatedly relaunch the shared launcher. A directly started
+Bridge gets at most one initial silent launch.
+
+Desktop can create a temporary stdio bootstrap helper before initializing its
+shared WebSocket. The launcher waits for the real shared connection throughout
+the connection deadline rather than treating that helper as an immediate failure.
+
 The launcher caches the package's `codex.exe` and
 `codex-code-mode-host.exe` together in a version-specific directory. Current
 app-server builds start the companion Code Mode host beside `codex.exe`; both

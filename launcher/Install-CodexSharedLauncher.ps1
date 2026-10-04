@@ -118,7 +118,7 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
 }
 
 $temporaryExecutable = Join-Path $launcherRoot "CodexSharedLauncher.$PID.tmp"
-$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$temporaryExecutable" /reference:System.Windows.Forms.dll $launcherSource 2>&1
+$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$temporaryExecutable" /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Windows.Forms.dll $launcherSource 2>&1
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryExecutable -PathType Leaf)) {
     throw "Launcher compilation failed: $($compilerOutput -join [Environment]::NewLine)"
 }

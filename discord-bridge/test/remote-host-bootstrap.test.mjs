@@ -111,9 +111,9 @@ test('logon host prepares the configured shared launcher before Bridge cold star
   const executable = compileHarness(directory);
   const output = execFileSync(executable, [bridge], { encoding: 'utf8' }).trim().split(/\r?\n/);
   assert.equal(output[0], launcher);
-  assert.equal(output[1], '--no-dialogs');
+  assert.equal(output[1], '');
   assert.equal(output[2], launcherDirectory);
-  assert.deepEqual(output.slice(3), ['False', 'True', 'Hidden']);
+  assert.deepEqual(output.slice(3), ['False', 'False', 'Normal']);
 });
 
 test('logon host honors autoStartSharedDesktop=false', (context) => {

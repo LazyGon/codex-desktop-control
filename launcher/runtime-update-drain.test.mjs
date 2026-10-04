@@ -223,6 +223,73 @@ test('shared launcher reuses only a runtime whose Desktop connection was verifie
   );
 });
 
+test('concurrent shared launch waits for the exact owner to finish Desktop verification', () => {
+  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
+  const waiter = extractPowerShellFunction(
+    source,
+    'Wait-ReusableRuntimeState',
+    'Start-DesktopOnRuntime',
+  );
+  assert.match(waiter, /TimeoutSeconds = 120/);
+  assert.match(waiter, /Get-ReusableRuntimeState[\s\S]*-SuppressFailureLog/);
+
+  const contentionStart = source.indexOf('if (-not $ownsMutex) {');
+  const serverStart = source.indexOf('Assert-PortAvailable -PortNumber $Port', contentionStart);
+  assert.notEqual(contentionStart, -1);
+  assert.notEqual(serverStart, -1);
+  const contention = source.slice(contentionStart, serverStart);
+  assert.match(contention, /Wait-ReusableRuntimeState/);
+  assert.match(contention, /Invoke-LauncherSignal -Kind Ready/);
+  assert.match(contention, /\$exitCode = 0/);
+  assert.match(contention, /\$startupHandled = \$true/);
+  assert.doesNotMatch(contention, /Start-DesktopOnRuntime|Start-Process|Stop-Process/);
+});
+
+test('Desktop bootstrap stdio helper does not abort a subsequently successful shared connection', context => {
+  if (process.platform !== 'win32') { context.skip('Windows PowerShell is required.'); return; }
+  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
+  const waiter = extractPowerShellFunction(source, 'Wait-DesktopSharedConnection', 'Start-DesktopOnRuntime');
+  const script = `
+$ErrorActionPreference = 'Stop'
+$script:checks = 0
+$script:helperLogs = 0
+function Assert-LauncherNotCancelled { }
+function Test-DesktopWebSocketConnection { $script:checks += 1; return ($script:checks -ge 3) }
+function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
+function Get-DesktopLocalAppServers { [pscustomobject]@{ ProcessId = 202 } }
+function Write-LauncherLog { param($Message); $script:helperLogs += 1 }
+${waiter}
+$ok = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -TimeoutSeconds 1 -PollMilliseconds 1
+[pscustomobject]@{ok=$ok;checks=$script:checks;helperLogs=$script:helperLogs} | ConvertTo-Json -Compress
+`;
+  const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(output.trim()), { ok: true, checks: 3, helperLogs: 1 });
+});
+
+test('Desktop connection wait remains cancellable before a shared connection exists', context => {
+  if (process.platform !== 'win32') { context.skip('Windows PowerShell is required.'); return; }
+  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
+  const waiter = extractPowerShellFunction(source, 'Wait-DesktopSharedConnection', 'Start-DesktopOnRuntime');
+  const script = `
+$ErrorActionPreference = 'Stop'
+$script:checks = 0
+function Assert-LauncherNotCancelled { if ($script:checks -ge 1) { throw [OperationCanceledException]::new('fixture cancellation') } }
+function Test-DesktopWebSocketConnection { $script:checks += 1; return $false }
+function Get-CodexDesktopRootProcesses { }
+function Get-DesktopLocalAppServers { }
+function Write-LauncherLog { }
+${waiter}
+try {
+  $null = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -TimeoutSeconds 10 -PollMilliseconds 1
+  throw 'Cancellation was ignored.'
+} catch [OperationCanceledException] {
+  [pscustomobject]@{cancelled=$true;checks=$script:checks} | ConvertTo-Json -Compress
+}
+`;
+  const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(output.trim()), { cancelled: true, checks: 1 });
+});
+
 test('one-shot refresh waits the exact turn before replacing the owned runtime', () => {
   const source = fs.readFileSync(refreshScriptPath, 'utf8');
   assert.match(source, /WaitForTurnId/);

@@ -601,12 +601,14 @@ test('CodexService fallback starts the shared launcher without interactive dialo
   fs.writeFileSync(launcherPath, 'fixture');
 
   let spawned;
+  let spawnCount = 0;
   const service = new CodexService({
     config: { autoStartSharedDesktop: true, sharedLauncherPath: launcherPath, taskListLimit: 20 },
     stateStore: { bindings: () => [], projectCategories: () => [] },
     discoverEndpoint: () => ({ url: 'ws://127.0.0.1:1', source: 'test' }),
     logDir: directory,
     spawnProcess: (file, args, options) => {
+      spawnCount += 1;
       spawned = { file, args, options, unrefCalled: false };
       return {
         pid: 12345,
@@ -625,4 +627,44 @@ test('CodexService fallback starts the shared launcher without interactive dialo
   assert.equal(spawned.options.detached, true);
   assert.equal(spawned.options.windowsHide, true);
   assert.equal(spawned.unrefCalled, true);
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(), 10000);
+    let waits = 0;
+    service.on('connectionState', (state) => {
+      if (state.state === 'waiting' && ++waits >= 2) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  assert.ok(service.connectionAttempt >= 2, 'The service must attempt another connection.');
+  assert.equal(spawnCount, 1, 'A reconnect must not relaunch the launcher.');
+});
+
+test('a logon-managed Bridge reconnect never starts a second launcher', async (context) => {
+  const previous = process.env.CODEX_SHARED_STARTUP_MANAGED;
+  process.env.CODEX_SHARED_STARTUP_MANAGED = '1';
+  context.after(() => {
+    if (previous === undefined) delete process.env.CODEX_SHARED_STARTUP_MANAGED;
+    else process.env.CODEX_SHARED_STARTUP_MANAGED = previous;
+  });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-service-managed-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const launcherPath = path.join(directory, 'CodexSharedLauncher.exe');
+  fs.writeFileSync(launcherPath, 'fixture');
+  let spawnCount = 0;
+  const service = new CodexService({
+    config: { autoStartSharedDesktop: true, sharedLauncherPath: launcherPath },
+    stateStore: { bindings: () => [], projectCategories: () => [] },
+    discoverEndpoint: () => ({ url: 'ws://127.0.0.1:1', source: 'test' }),
+    logDir: directory,
+    spawnProcess: () => { spawnCount += 1; return { pid: 12345, unref() {} }; },
+  });
+  context.after(() => service.stop());
+  const waiting = new Promise((resolve) => {
+    service.on('connectionState', (state) => { if (state.state === 'waiting') resolve(); });
+  });
+  service.start();
+  await waiting;
+  assert.equal(spawnCount, 0);
 });

@@ -7,11 +7,48 @@ param(
 
     [switch]$NoSound,
 
-    [switch]$NoDialogs
+    [switch]$NoDialogs,
+
+    [string]$ProgressPath,
+
+    [switch]$InteractiveWorker,
+
+    [switch]$RuntimeSupervisor,
+
+    [int]$ProgressOwnerProcessId = 0,
+
+    [ValidateSet('All', 'Shared', 'Desktop', 'Bridge')]
+    [string]$RetryStep = 'All'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+trap {
+    # Also publish failures before dependency loading and runtime initialization.
+    if (-not [string]::IsNullOrWhiteSpace($ProgressPath)) {
+        $failure = [ordered]@{
+            schemaVersion = 1
+            launcherProcessId = if ($ProgressOwnerProcessId -gt 0) { $ProgressOwnerProcessId } else { $PID }
+            supervisorProcessId = $PID
+            phase = 'failed'
+            step = 'Shared'
+            summary = '起動準備に失敗しました。'
+            detail = $_.Exception.Message
+            serverStatus = '失敗'
+            desktopStatus = '未実行'
+            logPath = ''
+            updatedAt = [DateTimeOffset]::Now.ToString('o')
+        }
+        try {
+            $temporaryFailure = "$ProgressPath.$PID.tmp"
+            [IO.File]::WriteAllText($temporaryFailure, ($failure | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $temporaryFailure -Destination $ProgressPath -Force
+        }
+        catch { }
+    }
+    exit 1
+}
 
 $launcherRoot = Split-Path -Parent $PSCommandPath
 $logRoot = Join-Path $launcherRoot 'logs'
@@ -55,7 +92,7 @@ $null = Initialize-CodexNodeRuntime -StateRoot $stateRoot
 
 $cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
 
-$runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$runStamp = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID
 $modeName = if ($SelfTest) { 'selftest' } else { 'desktop' }
 $logPath = Join-Path $logRoot "$runStamp-$modeName.log"
 $serverStdoutPath = Join-Path $logRoot "$runStamp-app-server.stdout.log"
@@ -70,6 +107,44 @@ function Write-LauncherLog {
 
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss.fffK'), $Message
     Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+}
+
+function Write-LauncherProgress {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Summary,
+        [string]$Detail = '',
+        [string]$ServerStatus = '確認中…',
+        [string]$DesktopStatus = '起動待ち…'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ProgressPath)) { return }
+    if ($Phase -match '^desktop-|^syncing-') { $script:startupStep = 'Desktop' }
+    elseif ($Phase -match '^bridge-') { $script:startupStep = 'Bridge' }
+    elseif ($Phase -in @('preparing', 'waiting-for-owner', 'server-ready')) { $script:startupStep = 'Shared' }
+    if (-not (Get-Variable -Name startupStep -Scope Script -ErrorAction SilentlyContinue)) { $script:startupStep = 'Shared' }
+    $progress = [ordered]@{
+        schemaVersion = 1
+        launcherProcessId = if ($ProgressOwnerProcessId -gt 0) { $ProgressOwnerProcessId } else { $PID }
+        supervisorProcessId = $PID
+        phase = $Phase
+        step = $script:startupStep
+        summary = $Summary
+        detail = $Detail
+        serverStatus = $ServerStatus
+        desktopStatus = $DesktopStatus
+        logPath = $logPath
+        updatedAt = [DateTimeOffset]::Now.ToString('o')
+    }
+    $temporary = "$ProgressPath.$PID.tmp"
+    [IO.File]::WriteAllText($temporary, ($progress | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $ProgressPath -Force
+}
+
+function Assert-LauncherNotCancelled {
+    if ($ProgressPath -and (Test-Path -LiteralPath "$ProgressPath.cancel" -PathType Leaf)) {
+        throw [OperationCanceledException]::new('起動操作を中止しました。')
+    }
 }
 
 function Invoke-RuntimeUpdateDrain {
@@ -409,6 +484,7 @@ function Wait-AppServerReady {
     $uri = "http://127.0.0.1:$PortNumber/readyz"
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Assert-LauncherNotCancelled
         if ($Process.HasExited) {
             $stderrTail = if (Test-Path -LiteralPath $serverStderrPath) {
                 (Get-Content -LiteralPath $serverStderrPath -Tail 20 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
@@ -523,7 +599,8 @@ function Invoke-DesktopProjectSync {
 function Get-ReusableRuntimeState {
     param(
         [Parameter(Mandatory)][object]$PackageInfo,
-        [Parameter(Mandatory)][int]$PortNumber
+        [Parameter(Mandatory)][int]$PortNumber,
+        [switch]$SuppressFailureLog
     )
 
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
@@ -588,9 +665,66 @@ function Get-ReusableRuntimeState {
         return $state
     }
     catch {
-        Write-LauncherLog "Existing runtime is not reusable: $($_.Exception.Message)"
+        if (-not $SuppressFailureLog) {
+            Write-LauncherLog "Existing runtime is not reusable: $($_.Exception.Message)"
+        }
         return $null
     }
+}
+
+function Wait-ReusableRuntimeState {
+    param(
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [Parameter(Mandatory)][int]$PortNumber,
+        [int]$TimeoutSeconds = 120,
+        [int]$PollMilliseconds = 500
+    )
+
+    if ($TimeoutSeconds -le 0) { throw 'The concurrent-launch wait timeout must be positive.' }
+    if ($PollMilliseconds -le 0) { throw 'The concurrent-launch poll interval must be positive.' }
+
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Assert-LauncherNotCancelled
+        $state = Get-ReusableRuntimeState `
+            -PackageInfo $PackageInfo `
+            -PortNumber $PortNumber `
+            -SuppressFailureLog
+        if ($null -ne $state) {
+            return $state
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    return $null
+}
+
+function Wait-DesktopSharedConnection {
+    param(
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [Parameter(Mandatory)][int]$PortNumber,
+        [int]$TimeoutSeconds = 30,
+        [int]$PollMilliseconds = 500
+    )
+
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $helperLogged = $false
+    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Assert-LauncherNotCancelled
+        if (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) {
+            return $true
+        }
+        if (-not $helperLogged) {
+            $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+            $rootIds = @($roots | ForEach-Object { [int]$_.ProcessId })
+            $helpers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
+            if ($helpers.Count -gt 0) {
+                Write-LauncherLog "Desktop bootstrap stdio helper observed; continuing to wait for its shared WebSocket. pid=$($helpers.ProcessId -join ',')"
+                $helperLogged = $true
+            }
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    return $false
 }
 
 function Start-DesktopOnRuntime {
@@ -605,11 +739,14 @@ function Start-DesktopOnRuntime {
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
     Write-RuntimeState -State $RuntimeState
 
+    Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
     Invoke-DesktopProjectSync -WebSocketUrl $RuntimeState.websocketUrl
+    Assert-LauncherNotCancelled
     Set-UserWebSocketEnvironment -WebSocketUrl $RuntimeState.websocketUrl
     Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
     Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
 
+    Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
     $appsFolderTarget = "shell:AppsFolder\$($PackageInfo.ApplicationUserModelId)"
     Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $appsFolderTarget | Out-Null
     Write-LauncherLog "Desktop package activation requested. appId=$($PackageInfo.ApplicationUserModelId)"
@@ -617,6 +754,7 @@ function Start-DesktopOnRuntime {
     $desktopRoots = @()
     $launchWatch = [Diagnostics.Stopwatch]::StartNew()
     while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
+        Assert-LauncherNotCancelled
         $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
         if ($desktopRoots.Count -gt 0) {
             break
@@ -626,6 +764,7 @@ function Start-DesktopOnRuntime {
     if ($desktopRoots.Count -eq 0) {
         throw 'Codex Desktop did not start within 30 seconds.'
     }
+    $script:launchedDesktopRoots = $desktopRoots
 
     Set-RuntimeStateValue `
         -State $RuntimeState `
@@ -634,27 +773,12 @@ function Start-DesktopOnRuntime {
     Write-RuntimeState -State $RuntimeState
     Write-LauncherLog "Desktop root detected. pid=$($RuntimeState.desktopProcessIds -join ',')"
 
-    $connectionVerified = $false
-    $connectionWatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($connectionWatch.Elapsed.TotalSeconds -lt 30) {
-        if (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) {
-            $connectionVerified = $true
-            break
-        }
-
-        $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
-        $rootIds = @($currentRoots | ForEach-Object { [int]$_.ProcessId })
-        $localServers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
-        if ($localServers.Count -gt 0) {
-            Write-LauncherLog "Desktop spawned a private stdio app-server instead of using WebSocket. pid=$($localServers.ProcessId -join ',')"
-            break
-        }
-        Start-Sleep -Milliseconds 500
-    }
+    Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の共有接続を確認しています。' -ServerStatus '起動済み' -DesktopStatus '共有接続待ち…'
+    $connectionVerified = Wait-DesktopSharedConnection -PackageInfo $PackageInfo -PortNumber $PortNumber
 
     if (-not $connectionVerified) {
         Show-LauncherMessage -Message "Codex started, but the shared app-server connection could not be verified.`n`nCodex remains open. See:`n$logPath" -Icon 16
-        throw 'Desktop WebSocket connection was not verified.'
+        throw 'Desktop が 30 秒以内に共有 App Server へ接続しませんでした。初期化用の補助サーバーは待機対象に含めています。Desktop の認証画面と共有接続のログを確認してください。'
     }
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
@@ -664,6 +788,7 @@ function Start-DesktopOnRuntime {
         -Value @(Get-CodexDesktopProcessIds -DesktopExecutable $PackageInfo.DesktopExecutable)
     Write-RuntimeState -State $RuntimeState
     Write-LauncherLog 'Desktop WebSocket connection verified.'
+    Write-LauncherProgress -Phase 'ready' -Summary 'Desktop は共有サーバーに接続済みです。Discord Bridge を確認しています。' -ServerStatus '起動済み' -DesktopStatus '共有接続済み'
 
     [pscustomobject]@{
         RuntimeState = $RuntimeState
@@ -819,8 +944,103 @@ $restartAfterCleanup = $false
 $replacementPackageVersion = $null
 $codexAppToolsDefinition = $null
 $codexAppToolsConfigPath = $null
+$launchedDesktopRoots = @()
+
+function Invoke-InteractiveLauncherWorker {
+    if (-not $ProgressPath) { throw 'An interactive worker requires its exact progress path.' }
+    Write-LauncherProgress -Phase 'preparing' -Summary '起動項目を確認しています。'
+    $shellName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+    $ownerInfo = [Diagnostics.ProcessStartInfo]::new()
+    $ownerInfo.FileName = Join-Path $PSHOME $shellName
+    $ownerInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File ' +
+        (ConvertTo-WindowsCommandLineArgument -Value $PSCommandPath) +
+        ' -NoDialogs -RuntimeSupervisor -ProgressPath ' + (ConvertTo-WindowsCommandLineArgument -Value $ProgressPath) +
+        ' -ProgressOwnerProcessId ' + $PID + ' -RetryStep ' + $RetryStep + ' -Port ' + $Port
+    $ownerInfo.WorkingDirectory = $launcherRoot
+    $ownerInfo.UseShellExecute = $false
+    $ownerInfo.CreateNoWindow = $true
+    $ownerInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $owner = [Diagnostics.Process]::Start($ownerInfo)
+    if ($null -eq $owner) { throw 'The shared runtime supervisor could not start.' }
+    try {
+        while (-not $owner.HasExited) {
+            if (Test-Path -LiteralPath $ProgressPath -PathType Leaf) {
+                try {
+                    $result = Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    if ([int]$result.launcherProcessId -eq $PID -and [int]$result.supervisorProcessId -eq $owner.Id) {
+                        if ($result.phase -in @('ready', 'skipped', 'bridge-ready')) { return 0 }
+                        if ($result.phase -in @('failed', 'cancelled')) {
+                            [void]$owner.WaitForExit(10000)
+                            return $(if ($result.phase -eq 'cancelled') { 0 } else { 1 })
+                        }
+                    }
+                }
+                catch { }
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        return $owner.ExitCode
+    }
+    finally { $owner.Dispose() }
+}
+
+function Invoke-BridgeRetry {
+    Write-LauncherProgress -Phase 'bridge-starting' -Summary 'Discord Bridge を再試行しています。' -ServerStatus '再確認中…' -DesktopStatus '再確認中…'
+    Assert-LauncherNotCancelled
+    $statusScript = Join-Path (Split-Path -Parent $launcherRoot) 'discord-bridge\Get-DiscordBridgeStatus.ps1'
+    $stopScript = Join-Path (Split-Path -Parent $launcherRoot) 'discord-bridge\Stop-DiscordBridge.ps1'
+    if (-not (Test-Path -LiteralPath $statusScript -PathType Leaf)) { throw 'Discord Bridge is not installed.' }
+    $status = & $statusScript -Json | ConvertFrom-Json
+    if ($status.ProcessAlive -and $status.DiscordReady -and $status.CodexConnected -and $status.AppServerReady) {
+        Write-LauncherProgress -Phase 'bridge-ready' -Summary 'Discord Bridge はすでに接続済みです。再起動をスキップしました。' -ServerStatus '起動済み' -DesktopStatus '共有接続済み'
+        return
+    }
+    if ($status.ProcessAlive -and $status.DiscordReady -and -not $status.AppServerReady) {
+        throw 'Discord は接続済みですが、共有 App Server に接続できません。先に共有 App Server／Desktop を再試行してください。'
+    }
+    if ($status.ProcessAlive) {
+        & $stopScript -TimeoutSeconds 30 | Out-Null
+    }
+    Assert-LauncherNotCancelled
+    $task = Get-ScheduledTask -TaskName 'Codex Discord Remote' -ErrorAction Stop
+    if ([string]$task.State -eq 'Running') {
+        $deadline = [DateTimeOffset]::Now.AddSeconds(15)
+        do {
+            Assert-LauncherNotCancelled
+            Start-Sleep -Milliseconds 250
+            $task = Get-ScheduledTask -TaskName 'Codex Discord Remote' -ErrorAction Stop
+        } while ([string]$task.State -eq 'Running' -and [DateTimeOffset]::Now -lt $deadline)
+    }
+    if ([string]$task.State -eq 'Running') { throw 'Discord Bridge のホストが終了しませんでした。強制終了は行っていません。' }
+    Start-ScheduledTask -TaskName 'Codex Discord Remote'
+    $deadline = [DateTimeOffset]::Now.AddMinutes(5)
+    do {
+        Assert-LauncherNotCancelled
+        $status = & $statusScript -Json | ConvertFrom-Json
+        if ($status.ProcessAlive -and $status.DiscordReady -and $status.CodexConnected -and $status.AppServerReady) {
+            Write-LauncherProgress -Phase 'bridge-ready' -Summary 'Discord Bridge の接続を確認しました。' -ServerStatus '起動済み' -DesktopStatus '共有接続済み'
+            return
+        }
+        Start-Sleep -Seconds 1
+    } while ([DateTimeOffset]::Now -lt $deadline)
+    throw "Discord Bridge の再試行が 5 分以内に完了しませんでした。$($status.AppServerStatus)"
+}
+
+if ($InteractiveWorker) {
+    try { exit (Invoke-InteractiveLauncherWorker) }
+    catch {
+        Write-LauncherProgress -Phase 'failed' -Summary '起動操作を開始できませんでした。' -Detail $_.Exception.Message -ServerStatus '失敗' -DesktopStatus '未実行'
+        exit 1
+    }
+}
 
 try {
+    Assert-LauncherNotCancelled
+    Write-LauncherProgress -Phase 'preparing' -Summary 'インストール済みの Codex と共有サーバーを確認しています。'
+    if ($RetryStep -eq 'Bridge') {
+        Invoke-BridgeRetry
+        exit 0
+    }
     $packageInfo = Get-CodexPackageInfo
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
 
@@ -841,11 +1061,35 @@ try {
     }
 
     $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
+    if (-not $SelfTest -and $RetryStep -eq 'Desktop' -and $existingDesktopRoots.Count -gt 0) {
+        $healthy = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port -SuppressFailureLog
+        if ($null -eq $healthy -or -not (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port)) {
+            Write-LauncherProgress -Phase 'desktop-closing' -Summary '指定された Desktop の再試行を行うため、正常終了を要求しています。' -DesktopStatus '正常終了待ち…'
+            foreach ($root in $existingDesktopRoots) {
+                $live = Get-Process -Id $root.ProcessId -ErrorAction Stop
+                if (-not $live.CloseMainWindow()) { throw 'Desktop が正常終了の要求を受け付けませんでした。Desktop を通常の操作で終了してから再試行してください。' }
+            }
+            $closeDeadline = [DateTimeOffset]::Now.AddSeconds(30)
+            do {
+                Assert-LauncherNotCancelled
+                Start-Sleep -Milliseconds 250
+                $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
+            } while ($existingDesktopRoots.Count -gt 0 -and [DateTimeOffset]::Now -lt $closeDeadline)
+            if ($existingDesktopRoots.Count -gt 0) { throw 'Desktop はトレイ等に残っています。Desktop を通常の操作で完全に終了してから再試行してください。強制終了は行っていません。' }
+        }
+    }
     if (-not $SelfTest -and $existingDesktopRoots.Count -gt 0) {
         $processList = ($existingDesktopRoots.ProcessId -join ', ')
-        Write-LauncherLog "Desktop is already running. pid=$processList. No process was stopped."
-        Show-LauncherMessage -Message "Codex Desktop is already running (PID $processList).`n`nQuit Codex normally, then click Codex Shared Server again. No process was stopped." -Icon 48
-        $exitCode = 2
+        $alreadyShared = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port -SuppressFailureLog
+        $sharedConnected = $null -ne $alreadyShared -and (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port)
+        Write-LauncherLog "Desktop is already running; launch skipped. pid=$processList sharedConnected=$sharedConnected. No process was stopped."
+        if ($sharedConnected) {
+            Write-LauncherProgress -Phase 'skipped' -Summary 'すでに起動・共有接続済みのため、起動をスキップしました。' -ServerStatus '起動済み（スキップ）' -DesktopStatus '共有接続済み（スキップ）'
+        }
+        else {
+            Write-LauncherProgress -Phase 'skipped' -Summary 'Desktop はすでに起動済みです。重複起動をスキップしました。' -Detail 'この Desktop の共有接続は確認できません。公式から直接起動している場合は、その作業を終えて Desktop を終了し、共有ランチャーで起動してください。' -ServerStatus '共有接続は未確認' -DesktopStatus '起動済み（スキップ）'
+        }
+        $exitCode = 0
         $startupHandled = $true
     }
     elseif (-not $SelfTest) {
@@ -876,10 +1120,28 @@ try {
             $ownsMutex = $true
         }
         if (-not $ownsMutex) {
-            throw "Another Codex Shared Server launcher already owns port $Port, but its runtime could not be safely reused."
+            Write-LauncherProgress -Phase 'waiting-for-owner' -Summary '先に開始された共有ランチャーの完了を待っています。重複起動は行いません。'
+            Write-LauncherLog (
+                "Another launcher owns port $Port; waiting for its runtime to complete exact Desktop verification."
+            )
+            $concurrentRuntime = Wait-ReusableRuntimeState `
+                -PackageInfo $packageInfo `
+                -PortNumber $Port
+            if ($null -eq $concurrentRuntime) {
+                throw "Another Codex Shared Server launcher still owns port $Port, but its runtime did not become safely reusable."
+            }
+            Write-LauncherLog (
+                "Concurrent launcher completed shared runtime verification. " +
+                "pid=$($concurrentRuntime.serverProcessId)"
+            )
+            Invoke-LauncherSignal -Kind Ready
+            Write-LauncherProgress -Phase 'ready' -Summary '先行ランチャーによる共有接続を確認しました。' -ServerStatus '起動済み（スキップ）' -DesktopStatus '共有接続済み'
+            $exitCode = 0
+            $startupHandled = $true
         }
 
-        Assert-PortAvailable -PortNumber $Port
+        if (-not $startupHandled) {
+            Assert-PortAvailable -PortNumber $Port
 
         $serverArguments = @(
             '-c',
@@ -911,6 +1173,7 @@ try {
 
         Wait-AppServerReady -Process $serverProcess -PortNumber $Port
         Write-LauncherLog "app-server ready. url=ws://127.0.0.1:$Port"
+        Write-LauncherProgress -Phase 'server-ready' -Summary '共有 App Server は起動済みです。' -ServerStatus '起動済み'
 
         $runtimeState = [ordered]@{
             schemaVersion = 2
@@ -1021,10 +1284,20 @@ try {
             }
             $exitCode = 0
         }
+        }
     }
 }
 catch {
     Write-LauncherLog "ERROR $($_.Exception.Message)"
+    if ($_.Exception -is [OperationCanceledException]) {
+        foreach ($root in $launchedDesktopRoots) {
+            try { [void](Get-Process -Id $root.ProcessId -ErrorAction Stop).CloseMainWindow() } catch { }
+        }
+        Write-LauncherProgress -Phase 'cancelled' -Summary '起動操作を中止しました。' -ServerStatus '中止' -DesktopStatus '中止'
+    }
+    else {
+        Write-LauncherProgress -Phase 'failed' -Summary '共有起動を完了できませんでした。' -Detail $_.Exception.Message -ServerStatus '失敗／停止' -DesktopStatus '共有接続失敗'
+    }
     if (-not $SelfTest) {
         Invoke-LauncherSignal -Kind Error
         Show-LauncherMessage -Message "Codex Shared Server could not complete startup.`n`n$($_.Exception.Message)`n`nLog:`n$logPath" -Icon 16
