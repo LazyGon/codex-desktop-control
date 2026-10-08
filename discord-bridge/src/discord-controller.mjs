@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isEmptyMcpToolApproval, emptyMcpToolApprovalResponse } from './mcp-empty-approval.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import {
   ActionRowBuilder,
@@ -8945,7 +8946,9 @@ export class DiscordController {
       .setDescription(truncate(params.message ?? 'MCP serverから入力要求があります。', 4000));
     const row = new ActionRowBuilder();
     if (params.mode === 'url' && params.url) row.addComponents(new ButtonBuilder().setLabel('URLを開く').setURL(params.url).setStyle(ButtonStyle.Link));
-    if (params.mode === 'form' || params.mode === 'openai/form') {
+    if (isEmptyMcpToolApproval(params)) {
+      row.addComponents(new ButtonBuilder().setCustomId(`cx:req:${key}:mcpEmptyAccept`).setLabel('今回のみ許可').setStyle(ButtonStyle.Success));
+    } else if (params.mode === 'form' || params.mode === 'openai/form') {
       row.addComponents(new ButtonBuilder().setCustomId(`cx:req:${key}:mcpForm`).setLabel('回答を入力').setStyle(ButtonStyle.Primary));
     } else {
       row.addComponents(new ButtonBuilder().setCustomId(`cx:req:${key}:mcpAccept`).setLabel('完了/許可').setStyle(ButtonStyle.Success));
@@ -8976,6 +8979,7 @@ export class DiscordController {
       if (action === 'permDeny') return { permissions: {}, scope: 'turn', strictAutoReview: false };
     }
     if (record.method === 'mcpServer/elicitation/request') {
+      if (action === 'mcpEmptyAccept') return emptyMcpToolApprovalResponse(params);
       if (action === 'mcpAccept') return { action: 'accept' };
       if (action === 'mcpDecline') return { action: 'decline' };
       if (action === 'mcpCancel') return { action: 'cancel' };
