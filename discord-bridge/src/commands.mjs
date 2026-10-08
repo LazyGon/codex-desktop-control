@@ -151,7 +151,7 @@ export const codexCommand = new SlashCommandBuilder()
       ))))
   .addSubcommand((command) => addTaskOption(command
     .setName('goal')
-    .setDescription('タスクのgoalを表示・設定・解除します')
+    .setDescription('タスクのgoalを表示・設定・再開・解除します')
     .addStringOption((option) => option
       .setName('action')
       .setDescription('goal操作')
@@ -159,6 +159,7 @@ export const codexCommand = new SlashCommandBuilder()
       .addChoices(
         { name: 'view', value: 'view' },
         { name: 'set', value: 'set' },
+        { name: 'resume', value: 'resume' },
         { name: 'clear', value: 'clear' },
       )))
     .addStringOption((option) => option

@@ -276,7 +276,7 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
 | `/codex mode` / `memory` | Show or change collaboration and task-memory modes |
 | `/codex usage` | Show account token usage and rate-limit windows |
 | `/codex resources` | Read MCP, Skills, Plugins, Hooks, or experimental inventory |
-| `/codex goal` | View, set, or confirm clearing a task goal |
+| `/codex goal` | View, set, confirm resuming a paused goal, or confirm clearing a task goal |
 | `/codex compact` / `fork` | Confirm context compact or task fork |
 | `/codex review` | Start inline or detached review for a selected target |
 | `/codex terminals` | List or confirm termination of task background terminals |

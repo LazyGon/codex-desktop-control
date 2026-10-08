@@ -4037,7 +4037,7 @@ test('task control panel delivery-mode select opens the compose modal', async (c
   assert.equal(shownModal.components[0].components[0].custom_id, 'prompt');
 });
 
-test('task management menu opens catalog-backed UI and confirms permission changes', async (context) => {
+test('task management menu confirms permission changes and resumes only paused goals', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-controller-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const client = new EventEmitter();
@@ -4048,12 +4048,22 @@ test('task management menu opens catalog-backed UI and confirms permission chang
   };
   const stateStore = {
     binding: (threadId) => threadId === binding.threadId ? structuredClone(binding) : null,
+    bindingByChannel: (channelId) => channelId === binding.channelId ? structuredClone(binding) : null,
     setBinding: (threadId, patch) => {
       assert.equal(threadId, binding.threadId);
       Object.assign(binding, patch);
     },
   };
   const settingsUpdates = [];
+  let goalState = {
+    threadId: binding.threadId,
+    objective: 'Keep the task moving',
+    status: 'paused',
+    tokenBudget: 1000,
+    tokensUsed: 42,
+    timeUsedSeconds: 12,
+  };
+  let goalResumeCalls = 0;
   codex.resumeThread = async () => ({
     thread: { id: binding.threadId, name: 'Task one', cwd: binding.cwd, status: { type: 'idle' } },
     cwd: binding.cwd,
@@ -4071,7 +4081,13 @@ test('task management menu opens catalog-backed UI and confirms permission chang
     { id: ':danger-full-access', allowed: true },
   ];
   codex.listCollaborationModes = async () => [{ name: 'Default', mode: 'default', model: null, reasoning_effort: null }];
-  codex.getGoal = async () => ({ goal: null });
+  codex.getGoal = async () => ({ goal: structuredClone(goalState) });
+  codex.resumeGoal = async (threadId) => {
+    assert.equal(threadId, binding.threadId);
+    goalResumeCalls += 1;
+    goalState = { ...goalState, status: 'active' };
+    return { goal: structuredClone(goalState) };
+  };
   codex.listBackgroundTerminals = async () => [];
   codex.updateThreadSettings = async (threadId, patch) => { settingsUpdates.push({ threadId, patch }); };
   const controller = new DiscordController({
@@ -4144,6 +4160,85 @@ test('task management menu opens catalog-backed UI and confirms permission chang
     threadId: binding.threadId,
     patch: { permissions: ':danger-full-access' },
   }]);
+
+  const goalConfirmation = await emitInteraction({
+    ...base,
+    customId: `cx:ctl:goalresume:${binding.threadId}`,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.equal(goalResumeCalls, 0);
+  const goalConfirmId = goalConfirmation.components[0].toJSON().components[0].custom_id;
+  const resumed = await emitInteraction({
+    ...base,
+    customId: goalConfirmId,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.equal(goalResumeCalls, 1);
+  assert.equal(goalState.status, 'active');
+  assert.equal(goalState.tokensUsed, 42);
+  assert.equal(resumed.embeds[0].data.fields[0].value, 'active');
+
+  const staleConfirmation = await emitInteraction({
+    ...base,
+    customId: `cx:ctl:goalresume:${binding.threadId}`,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  const staleConfirmId = staleConfirmation.components[0].toJSON().components[0].custom_id;
+  const staleResult = await emitInteraction({
+    ...base,
+    customId: staleConfirmId,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.match(staleResult.content, /再開可能な停止中のgoalはありません/);
+  assert.equal(goalResumeCalls, 1);
+
+  goalState = { ...goalState, status: 'paused' };
+  const slashConfirmation = await emitInteraction({
+    ...base,
+    commandName: 'codex',
+    options: {
+      getSubcommand: () => 'goal',
+      getSubcommandGroup: () => null,
+      getString: (name) => name === 'action' ? 'resume' : null,
+    },
+    isChatInputCommand: () => true,
+    isButton: () => false,
+    isStringSelectMenu: () => false,
+  });
+  assert.equal(goalResumeCalls, 1);
+  const slashConfirmId = slashConfirmation.components[0].toJSON().components[0].custom_id;
+  await emitInteraction({
+    ...base,
+    customId: slashConfirmId,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.equal(goalResumeCalls, 2);
+
+  goalState = { ...goalState, status: 'paused' };
+  codex.resumeGoal = async () => {
+    goalResumeCalls += 1;
+    return { goal: { ...goalState, threadId: 'other-thread', status: 'active' } };
+  };
+  const unconfirmed = await emitInteraction({
+    ...base,
+    customId: `cx:ctl:goalresume:${binding.threadId}`,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  const unconfirmedConfirmId = unconfirmed.components[0].toJSON().components[0].custom_id;
+  const unconfirmedResult = await emitInteraction({
+    ...base,
+    customId: unconfirmedConfirmId,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+  });
+  assert.match(unconfirmedResult.content, /受理結果を確認できません。再試行せず/);
+  assert.equal(goalResumeCalls, 3);
 });
 
 test('ordinary messages in unmanaged channels do not create Codex tasks', async (context) => {

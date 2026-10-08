@@ -292,6 +292,7 @@ export function goalPayload(threadId, goal) {
     embeds: [embed],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`cx:ctl:goalset:${threadId}`).setLabel('Goalを設定').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`cx:ctl:goalresume:${threadId}`).setLabel('Goalを再開').setStyle(ButtonStyle.Success).setDisabled(goal?.status !== 'paused'),
       new ButtonBuilder().setCustomId(`cx:ctl:goalclear:${threadId}`).setLabel('Goalを解除').setStyle(ButtonStyle.Danger).setDisabled(!goal),
       new ButtonBuilder().setCustomId(`cx:ctl:back:${threadId}`).setLabel('Controlsへ戻る').setStyle(ButtonStyle.Secondary),
     )],

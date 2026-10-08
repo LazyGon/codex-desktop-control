@@ -89,9 +89,13 @@ test('goal and background terminal screens retain explicit destructive actions',
   const goal = json(goalPayload('thread-1', context.goal));
   assert.deepEqual(goal.components[0].components.map((component) => component.custom_id), [
     'cx:ctl:goalset:thread-1',
+    'cx:ctl:goalresume:thread-1',
     'cx:ctl:goalclear:thread-1',
     'cx:ctl:back:thread-1',
   ]);
+  assert.equal(goal.components[0].components[1].disabled, true);
+  const paused = json(goalPayload('thread-1', { ...context.goal, status: 'paused' }));
+  assert.equal(paused.components[0].components[1].disabled, false);
   const terminals = json(terminalPayload('thread-1', context.terminals));
   assert.equal(terminals.components[0].components[0].custom_id, 'cx:ctl:terminal:thread-1');
   assert.equal(terminals.components[1].components[0].custom_id, 'cx:ctl:back:thread-1');

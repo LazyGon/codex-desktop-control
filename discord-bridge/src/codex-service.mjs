@@ -366,6 +366,11 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/goal/set', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
+  async resumeGoal(threadId) {
+    this.#requireClient();
+    return this.client.call('thread/goal/set', { threadId, status: 'active' }, APP_SERVER_OPERATION_TIMEOUT_MS);
+  }
+
   async clearGoal(threadId) {
     this.#requireClient();
     return this.client.call('thread/goal/clear', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);

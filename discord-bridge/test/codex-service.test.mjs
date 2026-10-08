@@ -252,6 +252,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const startedThreads = [];
   const namedThreads = [];
   const controlCalls = [];
+  const goalSetCalls = [];
   const turnStarts = [];
   const turnSteers = [];
   const turnListCalls = [];
@@ -293,7 +294,10 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
       if (request.method === 'permissionProfile/list') result = { data: [{ id: ':workspace', allowed: true }], nextCursor: null };
       if (request.method === 'collaborationMode/list') result = { data: [{ name: 'Default', mode: 'default' }] };
       if (request.method === 'thread/goal/get') result = { goal: null };
-      if (request.method === 'thread/goal/set') result = { goal: { threadId: request.params.threadId, objective: request.params.objective } };
+      if (request.method === 'thread/goal/set') {
+        goalSetCalls.push(request.params);
+        result = { goal: { threadId: request.params.threadId, objective: request.params.objective ?? 'Ship it', status: request.params.status ?? 'active' } };
+      }
       if (request.method === 'thread/goal/clear') result = { cleared: true };
       if (request.method === 'thread/compact/start') result = {};
       if (request.method === 'thread/fork') result = { thread: { id: 'thread-fork' } };
@@ -474,6 +478,11 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.deepEqual(await service.listCollaborationModes(), [{ name: 'Default', mode: 'default' }]);
   assert.deepEqual(await service.getGoal('thread-1'), { goal: null });
   assert.equal((await service.setGoal('thread-1', 'Ship it', 1000)).goal.objective, 'Ship it');
+  assert.equal((await service.resumeGoal('thread-1')).goal.status, 'active');
+  assert.deepEqual(goalSetCalls, [
+    { threadId: 'thread-1', objective: 'Ship it', tokenBudget: 1000 },
+    { threadId: 'thread-1', status: 'active' },
+  ]);
   assert.equal((await service.clearGoal('thread-1')).cleared, true);
   await service.compactThread('thread-1');
   assert.equal((await service.forkThread('thread-1')).thread.id, 'thread-fork');

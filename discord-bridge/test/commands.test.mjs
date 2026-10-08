@@ -12,6 +12,10 @@ test('guild command payload contains the full remote operation surface', () => {
     assert.ok(subcommands.includes(expected), `missing /codex ${expected}`);
   }
   assert.equal(subcommands.length, 25, 'Discord permits at most 25 top-level subcommands');
+  const goal = commandPayload[0].options.find((option) => option.name === 'goal');
+  assert.deepEqual(goal.options.find((option) => option.name === 'action').choices.map((choice) => choice.value), [
+    'view', 'set', 'resume', 'clear',
+  ]);
   for (const removed of ['bind', 'unbind', 'catchup', 'autocatchup']) {
     assert.equal(subcommands.includes(removed), false, `/codex ${removed} should be removed`);
   }

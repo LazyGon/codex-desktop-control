@@ -3186,6 +3186,16 @@ export class DiscordController {
         );
         return;
       }
+      if (action === 'resume') {
+        await this.#showConfirmation(
+          interaction,
+          { type: 'goalresume', threadId },
+          'このタスクの停止中のgoalを再開しますか？既存の目的と利用量を維持します。',
+          'Goalを再開',
+          ButtonStyle.Success,
+        );
+        return;
+      }
       const objective = interaction.options.getString('objective');
       if (!objective) {
         await this.#showGoalModal(interaction, threadId);
@@ -3861,6 +3871,17 @@ export class DiscordController {
         await this.#showGoalModal(interaction, threadId);
         return;
       }
+      if (action === 'goalresume') {
+        await interaction.deferUpdate();
+        await this.#showConfirmation(
+          interaction,
+          { type: 'goalresume', threadId },
+          'このタスクの停止中のgoalを再開しますか？既存の目的と利用量を維持します。',
+          'Goalを再開',
+          ButtonStyle.Success,
+        );
+        return;
+      }
       if (action === 'goalclear') {
         await interaction.deferUpdate();
         await this.#showConfirmation(
@@ -3905,6 +3926,20 @@ export class DiscordController {
       if (action.type === 'goalclear') {
         await this.codex.clearGoal(action.threadId);
         await interaction.editReply(goalPayload(action.threadId, null));
+        return;
+      }
+      if (action.type === 'goalresume') {
+        this.#assertThreadAccess(interaction, action.threadId);
+        const before = (await this.codex.getGoal(action.threadId)).goal;
+        if (before?.status !== 'paused' || (before.threadId && before.threadId !== action.threadId)) {
+          throw new Error('このタスクに再開可能な停止中のgoalはありません。');
+        }
+        const result = await this.codex.resumeGoal(action.threadId);
+        const goal = result?.goal;
+        if (goal?.threadId !== action.threadId || goal.status !== 'active' || goal.objective !== before.objective) {
+          throw new Error('Goal再開の受理結果を確認できません。再試行せず状態を確認してください。');
+        }
+        await interaction.editReply(goalPayload(action.threadId, goal));
         return;
       }
       if (action.type === 'terminal') {
