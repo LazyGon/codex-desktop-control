@@ -31,6 +31,11 @@ Codex Desktop, local controller commands, and a private Discord remote UI.
 The app-server remains bound to loopback. Do not expose its WebSocket endpoint
 to a LAN or the internet.
 
+For separate local tasks, use the existing shared App Server's `thread/start`
+and verify ordinary list membership and Discord binding independently. Desktop
+high-level task creation and ChatGPT tool success are not substitutes for those
+receipts. See the [official conversation API investigation and operating boundary](docs/official-conversation-api-investigation-20261005.md).
+
 ## Prerequisites
 
 - Windows 10 or 11 with Codex Desktop installed for the current user.

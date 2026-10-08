@@ -259,6 +259,12 @@ remain immediately available through the Bridge.
 All projects and top-level tasks are automatic. The bridge scans active and
 archived task lists every 30 seconds, after reconnect, and after task lifecycle
 notifications. `/codex sync` forces the same reconciliation immediately.
+This covers tasks returned by the shared App Server's ordinary `thread/list`.
+Existence through `thread/read` alone does not establish discovery or a Discord
+binding. For user-requested separate local tasks, require direct `thread/start`
+on the shared server, verify the exact ID in the paginated list, and verify its
+binding separately. Do not recreate or resume an uncertain or interrupted
+predecessor. See [the investigation and API boundary](../docs/official-conversation-api-investigation-20261005.md).
 Notification/card mutations remain ordered within each task, but different
 tasks are independent. The periodic scan avoids rewriting unchanged bindings
 or project descriptors and reuses cached panel messages so background
