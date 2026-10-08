@@ -9,6 +9,28 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $runtimePath = Join-Path $root 'data\runtime.json'
 $lockPath = Join-Path $root 'data\bridge.lock'
+
+function Test-BridgeProcessIdentity {
+    param([object]$Process, [object]$Runtime, [int]$ExpectedPid, [string]$ExpectedRoot)
+
+    try {
+        if ($null -eq $Process -or $null -eq $Runtime -or $ExpectedPid -le 0) { return $false }
+        if ($Process.Id -ne $ExpectedPid -or $Runtime.pid -ne $ExpectedPid -or
+            $Process.ProcessName -ne 'node' -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string]$Runtime.bridgeRoot),
+                [IO.Path]::GetFullPath($ExpectedRoot), [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+        $runtimeStartedAt = [DateTimeOffset]::MinValue
+        if ($Runtime.startedAt -is [datetime] -or $Runtime.startedAt -is [DateTimeOffset]) {
+            $runtimeStartedAt = [DateTimeOffset]$Runtime.startedAt
+        }
+        elseif (-not [DateTimeOffset]::TryParse([string]$Runtime.startedAt, [ref]$runtimeStartedAt)) { return $false }
+        return [Math]::Abs(($Process.StartTime.ToUniversalTime() - $runtimeStartedAt.UtcDateTime).TotalSeconds) -le 60
+    }
+    catch { return $false }
+}
+
 $runtime = $null
 if (Test-Path -LiteralPath $runtimePath) {
     $runtime = Get-Content -Raw -Encoding UTF8 -LiteralPath $runtimePath | ConvertFrom-Json
@@ -20,7 +42,8 @@ if (Test-Path -LiteralPath $lockPath) {
     $parsedPid = 0
     if ([int]::TryParse((Get-Content -Raw -LiteralPath $lockPath).Trim(), [ref]$parsedPid)) {
         $pidValue = $parsedPid
-        $processAlive = $null -ne (Get-Process -Id $parsedPid -ErrorAction SilentlyContinue)
+        $liveProcess = Get-Process -Id $parsedPid -ErrorAction SilentlyContinue
+        $processAlive = Test-BridgeProcessIdentity -Process $liveProcess -Runtime $runtime -ExpectedPid $parsedPid -ExpectedRoot $root
     }
 }
 
