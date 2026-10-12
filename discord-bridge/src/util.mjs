@@ -20,10 +20,10 @@ export function readJsonIfPresent(filePath) {
   }
 }
 
-export function atomicWriteJson(filePath, value) {
+export function atomicWriteJson(filePath, value, { space = 2 } = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, space)}\n`, 'utf8');
   for (let attempt = 0; ; attempt += 1) {
     try {
       fs.renameSync(temporaryPath, filePath);
@@ -282,27 +282,158 @@ export function completionTextFromSession(sessionPath, turnId) {
   try {
     const stat = fs.statSync(sessionPath);
     let cached = sessionCompletionCache.get(sessionPath);
-    if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-      const messages = new Map();
-      for (const line of fs.readFileSync(sessionPath, 'utf8').split(/\r?\n/)) {
-        if (!line) continue;
+    const sameFile = cached && cached.dev === stat.dev && cached.ino === stat.ino;
+    const unchanged = sameFile && cached.offset === stat.size
+      && cached.mtimeMs === stat.mtimeMs && cached.ctimeMs === stat.ctimeMs;
+    if (unchanged) return cached.provisional?.get(turnId) ?? cached.messages.get(turnId) ?? '';
+
+    // Session JSONL files are append-only in normal operation. On growth, verify
+    // the old EOF bytes before trusting that assumption; on same-size metadata
+    // changes, replacement, or truncation, rebuild the cache from byte zero.
+    let rebuild = !sameFile || stat.size < (cached?.offset ?? 0);
+    if (cached && sameFile && stat.size === cached.offset
+      && (cached.mtimeMs !== stat.mtimeMs || cached.ctimeMs !== stat.ctimeMs)) rebuild = true;
+    if (cached && sameFile && stat.size > cached.offset && !rebuild) {
+      const anchor = cached.anchor;
+      if (anchor.length) {
+        const fd = fs.openSync(sessionPath, 'r');
         try {
-          const entry = JSON.parse(line);
-          const payload = entry?.type === 'event_msg' ? entry.payload : null;
-          if (payload?.type === 'task_complete' && payload.turn_id && payload.last_agent_message) {
-            messages.set(payload.turn_id, payload.last_agent_message);
-          }
-        } catch {
-          // The final line can be incomplete while Codex is appending to the session.
+          const actual = Buffer.alloc(anchor.length);
+          const read = fs.readSync(fd, actual, 0, actual.length, cached.offset - anchor.length);
+          if (read !== anchor.length || !actual.equals(anchor)) rebuild = true;
+        } finally {
+          fs.closeSync(fd);
         }
       }
-      cached = { mtimeMs: stat.mtimeMs, size: stat.size, messages };
-      sessionCompletionCache.set(sessionPath, cached);
     }
-    return cached.messages.get(turnId) ?? '';
+
+    if (!cached || rebuild) {
+      cached = {
+        dev: stat.dev,
+        ino: stat.ino,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+        offset: 0,
+        messages: new Map(),
+        pending: [],
+        pendingLength: 0,
+        provisional: null,
+        anchor: Buffer.alloc(0),
+      };
+    }
+
+    let snapshotAnchor = cached.anchor;
+    const fd = fs.openSync(sessionPath, 'r');
+    try {
+      const chunkSize = SESSION_COMPLETION_CHUNK_SIZE;
+      const chunk = Buffer.allocUnsafe(chunkSize);
+      while (cached.offset < stat.size) {
+        const wanted = Math.min(chunkSize, stat.size - cached.offset);
+        const read = fs.readSync(fd, chunk, 0, wanted, cached.offset);
+        if (read <= 0) break;
+        const bytes = chunk.subarray(0, read);
+        consumeCompletionBytes(cached, bytes);
+        snapshotAnchor = appendCompletionAnchor(snapshotAnchor, bytes);
+        cached.offset += read;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const after = fs.statSync(sessionPath);
+    let snapshotChanged = after.dev !== stat.dev || after.ino !== stat.ino
+      || after.size < cached.offset || after.size < stat.size
+      || (after.size === stat.size
+        && (after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs));
+    if (!snapshotChanged && after.size > cached.offset && snapshotAnchor.length) {
+      snapshotChanged = !readCompletionAnchor(sessionPath, cached.offset).equals(snapshotAnchor);
+    }
+    if (snapshotChanged) {
+      // Do not attach a mixed or replaced snapshot to this path. The next
+      // lookup will rebuild from zero.
+      sessionCompletionCache.delete(sessionPath);
+      return '';
+    }
+    cached.dev = after.dev;
+    cached.ino = after.ino;
+    cached.mtimeMs = after.mtimeMs;
+    cached.ctimeMs = after.ctimeMs;
+    cached.anchor = snapshotAnchor;
+    cached.provisional = parseProvisionalCompletion(cached.pending, cached.pendingLength);
+    sessionCompletionCache.set(sessionPath, cached);
+    return cached.provisional?.get(turnId) ?? cached.messages.get(turnId) ?? '';
   } catch {
     return '';
   }
+}
+
+const SESSION_COMPLETION_CHUNK_SIZE = 64 * 1024;
+const SESSION_COMPLETION_ANCHOR_SIZE = 64;
+
+function consumeCompletionBytes(cached, bytes) {
+  let start = 0;
+  while (start < bytes.length) {
+    const newline = bytes.indexOf(0x0a, start);
+    if (newline < 0) {
+      const tail = bytes.subarray(start);
+      // The caller reuses its bounded read buffer for the next chunk.
+      cached.pending.push(Buffer.from(tail));
+      cached.pendingLength += tail.length;
+      return;
+    }
+    const linePart = bytes.subarray(start, newline);
+    const lineBuffers = cached.pending.length ? [...cached.pending, linePart] : [linePart];
+    const line = Buffer.concat(lineBuffers, cached.pendingLength + linePart.length);
+    cached.pending = [];
+    cached.pendingLength = 0;
+    recordCompletionLine(cached.messages, line);
+    start = newline + 1;
+  }
+}
+
+function recordCompletionLine(messages, bytes) {
+  if (!bytes.length) return;
+  let line = bytes;
+  if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
+  if (!line.length) return;
+  try {
+    const entry = JSON.parse(line.toString('utf8'));
+    const payload = entry?.type === 'event_msg' ? entry.payload : null;
+    if (payload?.type === 'task_complete' && payload.turn_id && payload.last_agent_message) {
+      messages.set(payload.turn_id, payload.last_agent_message);
+    }
+  } catch {
+    // Ignore malformed and incomplete JSONL records, as the old full scan did.
+  }
+}
+
+function parseProvisionalCompletion(pending, pendingLength) {
+  if (!pendingLength) return null;
+  const messages = new Map();
+  recordCompletionLine(messages, Buffer.concat(pending, pendingLength));
+  return messages.size ? messages : null;
+}
+
+function readCompletionAnchor(sessionPath, offset) {
+  const length = Math.min(SESSION_COMPLETION_ANCHOR_SIZE, offset);
+  if (!length) return Buffer.alloc(0);
+  const fd = fs.openSync(sessionPath, 'r');
+  try {
+    const anchor = Buffer.alloc(length);
+    const read = fs.readSync(fd, anchor, 0, length, offset - length);
+    return read === length ? anchor : anchor.subarray(0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function appendCompletionAnchor(anchor, bytes) {
+  if (bytes.length >= SESSION_COMPLETION_ANCHOR_SIZE) {
+    return Buffer.from(bytes.subarray(-SESSION_COMPLETION_ANCHOR_SIZE));
+  }
+  const combined = Buffer.concat([anchor, bytes]);
+  return combined.length > SESSION_COMPLETION_ANCHOR_SIZE
+    ? combined.subarray(-SESSION_COMPLETION_ANCHOR_SIZE)
+    : combined;
 }
 
 export function needsSessionCompletionFallback(turn) {

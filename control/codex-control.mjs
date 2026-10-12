@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { recentThreadMessages } from './recent-thread-messages.mjs';
 
 const controlDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.dirname(controlDir);
@@ -409,10 +410,10 @@ async function main() {
 
     if (command === 'catchup' || command === 'read') {
       const metadata = await resolveThread(client, positionals[1], options);
-      const result = await client.call('thread/read', { threadId: metadata.id, includeTurns: true }, 60_000);
       const messageLimit = positiveInteger(options.messages, command === 'catchup' ? 16 : 30, '--messages');
       const characterLimit = positiveInteger(options.chars, 6_000, '--chars');
-      print(summarizeThread(result.thread, messageLimit, characterLimit), options.compact === true);
+      const thread = await recentThreadMessages(client, metadata, messageLimit);
+      print(summarizeThread(thread, messageLimit, characterLimit), options.compact === true);
       return;
     }
 

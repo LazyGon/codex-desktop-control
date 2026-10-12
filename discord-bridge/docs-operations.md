@@ -55,8 +55,10 @@ discovery or status reconciliation for other channels.
    links. An attachment-only input tells Codex to infer the intended work and
    proceed rather than stop after acknowledging the files. The same path works
    when `deliver` steers an active turn.
-5. Watch the latest turn card. It shows current commentary, reasoning, and work
-   state. When the next commentary starts, the previous post becomes a compact
+5. Watch the latest turn card. It shows current commentary, a fixed-height
+   reasoning indicator, and work state. Streaming reasoning text is omitted
+   to keep the card readable; completed summaries can be restored with
+   `履歴復元`. When the next commentary starts, the previous post becomes a compact
    past card. Turn completion leaves a final card with task and turn identity,
    then reposts the unpinned task control panel directly below it.
    When app-server completes context compaction, the task channel also retains

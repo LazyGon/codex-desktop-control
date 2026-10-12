@@ -3035,11 +3035,15 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
         author: { id: 'bot-user', bot: true },
         content: options.content ?? '',
         embeds: (options.embeds ?? []).map((embed) => embed.toJSON()),
+        embedEdits: [],
         components: (options.components ?? []).map((component) => component.toJSON?.() ?? component),
         attachments: materializeFiles(options.files),
         edit: async (next) => {
           message.content = next.content ?? message.content;
-          if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+          if (next.embeds) {
+            message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
+            message.embedEdits.push(message.embeds);
+          }
           if (next.components) message.components = next.components.map((component) => component.toJSON?.() ?? component);
           if (next.attachments) {
             message.attachments = new Map(next.attachments
@@ -3454,17 +3458,16 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   }
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const reasoning = liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value;
-    if (reasoning?.includes('Planning latest fix')) break;
+    if (reasoning === '要約は完了後の履歴復元で確認') break;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(
     liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value,
-    '- Planning latest fix\n- Verifying latest fix',
+    '要約は完了後の履歴復元で確認',
   );
-  assert.doesNotMatch(
-    liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value ?? '',
-    /first fix/,
-  );
+  assert.ok(liveAssistant.embedEdits
+    .flatMap(([embed]) => embed.fields.filter((field) => field.name === 'Reasoning'))
+    .every((field) => field.value === '要約は完了後の履歴復元で確認'));
   assert.equal(pastAssistant.embeds[0].description, assistantText);
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');

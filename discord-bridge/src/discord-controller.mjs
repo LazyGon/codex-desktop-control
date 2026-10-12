@@ -22,7 +22,6 @@ import {
   completionTextFromSession,
   completionNoticeContent,
   finalTextFromTurn,
-  formatReasoningField,
   itemResultSummary,
   itemSummary,
   needsSessionCompletionFallback,
@@ -8525,10 +8524,10 @@ export class DiscordController {
         { name: 'Message', value: view.currentMessageId ? `\`${view.currentMessageId}\`` : '(pending)', inline: true },
         { name: 'Elapsed', value: `${elapsed}s`, inline: true },
       );
-    if (view.reasoning) {
-      embed.addFields({ name: 'Reasoning', value: formatReasoningField(view.reasoning, 900, 4) });
-    } else if (view.currentItem === 'reasoning') {
-      embed.addFields({ name: 'Reasoning', value: '推論中...' });
+    if (view.reasoningItemId || view.currentItem === 'reasoning') {
+      // Streaming summaries change line count and make the latest Discord card
+      // jump while someone is reading it. Keep this field a stable height.
+      embed.addFields({ name: 'Reasoning', value: '要約は完了後の履歴復元で確認' });
     }
     if (view.currentItem) embed.addFields({ name: 'Current', value: truncate(view.currentItem, 600) });
     if (view.plan.length) {

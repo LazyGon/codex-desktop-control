@@ -583,6 +583,8 @@ export class StateStore {
   }
 
   #write() {
-    atomicWriteJson(this.filePath, this.value);
+    // Preserve the synchronous atomic save boundary while avoiding indentation
+    // overhead on this large, frequently rewritten machine-readable snapshot.
+    atomicWriteJson(this.filePath, this.value, { space: 0 });
   }
 }

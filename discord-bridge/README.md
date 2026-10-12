@@ -104,8 +104,11 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   mirrored cards remain in the ledger, and live user messages and completions
   continue normally. Explicit `履歴復元` still reads every turn in its selected
   1-, 3-, or 7-day window, one App Server page at a time.
-- Shows current commentary, reasoning, plans, tool progress, and token usage
-  only on the latest card. A past commentary card contains only its title,
+- Shows current commentary, a fixed-height reasoning indicator, plans, tool
+  progress, and token usage only on the latest card. Streaming reasoning
+  summaries are omitted there so the card does not jump as lines arrive;
+  completed summaries remain available through `履歴復元`. A past commentary
+  card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
 - Persists every completed app-server `contextCompaction` item as its own task
   card with task, turn, and item identity. The item-to-Discord-message mapping
