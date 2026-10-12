@@ -16,6 +16,28 @@
 - Stop the Discord bridge through its graceful stop request before considering
   process termination.
 
+## Commit and push completed changes
+
+- The Owner gives standing authorization to commit and push verified repository
+  changes made for the requested task. Unless the Owner explicitly says otherwise,
+  finish implementation, maintenance, test, documentation, and instruction changes
+  through commit and push to the configured upstream; do not leave them uncommitted
+  merely because commit/push was not repeated in the latest request.
+- Run checks proportionate to the change, inspect the exact staged diff, and group
+  related changes into coherent commits with descriptive messages. Stage only the
+  task's changes and preserve unrelated work in progress.
+- Synchronize upstream changes when needed, preserving local changes before
+  pull/rebase and reconciling equivalent changes without duplicating or discarding
+  work. Do not force-push or overwrite unrelated changes to satisfy this rule.
+- Verify the published commit identity against the remote before reporting push
+  complete. If a push result is uncertain, reconcile the remote state before
+  considering another attempt.
+- If checks, conflicts, credentials, security boundaries, or another concrete
+  blocker prevent publication, preserve the work and report exactly what remains
+  uncommitted or unpushed. Do not claim completion or bypass the blocker.
+- Read-only tasks or tasks with no repository changes require no empty commit or
+  unrelated push. This rule does not authorize changes outside the requested task.
+
 ## Task creation and ChatGPT delivery boundary
 
 - When the user requests a separate local Codex task, create it directly on the
