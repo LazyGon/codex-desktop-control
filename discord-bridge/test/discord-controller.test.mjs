@@ -1461,6 +1461,8 @@ test('subagent descriptors preserve stable parent identity and flatten a readabl
     role: null,
   });
   assert.equal(subagentDiscordThreadName(child), '🟢 Pasteur · local-gap-audit · 44ceb422');
+  assert.equal(subagentDiscordThreadName({ ...child, status: { type: 'systemError' } }), '🔴 Pasteur · local-gap-audit · 44ceb422');
+  assert.equal(subagentDiscordThreadName({ ...child, status: { type: 'failed' } }), '🔴 Pasteur · local-gap-audit · 44ceb422');
   assert.deepEqual(subagentIdsFromThread({
     turns: [{
       items: [
@@ -3989,7 +3991,7 @@ test('renaming a bound task channel renames the Codex task', async (context) => 
     guildId: 'guild-1',
     type: ChannelType.GuildText,
     parentId: 'project-category',
-    name: 'renamed-task',
+    name: '🔴-renamed-task',
   });
   for (let attempt = 0; attempt < 100 && binding.name !== 'renamed task'; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));

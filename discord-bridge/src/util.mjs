@@ -216,7 +216,24 @@ export function threadStatusLabel(status) {
 }
 
 export function threadStatusEmoji(status) {
-  return status?.type === 'active' ? '🟢' : '⚫';
+  const type = typeof status === 'string' ? status : status?.type;
+  if (type === 'active') return '🟢';
+  return type === 'systemError' || type === 'failed' ? '🔴' : '⚫';
+}
+
+// Terminal turn failure can be followed by an idle thread-status notification.
+// Retain that observed failure until a new turn or a successful/interrupted turn.
+export function taskThreadForDisplay(thread, binding = null) {
+  const type = typeof thread?.status === 'string' ? thread.status : thread?.status?.type;
+  if (type === 'active' || type === 'systemError') return thread;
+  const latestTurn = thread?.turns?.at(-1);
+  const failed = latestTurn
+    ? latestTurn.status === 'failed'
+    : binding?.taskStatus === 'systemError';
+  if (failed && [undefined, 'unknown', 'idle', 'notLoaded'].includes(type)) {
+    return { ...thread, status: { type: 'systemError' } };
+  }
+  return thread;
 }
 
 export function taskChannelName(thread) {

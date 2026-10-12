@@ -158,7 +158,11 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
 - Uses the last public assistant message when an older completed turn has no
   explicit `final_answer`, instead of displaying a missing-text placeholder.
 - Synchronizes the Codex task name into its Discord channel name and prefixes
-  it with `🟢` while a turn is running or `⚫` while stopped.
+  it with `🟢` while a turn is running, `🔴` after a system error / failed turn,
+  or `⚫` after ordinary completion or interruption. Failed status survives idle
+  synchronization and clears when execution resumes. Retrying errors and input
+  waits do not themselves mark a running task red. Lists, task cards, and
+  subagent thread names use the same status indicators.
 - Synchronizes names in both directions: renaming a task channel renames the
   Codex task, then reapplies the normalized status-prefixed channel name.
 - Routes command, file-change, additional-permission, user-input, and MCP
@@ -436,7 +440,7 @@ Task status reconciliation does not wait for Discord's comparatively slow
 channel-name rate-limit bucket. Channel name/topic updates are coalesced per
 channel in the background, while task panels, bindings, and every other task
 continue synchronizing. The task panel is therefore the authoritative immediate
-status display if an `🟢`/`⚫` channel-name prefix is temporarily delayed by
+status display if a `🟢`/`🔴`/`⚫` channel-name prefix is temporarily delayed by
 Discord. Initial transcript backfill also runs behind task discovery, so one
 long history cannot hold the global task list stale.
 

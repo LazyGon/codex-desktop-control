@@ -33,6 +33,7 @@ import {
   reasoningSummaryFromTurn,
   sleep,
   taskChannelName,
+  taskThreadForDisplay,
   threadStatusEmoji,
   threadStatusLabel,
   truncate,
@@ -219,7 +220,7 @@ export async function postTaskSyncSummary(client, stateStore, result) {
 }
 
 function taskTitleFromChannelName(channelName) {
-  const withoutStatus = String(channelName ?? '').replace(/^[🟢⚫]\s*-?\s*/u, '');
+  const withoutStatus = String(channelName ?? '').replace(/^(?:🟢|⚫|🔴)\s*-?\s*/u, '');
   return withoutStatus.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'New task';
 }
 
@@ -340,7 +341,7 @@ export function subagentDiscordThreadName(thread) {
     ?.replaceAll('_', '-')
     ?? 'subagent';
   const identity = [metadata.nickname, pathName].filter(Boolean).join(' · ');
-  const status = thread?.status?.type === 'active' ? '🟢' : '⚫';
+  const status = threadStatusEmoji(thread?.status);
   return truncate(`${status} ${identity} · ${String(thread?.id ?? '').slice(-8)}`, 100, '');
 }
 
@@ -2003,7 +2004,7 @@ export class DiscordController {
       runtimeWorkspaceRoots,
       cwd: runtime.cwd ?? binding.cwd,
       name: runtime.thread?.name ?? binding.name,
-      taskStatus: runtime.thread?.status?.type ?? binding.taskStatus,
+      taskStatus: taskThreadForDisplay(runtime.thread, binding)?.status?.type ?? binding.taskStatus,
     });
   }
 
@@ -4231,7 +4232,9 @@ export class DiscordController {
         threads: await this.codex.listAllThreads({ archived, projectId, search }),
       });
     }
-    return mergeProjectScopedThreads(globalThreads, projectResults);
+    return mergeProjectScopedThreads(globalThreads, projectResults).map((thread) => (
+      taskThreadForDisplay(thread, stateBindingSummary(this.stateStore, thread.id))
+    ));
   }
 
   #startTaskSyncPolling() {
@@ -4881,13 +4884,12 @@ export class DiscordController {
           : null;
       }
 
-      const completedBinding = { ...binding, taskStatus: 'idle' };
+      const completedBinding = binding;
       const thread = this.#threadFromBinding(completedBinding);
       const newPanel = await channel.send(taskPanelPayload({ thread, binding: completedBinding }));
       this.stateStore.setBinding(threadId, {
         controlPanelMessageId: newPanel.id,
         lastPanelCompletionTurnId: turnId,
-        taskStatus: 'idle',
       });
       if (oldPanel && oldPanel.id !== newPanel.id && oldPanel.author.id === this.client.user.id) {
         if (oldPanel.pinned && typeof oldPanel.unpin === 'function') {
@@ -5427,6 +5429,7 @@ export class DiscordController {
 
   async #syncTaskChannel(thread, archived, context) {
     const existingBinding = stateBindingSummary(this.stateStore, thread.id);
+    thread = taskThreadForDisplay(thread, existingBinding);
     let channel = existingBinding?.channelId ? context.channels.get(existingBinding.channelId) : null;
     if (!channel && existingBinding?.channelId) {
       channel = await this.client.channels.fetch(existingBinding.channelId).catch(() => null);
@@ -5730,6 +5733,7 @@ export class DiscordController {
   }
 
   async #syncSubagentThread(thread) {
+    thread = taskThreadForDisplay(thread, this.stateStore.subagentThread(thread.id));
     const metadata = subagentMetadata(thread);
     const topLevel = await this.#topLevelParentBinding(thread);
     if (!topLevel) {
@@ -5843,6 +5847,39 @@ export class DiscordController {
     const discordArchived = status !== 'active';
     if (discordArchived) await channel.setArchived(true, 'Codex subagent is idle');
     this.stateStore.setSubagentThread(binding.threadId, { taskStatus: status, discordArchived });
+  }
+
+  async #updateTaskStatus(binding, status) {
+    const type = typeof status === 'string' ? status : status?.type ?? 'unknown';
+    this.stateStore.setBinding(binding.threadId, { taskStatus: type });
+    try {
+      if (binding.isSubagent) {
+        await this.#setSubagentDiscordStatus(binding, type);
+        return;
+      }
+      const current = this.stateStore.binding(binding.threadId);
+      const thread = {
+        ...this.#threadFromBinding(current),
+        status: typeof status === 'string' ? { type } : status,
+      };
+      const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
+      if (!channel) return;
+      const name = taskChannelName(thread);
+      const topic = channel.topic?.replace(/(^|\n)Turn: (?:running|stopped)/u,
+        `$1Turn: ${type === 'active' ? 'running' : 'stopped'}`);
+      if (channel.name !== name || channel.topic !== topic) {
+        this.#scheduleTaskChannelMetadata(channel, name, topic, 'Refresh Codex task status');
+      }
+      if (current.controlPanelMessageId) {
+        await this.#ensureTaskPanel(thread, channel, Boolean(current.archived));
+      }
+    } catch (error) {
+      this.#log('task-status-refresh-failed', {
+        threadId: binding.threadId,
+        status: type,
+        error: error.stack ?? error.message,
+      });
+    }
   }
 
   async #openTaskChannel(thread) {
@@ -7165,8 +7202,14 @@ export class DiscordController {
       let binding = this.stateStore.binding(threadId);
       if (!binding) binding = await this.#ensureSubagentBinding(threadId);
       if (!binding) return;
-      if (message.method === 'thread/status/changed' && binding.isSubagent) {
-        await this.#ensureSubagentBinding(threadId, { force: true });
+      if (message.method === 'thread/status/changed') {
+        if (!message.params.status) {
+          if (binding.isSubagent) await this.#ensureSubagentBinding(threadId, { force: true });
+          else this.#scheduleTaskSync(message.method);
+          return;
+        }
+        const thread = taskThreadForDisplay({ id: threadId, status: message.params.status }, binding);
+        await this.#updateTaskStatus(binding, thread.status);
         return;
       }
       const turnId = message.params?.turnId ?? message.params?.turn?.id ?? null;
@@ -7505,10 +7548,11 @@ export class DiscordController {
 
   async #turnStarted(binding, params) {
     const turnId = params.turn?.id ?? params.turnId;
-    if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, 'active');
     const view = this.#view(binding.threadId, turnId, binding.channelId);
     view.status = 'inProgress';
     view.startedAt = turnTimestampMs(params.turn ?? { id: turnId }) ?? view.startedAt ?? Date.now();
+    this.stateStore.setBinding(binding.threadId, { statusTurnId: turnId });
+    await this.#updateTaskStatus(binding, 'active');
     const reservation = this.#bindUserInputReservationToStartedTurn(binding.threadId, turnId);
     if (reservation && !reservation.liveCardOrderPromise) {
       reservation.liveCardOrderPromise = reservation.userCardBarrier.then(async () => {
@@ -8024,6 +8068,13 @@ export class DiscordController {
 
   async #turnCompletedOnce(binding, params) {
     const turn = params.turn;
+    const current = this.stateStore.binding(binding.threadId);
+    const newerTurnActive = current?.taskStatus === 'active'
+      && current.statusTurnId && current.statusTurnId !== turn.id;
+    if (!newerTurnActive) {
+      this.stateStore.setBinding(binding.threadId, { statusTurnId: turn.id });
+      await this.#updateTaskStatus(binding, turn.status === 'failed' ? 'systemError' : 'idle');
+    }
     const completedRecord = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     if (completedRecord.status !== 'inProgress'
       && completedRecord.finalizedAt
@@ -8037,7 +8088,6 @@ export class DiscordController {
         this.stateStore.setBinding(binding.threadId, {
           lastCompletedTurnId: turn.id,
           lastCompletionMessageId: completionMessage.id,
-          taskStatus: 'idle',
         });
         if (!binding.isSubagent) await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
           this.#log('task-panel-completion-repost-failed', {
@@ -8056,7 +8106,6 @@ export class DiscordController {
           }
           this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
         }
-        if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, turn.status ?? 'idle');
         this.#clearCompletionRecovery(binding.threadId, turn.id);
         const completedView = this.turnViews.get(`${binding.threadId}:${turn.id}`);
         if (completedView) {
@@ -8137,7 +8186,6 @@ export class DiscordController {
     this.stateStore.setBinding(binding.threadId, {
       lastCompletedTurnId: turn.id,
       lastCompletionMessageId: completionMessage.id,
-      taskStatus: 'idle',
     });
     if (!binding.isSubagent) await this.#repostTaskPanelAfterCompletion(binding.threadId, turn.id, channel).catch((error) => {
       this.#log('task-panel-completion-repost-failed', {
@@ -8156,7 +8204,6 @@ export class DiscordController {
       }
       this.stateStore.setBinding(binding.threadId, { lastNotifiedCompletedTurnId: turn.id });
     }
-    if (binding.isSubagent) await this.#setSubagentDiscordStatus(binding, turn.status ?? 'idle');
     this.#clearCompletionRecovery(binding.threadId, turn.id);
     this.turnViews.delete(`${binding.threadId}:${turn.id}`);
     this.#scheduleTaskSync('turn/completed');

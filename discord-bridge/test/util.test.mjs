@@ -28,6 +28,7 @@ import {
   splitText,
   threadStatusLabel,
   taskChannelName,
+  taskThreadForDisplay,
   threadStatusEmoji,
   uniqueProjectPath,
 } from '../src/util.mjs';
@@ -60,7 +61,22 @@ test('channel names and statuses are stable for Discord display', () => {
   assert.equal(threadStatusLabel({ type: 'active', activeFlags: ['waitingOnApproval'] }), 'active: waitingOnApproval');
   assert.equal(threadStatusEmoji({ type: 'active' }), '🟢');
   assert.equal(threadStatusEmoji({ type: 'idle' }), '⚫');
+  assert.equal(threadStatusEmoji({ type: 'systemError' }), '🔴');
+  assert.equal(threadStatusEmoji('failed'), '🔴');
+  assert.equal(threadStatusEmoji({ type: 'active', activeFlags: ['waitingOnUserInput'] }), '🟢');
   assert.equal(taskChannelName({ name: 'AER Recovery', status: { type: 'active' } }), '🟢-aer-recovery');
+});
+
+test('failed task display survives idle metadata but clears on actual recovery', () => {
+  const binding = { taskStatus: 'systemError' };
+  const thread = { id: 'task', name: 'Test', status: { type: 'idle' } };
+  assert.equal(taskChannelName(taskThreadForDisplay(thread, binding)), '🔴-test');
+  assert.equal(taskChannelName(taskThreadForDisplay({ ...thread, status: { type: 'active' } }, binding)), '🟢-test');
+  assert.equal(taskChannelName(taskThreadForDisplay({ ...thread, turns: [{ status: 'failed' }] })), '🔴-test');
+  for (const status of ['completed', 'interrupted']) {
+    assert.equal(taskChannelName(taskThreadForDisplay({ ...thread, turns: [{ status }] }, binding)), '⚫-test');
+  }
+  assert.equal(taskThreadForDisplay(thread, { taskStatus: 'idle' }), thread);
 });
 
 test('Discord inline payloads include wrapper and escaping in the 2000 character limit', () => {
