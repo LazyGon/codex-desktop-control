@@ -103,6 +103,15 @@ standard PowerShell 7 installation, `powershell.exe` on `PATH`, and finally
 Windows PowerShell 5.1. It never supplies an execution-policy override and does
 not propagate a parent process-level override.
 
+Before invoking Node, the common runtime initializer checks the launcher's
+process-local `PATHEXT` and `ComSpec`. Sparse agent/REPL environments can otherwise
+make Windows PowerShell treat `node.exe` as a document. Missing or unusable values
+are recovered from valid saved Windows user/machine values; valid explicit values
+remain unchanged. This does not write the registry or change an already-running
+App Server's environment. Bundled PowerShell signature verification uses the
+current PowerShell host's own security module, not an inherited foreign module
+search path; a failed signature check still stops preparation.
+
 Launcher icons preserve the installed Desktop package's full multi-resolution
 ICO, including its 256-pixel frame. To refresh an older low-resolution launcher
 and its existing shortcuts without restarting Desktop or the Bridge, run:
