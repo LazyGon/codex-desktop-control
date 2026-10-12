@@ -17,9 +17,15 @@ $repair=Get-Content -LiteralPath (Join-Path $EvidenceRoot 'admin-terminal-client
 $token=Get-Content -LiteralPath (Join-Path $EvidenceRoot 'admin-terminal-final-token-check-result.json') -Encoding UTF8 -Raw | ConvertFrom-Json
 if($repair.phase -ne 'completed' -or -not $token.elevated -or $token.userSid -ne $sid){throw 'Repair/actual installed-client administrator-token verification incomplete.'}
 $hashes=@()
+$guardUpdatePath=Join-Path $root 'guard-update.json'
+$guardUpdate=if(Test-Path -LiteralPath $guardUpdatePath){Get-Content -LiteralPath $guardUpdatePath -Encoding UTF8 -Raw | ConvertFrom-Json}else{$null}
 foreach($asset in $bootstrap.files){
     $latest=@($repair.operations | Where-Object file -eq $asset.name)
     $expected=if($latest.Count){$latest[0].actualSha256}else{$asset.sha256}
+    if($asset.name -eq 'guard.mjs' -and $guardUpdate){
+        if($guardUpdate.phase -ne 'installed' -or $guardUpdate.file -ne 'guard.mjs' -or $guardUpdate.beforeSha256 -ne $expected -or $guardUpdate.sourceSha256 -ne $guardUpdate.installedSha256 -or -not $guardUpdate.guardAclUnchanged -or -not $guardUpdate.asciiEnvelopeVerified -or -not $guardUpdate.shiftJisRoundTripVerified){throw 'Forward guard update evidence is inconsistent.'}
+        $expected=$guardUpdate.installedSha256
+    }
     $actual=(Get-FileHash -LiteralPath (Join-Path $root $asset.name) -Algorithm SHA256).Hash
     if($expected -ne $actual){throw ('Installed asset hash mismatch: '+$asset.name)}
     $hashes+=@{file=$asset.name;sha256=$actual;verified=$true}
@@ -28,7 +34,9 @@ $helper=Join-Path $root 'ProcessExitObserver.ps1'
 if((Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash -ne ($repair.operations | Where-Object file -eq 'ProcessExitObserver.ps1').actualSha256){throw 'OS exit observer hash mismatch.'}
 if((Get-FileHash -LiteralPath $config.nodePath -Algorithm SHA256).Hash -ne $config.nodeSha256){throw 'Protected execution runtime hash mismatch.'}
 $acls=@()
-foreach($item in @($root,(Join-Path $root 'results'),(Join-Path $root 'config.json'),$config.nodePath,$helper)+@($bootstrap.files | ForEach-Object {Join-Path $root $_.name})){
+$protectedPaths=@($root,(Join-Path $root 'results'),(Join-Path $root 'config.json'),$config.nodePath,$helper)+@($bootstrap.files | ForEach-Object {Join-Path $root $_.name})
+if($guardUpdate){$protectedPaths+=$guardUpdatePath}
+foreach($item in $protectedPaths){
     $acl=Get-Acl -LiteralPath $item
     if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544'){throw 'Protected asset owner is not Administrators.'}
     foreach($rule in $acl.Access){

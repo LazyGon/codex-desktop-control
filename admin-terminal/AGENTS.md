@@ -56,6 +56,15 @@ Do not kill an active installer. No automatic restart follows a clean requested
 exit. Installation assets are protected; updates must be reviewed, hash-pinned
 and installed through an already authorized operation, not edited unelevated.
 
+`Repair-AdminTerminalGuard.ps1` performs a hash-pinned guard-only forward update
+through this same host. It requires the exact executing operation and live host
+identity, preserves the guard ACL, retains the old file, and exercises the
+installed ASCII JSON envelope with Japanese/emoji through a Shift-JIS decoder.
+The protected `guard-update.json` records the before/after hashes;
+`Verify-AdminTerminal.ps1` checks this forward evidence against the immutable
+bootstrap hash and verifies its protected ACL. Existing update evidence or an
+unexpected installed hash stops the repair; failed/unknown jobs are not replayed.
+
 Do not disable UAC, lower sandbox/approval, reuse SYSTEM tasks, alter unrelated
 security/update policies, store a password, force-close apps or publish private
 data. Ordinary Windows restart and firmware/destructive changes retain their
