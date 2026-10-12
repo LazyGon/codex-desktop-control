@@ -139,9 +139,10 @@ decisions; the verification owner retains ordinary Product proof.
 - Recent control reads use `recent-thread-messages.mjs`; do not fetch an entire
   rollout just to tail a few messages. Session completion caching consumes
   append bytes; machine state snapshots use compact atomic JSON.
-- Evidence and limitations: ../その他/codex-performance-20261012/report.json
-  and admin-guard-unicode-pending.json in that directory. The shared executor's
-  remaining variable preparation wait is still under investigation.
+- Evidence and limitations: ../その他/codex-performance-20261012/report-current.json
+  records the installed Unicode guard fix and completed Defender trace. Long scans
+  of the signed cached codex.exe coincide with preparation delays; the inducing
+  operation and complete runtime fix remain under investigation.
 - The runtime initializer now prefers a signature-verified bundled PowerShell
   for future child launches. This changes only the launcher process PATH and
   takes effect at the next normal or individually authorized shared startup;
