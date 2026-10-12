@@ -17,10 +17,25 @@ function probe(body, env = process.env) {
   ].join('; ')], { encoding: 'utf8', env }));
 }
 const snapshot = `
+  # GetEnvironmentVariable expands REG_EXPAND_SZ using this process's environment.
+  # Compare the persisted values, not expansions that intentionally change here.
+  function Get-SavedEnvironmentValue($scope, $name) {
+    $key=if($scope -eq 'User') {
+      [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    } else {
+      [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment')
+    };
+    try {
+      if($null -eq $key) { return $null }
+      $key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally {
+      if($null -ne $key) { $key.Dispose() }
+    }
+  }
   $before=@{};
   foreach($scope in @('User','Machine')) {
     foreach($key in @('PATH','PATHEXT','ComSpec')) {
-      $before["$scope/$key"]=[Environment]::GetEnvironmentVariable($key,$scope)
+      $before["$scope/$key"]=Get-SavedEnvironmentValue $scope $key
     }
   }
 `;
@@ -28,7 +43,7 @@ const unchanged = `
   $registryUnchanged=$true;
   foreach($scope in @('User','Machine')) {
     foreach($key in @('PATH','PATHEXT','ComSpec')) {
-      if($before["$scope/$key"] -cne [Environment]::GetEnvironmentVariable($key,$scope)) { $registryUnchanged=$false }
+      if($before["$scope/$key"] -cne (Get-SavedEnvironmentValue $scope $key)) { $registryUnchanged=$false }
     }
   }
 `;
