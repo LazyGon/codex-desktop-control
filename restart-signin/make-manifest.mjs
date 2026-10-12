@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { collectPins } from './prepare.mjs';
+import { readJson, saveJson } from '../control/shared-task-operations.mjs';
+const sourceRoot=path.dirname(fileURLToPath(import.meta.url)),repo=path.resolve(sourceRoot,'..');
+const admin=readJson('C:/ProgramData/CodexAdminTerminal/config.json');
+const files=collectPins(['Common.ps1','NativeRestart.cs','Restore-RestartSignIn.ps1','Invoke-RestartSignIn.ps1'].map(name=>path.join(sourceRoot,name))).map(p=>({source:p.file,name:path.basename(p.file),sha256:p.sha256}));
+const dependencies=collectPins([path.join(sourceRoot,'session.mjs'),path.join(sourceRoot,'Run-RestartSignIn.ps1'),path.join(sourceRoot,'Register-PostbootReceiver.ps1'),admin.nodePath]);
+const revision=process.argv[2]??'install';
+if(!/^[a-z0-9-]+$/.test(revision))throw new Error('Invalid manifest revision.');
+const manifestPath=path.join(repo,'state/windows-autologon-20261011/restart-signin-'+revision+'-manifest.json');
+if(fs.existsSync(manifestPath))throw new Error('Install manifest already exists; never overwrite an admitted request.');
+saveJson(manifestPath,{userSid:admin.userSid,controlRoot:repo,nodePath:admin.nodePath,files,dependencies});
+console.log(JSON.stringify({manifestPath,fileCount:files.length,dependencyCount:dependencies.length,noReboot:true,noSignInSettingChange:true}));

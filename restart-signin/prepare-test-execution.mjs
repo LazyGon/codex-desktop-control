@@ -1,0 +1,33 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID, createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { readJson, saveJson } from '../control/shared-task-operations.mjs';
+import { collectPins } from './prepare.mjs';
+const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const authorizationPath=path.resolve(process.argv[2]??'');
+const dir=path.dirname(authorizationPath),auth=readJson(authorizationPath);
+const postbootPath=path.join(dir,'postboot.json'),post=readJson(postbootPath);
+if(auth.phase!=='prepared'||post.phase!=='prepared'||auth.operationId!==post.operationId||post.restoreRoot!=='C:\\ProgramData\\CodexRestartSignIn')throw new Error('Unprepared exact restart pair.');
+const admissionPath=path.join(dir,'admission-job.json');
+if(fs.existsSync(admissionPath))throw new Error('Admission already prepared; do not overwrite.');
+const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex').toUpperCase();
+const adapter=path.join(repo,'restart-signin/Invoke-AdmittedRestart.ps1');
+const diagnostics=path.join(repo,'restart-signin/Test-ArsoDiagnostics.ps1');
+const worker=path.join(repo,'admin-terminal/Invoke-AdminJob.ps1');
+for(const file of [adapter,diagnostics,worker])if(!auth.sourcePins.some(p=>p.file===file))auth.sourcePins.push({file,sha256:hash(file)});
+const controller=path.join(repo,'control/one-shot-job.mjs');
+for(const pin of collectPins([controller,path.join(repo,'restart-signin/Register-TestAdmission.ps1')]))if(!auth.sourcePins.some(p=>p.file===pin.file))auth.sourcePins.push(pin);
+post.sourcePins=auth.sourcePins;
+const baselinePath=path.join(dir,'diagnostics-baseline.json');
+const diagnosticPrepareJob=path.join(dir,'diagnostics-prepare-job.json');
+const diagnosticRestoreJob=path.join(dir,'diagnostics-restore-job.json');
+for(const [jobPath,mode,name] of [[diagnosticPrepareJob,'prepare','diagnostics-prepare'],[diagnosticRestoreJob,'collect-restore','diagnostics-restore']]){
+  saveJson(jobPath,{operationId:randomUUID(),restartOperationId:auth.operationId,threadId:auth.threadId,workspace:auth.workspace,mode,baselinePath,receiptPath:path.join(dir,name+'-receipt.json'),scriptPath:diagnostics,scriptSha256:hash(diagnostics)});
+}
+post.completionInstructions=`This is the one explicitly authorized ARSO test, operation ${auth.operationId}. Read ${admissionPath}, protected admin result and native operation first; do not replay any uncertain job. Through the verified common admin client, run the still-unused diagnostic collect/restore job ${diagnosticRestoreJob} with its distinct operation ID and pinned script, read only LSA event IDs/timestamps, and restore the channel's original disabled state. Verify LSA 320 before boot and 321 after boot versus any 322; record ambiguity rather than claim automatic success from mere logon. Verify OptOut restored to 1, no permanent autologon/plaintext password, actual locked console, new admin host PID/start/SID and admin-token check, canonical Desktop/Bridge/network, settings unchanged and other tasks still stopped. Finish the already completed maintenance category report. Never inspect passwords/LSA secrets/account log bodies, restart again, install again, resume other tasks or alter permissions/model/workspace.`;
+saveJson(authorizationPath,auth);saveJson(postbootPath,post);
+const admission={requestId:'surface-arso-boot-test-'+auth.operationId,operationId:auth.operationId,threadId:auth.threadId,workspace:auth.workspace,phase:'prepared',stage:'one authorized non-forced ARSO restart after exact owner idle; no installer or other-task resume',requireStandardUac:false,powerShell:'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',workerScript:worker,workerExpectedSha256:hash(worker),workerLog:path.join(dir,'admission-worker.log'),adminScript:adapter,adminExpectedScriptSha256:hash(adapter),restartWrapperSha256:hash(path.join(repo,'restart-signin/Run-RestartSignIn.ps1')),authorizationPath,postbootPath,receiptPath:path.join(dir,'admission-receipt.json'),schedulerTask:'Codex Restart Sign-In Admit '+auth.operationId,completionInstructions:`Read the protected native operation and this admission receipt before any action. The completed maintenance installers must never be replayed. API acceptance is not proof of a reboot. Do not repeat this operation or issue a second restart. If the original boot remains, diagnose rejected/aborted/unknown restart, restore OptOut only by the protected cancel if necessary, cancel the postboot job, and use ${diagnosticRestoreJob} once through the common admin client to restore temporary ARSO event logging. If a new boot is in progress, leave delivery to the durable same-thread postboot receiver; avoid a duplicate success notice. All other tasks stay stopped.`,stopCondition:'Explicit cancellation before native dispatch, another active task, changed canonical runtime/settings/pins, any installer, native rejection, or unknown result: no repeat. After dispatch inspect protected operation first; cancellation restores opt-out, never force-closes or cancels accepted Windows shutdown.'};
+admission.sourcePins=auth.sourcePins;
+saveJson(admissionPath,admission);
+console.log(JSON.stringify({operationId:auth.operationId,admissionPath,postbootPath,diagnosticPrepareJob,diagnosticRestoreJob,phase:'prepared-not-started'}));
