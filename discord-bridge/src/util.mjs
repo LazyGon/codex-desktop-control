@@ -269,7 +269,7 @@ export function itemResultSummary(item) {
 }
 
 export function assistantTextFromTurn(turn, preferredPhase = null) {
-  const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text);
+  const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text && !isAsyncQuestionItem(item));
   if (preferredPhase) {
     const preferred = messages.filter((item) => item.phase === preferredPhase);
     return preferred.map((item) => item.text).join('\n\n');
@@ -436,16 +436,23 @@ function appendCompletionAnchor(anchor, bytes) {
     : combined;
 }
 
+export function isAsyncQuestionItem(item) {
+  return item?.type === 'agentMessage' && item.delivery === 'async'
+    && Array.isArray(item.questions) && item.questions.length > 0;
+}
+
 export function needsSessionCompletionFallback(turn) {
   return !(turn?.items ?? []).some((item) => item.type === 'agentMessage'
-    && item.phase === 'final_answer' && item.text);
+    && item.phase === 'final_answer' && item.text && !isAsyncQuestionItem(item));
 }
 
 export function finalTextFromTurn(turn, completionText = '') {
-  const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text);
+  const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text && !isAsyncQuestionItem(item));
   const final = messages.filter((item) => item.phase === 'final_answer');
   if (final.length) return final.map((item) => item.text).join('\n\n').trimEnd();
-  if (completionText) return completionText.trimEnd();
+  const questionFallback = (turn?.items ?? []).some(item => isAsyncQuestionItem(item)
+    && item.text?.trimEnd() === completionText.trimEnd());
+  if (completionText && !questionFallback) return completionText.trimEnd();
   return messages.at(-1)?.text?.trimEnd() ?? '';
 }
 

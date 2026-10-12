@@ -442,3 +442,20 @@ This performs graceful stop, removes the Scheduled Task and Start menu
 shortcuts, and preserves configuration by default. Add `-RemoveConfiguration`
 to remove the protected token and local configuration. Source, logs, and task
 bindings remain available for diagnosis.
+## Asynchronous question cards
+
+Asynchronous user questions are message data, not
+`item/tool/requestUserInput` JSON-RPC requests. Their independent cards survive
+turn completion and Bridge reconnects. Use the choice menu or **回答を入力**;
+all choices remain available through paging and free text is always available.
+The local `asyncQuestions` ledger retains exact task/turn/item/question identities
+and admitted delivery state. A known structured reply from Desktop closes the
+same question. The latest exact active turn receives a steer; an idle task gets
+one turn start without model, workspace, sandbox, or approval overrides.
+
+`posting`/`postUnknown` and `dispatching`/`deliveryUnknown` records must not be
+replayed blindly. Inspect the recorded Discord message or persisted user-message
+receipt first. Restarting the Bridge is not permission to resend an uncertain
+answer. Existing native question and approval requests keep their original RPC
+response UI. Long question text is attached to its task channel, not sent
+to an external inference service.

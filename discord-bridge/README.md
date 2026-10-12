@@ -110,6 +110,17 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   completed summaries remain available through `履歴復元`. A past commentary
   card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
+- Mirrors asynchronous `request_user_input_async` questions from
+  `agentMessage.delivery = "async"` and `questions` as independent persistent
+  question cards. Choices and free-text modals are available; long option lists
+  are paged and full text is attached when Discord display limits require it.
+  A selection is never submitted merely because it is the suggested first option.
+  Answers retain the original question-item identity and are delivered through
+  the shared AppServer to the same task's latest exact turn, or start that task
+  if idle. Originating-turn completion does not discard an unanswered question.
+  Desktop structured answers disable the matching Discord controls. Unknown
+  posting/delivery is preserved without automatic replay; permissions are not
+  changed, and non-owner PCs ignore the interaction before acknowledging it.
 - Persists every completed app-server `contextCompaction` item as its own task
   card with task, turn, and item identity. The item-to-Discord-message mapping
   prevents reconnect or duplicate live notifications from posting it twice.

@@ -1,3 +1,5 @@
+import { isAsyncQuestionItem } from './util.mjs';
+
 export const RECENT_HISTORY_DAY_OPTIONS = Object.freeze([1, 3, 7]);
 export const MAX_RECENT_HISTORY_DAYS = RECENT_HISTORY_DAY_OPTIONS.at(-1);
 
@@ -43,7 +45,7 @@ export function completedTurnsSince(turns, cutoffMs) {
 export function historicalAssistantItems(turn) {
   const result = [];
   for (const item of turn?.items ?? []) {
-    if (item.type === 'agentMessage' && item.phase === 'commentary' && item.text && item.id) {
+    if (item.type === 'agentMessage' && item.phase === 'commentary' && item.text && item.id && !isAsyncQuestionItem(item)) {
       result.push(item);
       continue;
     }

@@ -117,6 +117,7 @@ export class StateStore {
       subagent.discordArchived ??= false;
     }
     this.value.clientToolRequests ??= {};
+    this.value.asyncQuestions ??= {};
     this.value.chatgptConversations ??= {};
     for (const conversation of Object.values(this.value.chatgptConversations)) {
       conversation.messageRecords ??= {};
@@ -338,6 +339,23 @@ export class StateStore {
   clientToolRequest(key) {
     const value = this.value.clientToolRequests[key];
     return value ? deepClone(value) : null;
+  }
+
+  asyncQuestion(key) {
+    const value = this.value.asyncQuestions[key];
+    return value ? deepClone(value) : null;
+  }
+
+  asyncQuestions(threadId) {
+    return Object.values(this.value.asyncQuestions).filter(record => record.threadId === threadId).map(deepClone);
+  }
+
+  setAsyncQuestion(key, patch) {
+    if (!key) throw new Error('An exact asynchronous question key is required.');
+    return this.update(state => {
+      state.asyncQuestions ??= {};
+      state.asyncQuestions[key] = { ...state.asyncQuestions[key], ...patch, updatedAt: new Date().toISOString() };
+    });
   }
 
   setClientToolRequest(key, patch) {

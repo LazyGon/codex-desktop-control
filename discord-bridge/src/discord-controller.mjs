@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { AsyncUserInputController } from './async-user-input.mjs';
 import { isEmptyMcpToolApproval, emptyMcpToolApprovalResponse } from './mcp-empty-approval.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -24,6 +25,7 @@ import {
   finalTextFromTurn,
   itemResultSummary,
   itemSummary,
+  isAsyncQuestionItem,
   needsSessionCompletionFallback,
   planDiscordTextDelivery,
   projectDescriptor,
@@ -747,6 +749,8 @@ export class DiscordController {
     this.deliveryOutbox.initializeRecoveryCursor(discordSnowflakeAt());
     this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
     this.pendingRequests = new Map();
+    this.asyncUserInput = new AsyncUserInputController({ client, codex, stateStore,
+      instanceId: config.instanceId, log: (event, details) => this.#log(event, details) });
     this.pendingClientToolRequests = new Map();
     this.codexEventSequence = 0;
     this.pendingActions = new Map();
@@ -1187,6 +1191,7 @@ export class DiscordController {
         return;
       }
       if (!this.#authorized(interaction)) return;
+      if (await this.asyncUserInput.handleInteraction(interaction)) return;
       if (interaction.isChatInputCommand() && interaction.commandName === 'codex') {
         await this.#handleCommand(interaction);
         return;
@@ -6289,7 +6294,7 @@ export class DiscordController {
 
   async #reconcileStableAssistantMessages(binding, turn, channel, messages) {
     const stableItems = (turn.items ?? [])
-      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text);
+      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text && !isAsyncQuestionItem(item));
     const migratedEntryIds = new Set();
     const usedMessageIds = new Set();
     for (const item of stableItems) {
@@ -6326,7 +6331,7 @@ export class DiscordController {
   ) {
     if (turn.status === 'inProgress') return 0;
     const stableItems = (turn.items ?? [])
-      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text);
+      .filter((item) => item.type === 'agentMessage' && item.phase === 'commentary' && item.text && !isAsyncQuestionItem(item));
     if (stableItems.length === 0) return 0;
     const stableIds = new Set(stableItems.map((item) => item.id));
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
@@ -6411,6 +6416,7 @@ export class DiscordController {
   }
 
   async #ensureTurnUserMessages(binding, turn, channel, messages, requestedItemIds = null) {
+    for (const item of turn.items ?? []) await this.asyncUserInput.observeReply(binding, item);
     const requested = requestedItemIds ? new Set(requestedItemIds) : null;
     const userItems = this.#turnUserItems(turn)
       .filter((item) => !requested || requested.has(item.id));
@@ -6889,7 +6895,7 @@ export class DiscordController {
     const commentaryByKey = new Map();
     for (const turn of thread.turns ?? []) {
       for (const item of turn.items ?? []) {
-        if (item.type === 'agentMessage' && item.phase === 'commentary' && item.text) {
+        if (item.type === 'agentMessage' && item.phase === 'commentary' && item.text && !isAsyncQuestionItem(item)) {
           commentaryByKey.set(`${turn.id}:${item.id}`, { turn, item });
         }
       }
@@ -6932,6 +6938,9 @@ export class DiscordController {
     }
 
     const latestCompleted = completedTurns.at(-1);
+    await this.asyncUserInput.restoreTurns(binding, activeOnly
+      ? [latestCompleted, activeTurn].filter(Boolean)
+      : [...completedTurns, activeTurn].filter(Boolean));
     if (!activeOnly) {
       for (const turn of completedTurns) {
         if (this.stopping) throw new Error('Transcript reconciliation stopped during Bridge shutdown.');
@@ -7803,6 +7812,11 @@ export class DiscordController {
   }
 
   async #itemChanged(binding, params, completed) {
+    if (isAsyncQuestionItem(params.item)) {
+      if (completed) await this.asyncUserInput.ensure(binding, params.turnId, params.item);
+      return;
+    }
+    if (params.item?.type === 'userMessage') await this.asyncUserInput.observeReply(binding, params.item);
     let userMessageChanged = false;
     if (!completed && params.item?.type === 'userMessage') {
       const text = (params.item.content ?? []).map((part) => part.text ?? '').filter(Boolean).join('\n');
@@ -8093,8 +8107,7 @@ export class DiscordController {
       sessionPath = result?.thread?.path ?? null;
       if (sessionPath) this.stateStore.setBinding(binding.threadId, { sessionPath });
     }
-    const fallbackNeeded = !(turn.items ?? []).some((item) => item.type === 'agentMessage'
-      && item.phase === 'final_answer');
+    const fallbackNeeded = needsSessionCompletionFallback(turn);
     let completionText = fallbackNeeded ? completionTextFromSession(sessionPath, turn.id) : '';
     if (!completionText && fallbackNeeded) {
       await sleep(100);
@@ -8108,6 +8121,7 @@ export class DiscordController {
       const persistedTurn = await this.codex.readTurn(binding.threadId, turn.id).catch(() => null);
       if (persistedTurn?.items?.length) stableTurn = { ...turn, items: persistedTurn.items };
     }
+    await this.asyncUserInput.restoreTurns(binding, [stableTurn]);
     await this.#ensureTurnUserMessages(binding, stableTurn, channel, messages);
     await this.#reconcileStableAssistantMessages(binding, stableTurn, channel, messages);
     await this.#reconcileCodexImageItems(binding, stableTurn, channel, messages);

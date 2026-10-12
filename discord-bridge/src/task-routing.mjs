@@ -44,8 +44,10 @@ export async function interactionOwned({ interaction, config, stateStore, codex,
   else if (parts[1] === 'ui' && parts[2] === 'task') threadId = parts[4];
   else {
     const sessionKey = parts[1] === 'files' ? parts[3] : parts[2];
-    const session = pendingActions.get(sessionKey) ?? pendingRequests.get(sessionKey);
-    const sessionScoped = ['projects', 'compose', 'goal', 'review', 'confirm', 'interrupt', 'req', 'q', 'input'].includes(parts[1])
+    const session = parts[1] === 'aq' ? stateStore.asyncQuestion?.(sessionKey)
+      : pendingActions.get(sessionKey) ?? pendingRequests.get(sessionKey);
+    if (parts[1] === 'aq' && session?.channelId !== interaction.channelId) return false;
+    const sessionScoped = ['projects', 'compose', 'goal', 'review', 'confirm', 'interrupt', 'req', 'q', 'input', 'aq'].includes(parts[1])
       || (parts[1] === 'files' && ['browse', 'linkedpick', 'nav', 'linkednav'].includes(parts[2]));
     if (sessionScoped && !session) return false;
     threadId ??= session?.threadId ?? session?.request?.params?.threadId ?? null;
