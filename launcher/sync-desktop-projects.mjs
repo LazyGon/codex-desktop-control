@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { AppServerClient } from '../discord-bridge/src/app-server-client.mjs';
+import { readDesktopState } from './desktop-state-recovery.mjs';
 
 function parseArguments(argv) {
   const options = {
@@ -43,7 +44,8 @@ function parseArguments(argv) {
 
 function normalizeLocalPath(input) {
   if (typeof input !== 'string' || !input.trim()) return null;
-  const normalized = path.win32.normalize(input.trim());
+  // The canonical runtime reports extended-length Windows cwd paths.
+  const normalized = path.win32.normalize(input.trim().replace(/^\\\\\?\\/, ''));
   const root = path.win32.parse(normalized).root;
   return normalized.length > root.length
     ? normalized.replace(/[\\/]+$/, '')
@@ -323,7 +325,7 @@ export function createExclusiveBackup(
   throw new Error(`Could not reserve a unique Desktop state backup in ${backupDirectory}`);
 }
 
-function atomicWriteJson(targetPath, value) {
+export function atomicWriteJson(targetPath, value) {
   const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(temporaryPath, JSON.stringify(value), { encoding: 'utf8', flag: 'wx' });
   try {
@@ -361,21 +363,23 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     client.close();
   }
 
-  const originalText = fs.readFileSync(globalStatePath, 'utf8');
-  const originalState = JSON.parse(originalText);
+  const backupDirectory = path.resolve(
+    options.backupDirectory ?? path.join(path.dirname(globalStatePath), 'desktop-project-sync-backups'),
+  );
+  const { state: originalState, originalText, recoveredFrom } = readDesktopState(globalStatePath, backupDirectory);
   const { state, stats } = reconcileDesktopProjectState(originalState, {
     projectRoots,
     // Bridge bindings do not carry native Project identity. Put them first so the
     // canonical App Server observation can remove any stale local assignment.
     threads: [...boundThreads, ...activeThreads, ...archivedThreads],
   });
-  const changed = JSON.stringify(state) !== JSON.stringify(originalState);
+  const changed = recoveredFrom !== null || JSON.stringify(state) !== JSON.stringify(originalState);
   const verifiedThread = verifiedThreadAssignment(state, options.verifyThreadId);
   let backupPath = null;
   if (changed && !options.dryRun) {
-    const backupDirectory = path.resolve(
-      options.backupDirectory ?? path.join(path.dirname(globalStatePath), 'desktop-project-sync-backups'),
-    );
+    if (fs.readFileSync(globalStatePath, 'utf8') !== originalText) {
+      throw new Error('Desktop state changed during project sync. No state was overwritten.');
+    }
     backupPath = createExclusiveBackup(globalStatePath, backupDirectory);
     atomicWriteJson(globalStatePath, state);
     JSON.parse(fs.readFileSync(globalStatePath, 'utf8'));
@@ -391,6 +395,7 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     appServerProjects: projects.length,
     bridgeProjects: projectRoots.length,
     backupPath,
+    recoveredFrom,
     stats,
     verifiedThread,
     completedAt: new Date().toISOString(),

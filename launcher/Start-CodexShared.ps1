@@ -1,7 +1,11 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 8798,
+
+    [Alias('DesktopConnectionTimeoutSeconds')]
+    [ValidateRange(1, 2147483647)]
+    [int]$DesktopConnectionStallSeconds = 180,
 
     [switch]$SelfTest,
 
@@ -85,6 +89,7 @@ if (-not (Test-Path -LiteralPath $runtimeUpdateDrainScript -PathType Leaf)) {
 }
 . $runtimeCacheScript
 . $desktopPackageScript
+. (Join-Path $launcherRoot 'CodexDesktopStartup.ps1')
 . $processEnvironmentScript
 . $codexAppToolsConfigScript
 . (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
@@ -317,6 +322,9 @@ function Get-CodexPackageInfo {
     $runtimeCache = Initialize-CodexRuntimeCache `
         -BundledServerExecutable $package.BundledServerExecutable `
         -BundledCodeModeHostExecutable $package.BundledCodeModeHostExecutable `
+        -BundledCommandRunnerExecutable $package.BundledCommandRunnerExecutable `
+        -BundledSandboxServiceExecutable $package.BundledSandboxServiceExecutable `
+        -BundledSandboxSetupExecutable $package.BundledSandboxSetupExecutable `
         -CacheRoot $cacheRoot `
         -PackageVersion $package.Version
 
@@ -702,19 +710,38 @@ function Wait-DesktopSharedConnection {
     param(
         [Parameter(Mandatory)][object]$PackageInfo,
         [Parameter(Mandatory)][int]$PortNumber,
-        [int]$TimeoutSeconds = 30,
+        [Parameter(Mandatory)][int]$OwnedServerProcessId,
+        [int]$TimeoutSeconds = 180,
         [int]$PollMilliseconds = 500
     )
 
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $helperLogged = $false
-    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+    $lastProgressSeconds = 0.0
+    $lastStage = 0
+    $progressOffsets = @{}
+    while ($true) {
         Assert-LauncherNotCancelled
-        if (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) {
+        $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+        if ($roots.Count -gt 0) {
+            $stage = Read-CodexDesktopStartupProgress -DesktopRoots $roots -Offsets $progressOffsets -PackageInfo $PackageInfo
+            if ($stage -gt $lastStage) {
+                $lastStage = $stage
+                $lastProgressSeconds = $watch.Elapsed.TotalSeconds
+                Write-LauncherLog "Desktop forward startup progress observed. stage=$lastStage totalSeconds=$([int]$watch.Elapsed.TotalSeconds)"
+                Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の初期化が進んでいます。進捗が続く間は接続を待ちます。' -Detail "確認済み段階: $lastStage。進捗停止の確認時間: $TimeoutSeconds 秒。" -ServerStatus '起動済み' -DesktopStatus '初期化進行中…'
+            }
+        }
+        $ownedServer = Get-Process -Id $OwnedServerProcessId -ErrorAction SilentlyContinue
+        $decision = Get-CodexDesktopConnectionDecision `
+            -Connected (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) `
+            -ServerAlive ($null -ne $ownedServer -and -not $ownedServer.HasExited) `
+            -DesktopAlive ($roots.Count -gt 0) -Cancelled $false `
+            -ElapsedSeconds ($watch.Elapsed.TotalSeconds - $lastProgressSeconds) -TimeoutSeconds $TimeoutSeconds
+        if ($decision -eq 'ready') {
             return $true
         }
         if (-not $helperLogged) {
-            $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
             $rootIds = @($roots | ForEach-Object { [int]$_.ProcessId })
             $helpers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
             if ($helpers.Count -gt 0) {
@@ -724,7 +751,6 @@ function Wait-DesktopSharedConnection {
         }
         Start-Sleep -Milliseconds $PollMilliseconds
     }
-    return $false
 }
 
 function Start-DesktopOnRuntime {
@@ -747,9 +773,12 @@ function Start-DesktopOnRuntime {
     Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
 
     Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
-    $appsFolderTarget = "shell:AppsFolder\$($PackageInfo.ApplicationUserModelId)"
-    Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $appsFolderTarget | Out-Null
-    Write-LauncherLog "Desktop package activation requested. appId=$($PackageInfo.ApplicationUserModelId)"
+    # Explorer/package activation can race environment broadcasts at logon.
+    # Start the installed package executable with an explicit inherited endpoint.
+    $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable -WebSocketUrl $RuntimeState.websocketUrl
+    $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
+    if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
+    Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"
 
     $desktopRoots = @()
     $launchWatch = [Diagnostics.Stopwatch]::StartNew()
@@ -774,11 +803,11 @@ function Start-DesktopOnRuntime {
     Write-LauncherLog "Desktop root detected. pid=$($RuntimeState.desktopProcessIds -join ',')"
 
     Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の共有接続を確認しています。' -ServerStatus '起動済み' -DesktopStatus '共有接続待ち…'
-    $connectionVerified = Wait-DesktopSharedConnection -PackageInfo $PackageInfo -PortNumber $PortNumber
+    $connectionVerified = Wait-DesktopSharedConnection -PackageInfo $PackageInfo -PortNumber $PortNumber -OwnedServerProcessId ([int]$RuntimeState.serverProcessId) -TimeoutSeconds $DesktopConnectionStallSeconds
 
     if (-not $connectionVerified) {
         Show-LauncherMessage -Message "Codex started, but the shared app-server connection could not be verified.`n`nCodex remains open. See:`n$logPath" -Icon 16
-        throw 'Desktop が 30 秒以内に共有 App Server へ接続しませんでした。初期化用の補助サーバーは待機対象に含めています。Desktop の認証画面と共有接続のログを確認してください。'
+        throw 'Desktop の共有接続を確認できませんでした。Desktop の認証画面と共有接続のログを確認してください。'
     }
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
@@ -955,7 +984,8 @@ function Invoke-InteractiveLauncherWorker {
     $ownerInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File ' +
         (ConvertTo-WindowsCommandLineArgument -Value $PSCommandPath) +
         ' -NoDialogs -RuntimeSupervisor -ProgressPath ' + (ConvertTo-WindowsCommandLineArgument -Value $ProgressPath) +
-        ' -ProgressOwnerProcessId ' + $PID + ' -RetryStep ' + $RetryStep + ' -Port ' + $Port
+        ' -ProgressOwnerProcessId ' + $PID + ' -RetryStep ' + $RetryStep + ' -Port ' + $Port +
+        ' -DesktopConnectionStallSeconds ' + $DesktopConnectionStallSeconds
     $ownerInfo.WorkingDirectory = $launcherRoot
     $ownerInfo.UseShellExecute = $false
     $ownerInfo.CreateNoWindow = $true
@@ -1289,6 +1319,7 @@ try {
 }
 catch {
     Write-LauncherLog "ERROR $($_.Exception.Message)"
+    Write-LauncherLog "ERROR_LOCATION $($_.ScriptStackTrace)"
     if ($_.Exception -is [OperationCanceledException]) {
         foreach ($root in $launchedDesktopRoots) {
             try { [void](Get-Process -Id $root.ProcessId -ErrorAction Stop).CloseMainWindow() } catch { }

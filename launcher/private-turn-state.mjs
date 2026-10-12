@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -23,6 +25,32 @@ export function lifecycleFromText(text, since) {
   return turns;
 }
 
+// Rollouts may exceed V8's maximum string length. Scan one record at a time,
+// retaining only lifecycle IDs/statuses, never an entire history or tool output.
+export async function lifecycleFromFile(filename, since) {
+  const turns = new Map();
+  const input = createReadStream(filename);
+  let lastByte = null, incompleteError = null;
+  input.on('data', chunk => { if (chunk.length) lastByte = chunk[chunk.length - 1]; });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (incompleteError) throw incompleteError;
+      if (!line.includes('"event_msg"')) continue;
+      let event;
+      try { event = JSON.parse(line); } catch {
+        incompleteError = new Error('A complete rollout line is unreadable; refusing an idle conclusion.');
+        continue;
+      }
+      if (event.type !== 'event_msg' || !event.payload?.turn_id || !['task_started', 'task_complete', 'turn_aborted'].includes(event.payload.type)) continue;
+      if (!Number.isFinite(Date.parse(event.timestamp))) throw new Error('Invalid lifecycle timestamp.');
+      if (Date.parse(event.timestamp) >= since) turns.set(event.payload.turn_id, event.payload.type);
+    }
+    if (incompleteError && lastByte === 10) throw incompleteError;
+    return turns;
+  } finally { lines.close(); input.destroy(); }
+}
+
 export async function inspectPrivateTurns({ sessionsRoot, sourcePath, threadId, turnId, since }) {
   const cutoff = Date.parse(since);
   if (!Number.isFinite(cutoff)) throw new Error('Invalid lifecycle cutoff.');
@@ -39,7 +67,7 @@ export async function inspectPrivateTurns({ sessionsRoot, sourcePath, threadId, 
     if (!match) continue;
     const stat = await fs.stat(filename);
     if (stat.mtimeMs < cutoff && filename !== source) continue;
-    const turns = lifecycleFromText(await fs.readFile(filename, 'utf8'), cutoff);
+    const turns = await lifecycleFromFile(filename, cutoff);
     if ([...turns.values()].includes('task_started')) activeThreadIds.add(match[1]);
     if (filename === source && match[1] === threadId) sourceStatus = turns.get(turnId) ?? null;
   }

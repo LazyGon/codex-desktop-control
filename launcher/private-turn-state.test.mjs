@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { lifecycleFromText, inspectPrivateTurns } from './private-turn-state.mjs';
+import { lifecycleFromText, lifecycleFromFile, inspectPrivateTurns } from './private-turn-state.mjs';
 
 const since = Date.parse('2026-09-27T17:00:00Z');
 const line = (type, turn_id = 'one', timestamp = '2026-09-27T17:00:01Z') => JSON.stringify({ type: 'event_msg', timestamp, payload: { type, turn_id } });
@@ -50,4 +50,18 @@ test('real directory scan finds other work and requires the exact source task/tu
     // Only the exact temporary directory created by this test is removed.
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('streamed lifecycle parsing matches metadata-only parsing and rejects complete corruption', async () => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'codex-lifecycle-stream-'));
+  const file=path.join(root,'rollout.jsonl');
+  try {
+    const contents=[line('task_started'),JSON.stringify({type:'response_item',payload:{text:'not lifecycle'}}),line('task_complete')].join('\n')+'\n';
+    await fs.writeFile(file,contents);
+    assert.deepEqual(await lifecycleFromFile(file,since),lifecycleFromText(contents,since));
+    await fs.writeFile(file,`${line('task_started')}\n{"type":"event_msg"`);
+    assert.equal((await lifecycleFromFile(file,since)).get('one'),'task_started');
+    await fs.writeFile(file,'{"type":"event_msg"\n');
+    await assert.rejects(lifecycleFromFile(file,since),/refusing an idle conclusion/);
+  }finally{await fs.rm(root,{recursive:true,force:true});}
 });

@@ -64,6 +64,9 @@ function Initialize-CodexRuntimeCache {
     param(
         [Parameter(Mandatory)][string]$BundledServerExecutable,
         [Parameter(Mandatory)][string]$BundledCodeModeHostExecutable,
+        [Parameter(Mandatory)][string]$BundledCommandRunnerExecutable,
+        [Parameter(Mandatory)][string]$BundledSandboxServiceExecutable,
+        [Parameter(Mandatory)][string]$BundledSandboxSetupExecutable,
         [Parameter(Mandatory)][string]$CacheRoot,
         [Parameter(Mandatory)]
         [ValidatePattern('^[0-9A-Za-z._-]+$')]
@@ -78,6 +81,9 @@ function Initialize-CodexRuntimeCache {
     # an app update cannot replace a companion used by a still-running server.
     $cachedServerExecutable = Join-Path $versionCacheRoot 'codex.exe'
     $cachedCodeModeHostExecutable = Join-Path $versionCacheRoot 'codex-code-mode-host.exe'
+    $cachedCommandRunnerExecutable = Join-Path $versionCacheRoot 'codex-command-runner.exe'
+    $cachedSandboxServiceExecutable = Join-Path $versionCacheRoot 'codex-windows-sandbox-service.exe'
+    $cachedSandboxSetupExecutable = Join-Path $versionCacheRoot 'codex-windows-sandbox-setup.exe'
     $serverHash = Copy-VerifiedCodexRuntimeFile `
         -SourcePath $BundledServerExecutable `
         -DestinationPath $cachedServerExecutable `
@@ -86,6 +92,18 @@ function Initialize-CodexRuntimeCache {
         -SourcePath $BundledCodeModeHostExecutable `
         -DestinationPath $cachedCodeModeHostExecutable `
         -Description 'Code Mode host executable'
+    $commandRunnerHash = Copy-VerifiedCodexRuntimeFile `
+        -SourcePath $BundledCommandRunnerExecutable `
+        -DestinationPath $cachedCommandRunnerExecutable `
+        -Description 'command runner executable'
+    $sandboxServiceHash = Copy-VerifiedCodexRuntimeFile `
+        -SourcePath $BundledSandboxServiceExecutable `
+        -DestinationPath $cachedSandboxServiceExecutable `
+        -Description 'Windows sandbox service executable'
+    $sandboxSetupHash = Copy-VerifiedCodexRuntimeFile `
+        -SourcePath $BundledSandboxSetupExecutable `
+        -DestinationPath $cachedSandboxSetupExecutable `
+        -Description 'Windows sandbox setup executable'
 
     [pscustomobject]@{
         CacheRoot = [IO.Path]::GetFullPath($versionCacheRoot)
@@ -93,5 +111,11 @@ function Initialize-CodexRuntimeCache {
         ServerSha256 = $serverHash
         CodeModeHostExecutable = [IO.Path]::GetFullPath($cachedCodeModeHostExecutable)
         CodeModeHostSha256 = $codeModeHostHash
+        CommandRunnerExecutable = [IO.Path]::GetFullPath($cachedCommandRunnerExecutable)
+        CommandRunnerSha256 = $commandRunnerHash
+        SandboxServiceExecutable = [IO.Path]::GetFullPath($cachedSandboxServiceExecutable)
+        SandboxServiceSha256 = $sandboxServiceHash
+        SandboxSetupExecutable = [IO.Path]::GetFullPath($cachedSandboxSetupExecutable)
+        SandboxSetupSha256 = $sandboxSetupHash
     }
 }

@@ -46,6 +46,9 @@ function makePackage(root, version, { runtime = false } = {}) {
   if (runtime) {
     fs.writeFileSync(path.join(resourceDirectory, 'codex.exe'), `server-${version}`);
     fs.writeFileSync(path.join(resourceDirectory, 'codex-code-mode-host.exe'), `host-${version}`);
+    fs.writeFileSync(path.join(resourceDirectory, 'codex-command-runner.exe'), `runner-${version}`);
+    fs.writeFileSync(path.join(resourceDirectory, 'codex-windows-sandbox-service.exe'), `service-${version}`);
+    fs.writeFileSync(path.join(resourceDirectory, 'codex-windows-sandbox-setup.exe'), `setup-${version}`);
   }
   return { version, installLocation };
 }
@@ -90,6 +93,9 @@ test('Desktop package resolution follows the newest OpenAI.Codex version and val
   assert.equal(result.Version, newPackage.version);
   assert.equal(result.DesktopExecutable, path.join(newPackage.installLocation, 'app', 'ChatGPT.exe'));
   assert.equal(result.BundledServerExecutable, path.join(newPackage.installLocation, 'app', 'resources', 'codex.exe'));
+  assert.equal(result.BundledSandboxSetupExecutable, path.join(newPackage.installLocation, 'app', 'resources', 'codex-windows-sandbox-setup.exe'));
+  assert.equal(result.BundledSandboxServiceExecutable, path.join(newPackage.installLocation, 'app', 'resources', 'codex-windows-sandbox-service.exe'));
+  assert.equal(result.BundledCommandRunnerExecutable, path.join(newPackage.installLocation, 'app', 'resources', 'codex-command-runner.exe'));
   assert.equal(result.ApplicationUserModelId, 'OpenAI.Codex_2p2nqsd0c76g0!App');
 });
 
@@ -120,4 +126,26 @@ test('Desktop package replacement is emitted once the installed version or execu
     "if ($null -eq $result) { 'UNCHANGED' } else { 'REPLACED' }",
   ].join(' '));
   assert.equal(unchangedOutput, 'UNCHANGED');
+});
+
+test('Desktop package resolution refuses a missing sandbox companion', (context) => {
+  if (process.platform !== 'win32') {
+    context.skip('The Desktop package resolver is Windows-only.');
+    return;
+  }
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-desktop-missing-companion-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const candidate = makePackage(directory, '26.924.1.0', { runtime: true });
+  fs.rmSync(path.join(candidate.installLocation, 'app', 'resources', 'codex-windows-sandbox-setup.exe'));
+  const packages = packageExpression([candidate]);
+  const output = runPowerShell([
+    'try {',
+    `Get-CodexDesktopPackageInfo -Packages ${packages} -RequireBundledRuntime | Out-Null;`,
+    "'UNEXPECTED_SUCCESS'",
+    '} catch {',
+    '$_.Exception.Message',
+    '}',
+  ].join(' '));
+  assert.match(output, /codex-windows-sandbox-setup\.exe/);
 });

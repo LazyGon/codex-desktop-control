@@ -1,0 +1,11 @@
+import path from 'node:path';
+import { lifecycleFromFile, inspectPrivateTurns } from './private-turn-state.mjs';
+const [sourcePath,threadId,since]=process.argv.slice(2);
+if(!sourcePath||!threadId||!since||!path.basename(sourcePath).endsWith(threadId+'.jsonl'))throw new Error('Exact owner rollout/thread/boot cutoff required.');
+const turns=await lifecycleFromFile(sourcePath,Date.parse(since));
+const active=[...turns].filter(([,status])=>status==='task_started');
+if(active.length!==1)throw new Error('Exactly one current owner turn required.');
+const turnId=active[0][0];
+const sessionsRoot=path.join(process.env.USERPROFILE,'.codex','sessions');
+const snapshot=await inspectPrivateTurns({sessionsRoot,sourcePath,threadId,turnId,since});
+console.log(JSON.stringify({...snapshot,sourcePath,since,alternativeReason:'Canonical shared runtime is absent; only private lifecycle metadata is read. No private task RPC, message or configuration mutation.'}));

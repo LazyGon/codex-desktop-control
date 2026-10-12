@@ -160,7 +160,24 @@ Bridge gets at most one initial silent launch.
 
 Desktop can create a temporary stdio bootstrap helper before initializing its
 shared WebSocket. The launcher waits for the real shared connection throughout
-the connection deadline rather than treating that helper as an immediate failure.
+verified forward startup progress rather than treating that helper as an
+immediate failure. Three minutes without an advancing initialization stage is
+the user-selected stall check, not a total duration limit. Repeated errors, log
+growth alone, and unrelated cloud connections never reset it. It starts the installed Desktop executable with
+the shared endpoint explicitly in that child's environment instead of relying
+on Explorer to inherit a just-broadcast environment change. A process exit or
+explicit cancellation still fails closed; readiness is not inferred from launch.
+
+The private-to-shared bootstrap uses the same progress-based waiting rule,
+without a four-minute total deadline or Scheduler runtime limit. Its exact
+receipt identifies a cancellation marker (`requestPath + ".cancel"`). Before
+handoff it waits for the originating turn to finish and all newly active work
+to drain. A graceful-only handoff asks Windows Restart Manager to shut down
+only the admitted Desktop PID/start-time (no files/services, force flag, OS
+restart, or forced fallback). Merely closing a Windows Desktop window can leave
+its tray process alive and is not proof of application exit. Actual shared
+protocol/Desktop/Bridge verification and same-thread completion delivery remain
+separate from launch acceptance.
 
 The launcher caches the package's `codex.exe` and
 `codex-code-mode-host.exe` together in a version-specific directory. Current

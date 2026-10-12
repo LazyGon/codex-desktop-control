@@ -65,11 +65,11 @@ function cleanPowerShellEnvironment() {
   return environment;
 }
 
-function initializeCache({ server, host, cache, version }) {
+function initializeCache({ server, host, companions, cache, version }) {
   const command = [
     `$ErrorActionPreference = 'Stop'`,
     `. ${psLiteral(helperPath)}`,
-    `$result = Initialize-CodexRuntimeCache -BundledServerExecutable ${psLiteral(server)} -BundledCodeModeHostExecutable ${psLiteral(host)} -CacheRoot ${psLiteral(cache)} -PackageVersion ${psLiteral(version)}`,
+    `$result = Initialize-CodexRuntimeCache -BundledServerExecutable ${psLiteral(server)} -BundledCodeModeHostExecutable ${psLiteral(host)} -BundledCommandRunnerExecutable ${psLiteral(companions.runner)} -BundledSandboxServiceExecutable ${psLiteral(companions.service)} -BundledSandboxSetupExecutable ${psLiteral(companions.setup)} -CacheRoot ${psLiteral(cache)} -PackageVersion ${psLiteral(version)}`,
     `$result | ConvertTo-Json -Compress`,
   ].join('\n');
   return JSON.parse(execFileSync(resolvePowerShellExecutable(), [
@@ -81,7 +81,7 @@ function initializeCache({ server, host, cache, version }) {
   ], { encoding: 'utf8', env: cleanPowerShellEnvironment() }));
 }
 
-test('runtime cache keeps app-server and Code Mode host together per package version', (context) => {
+test('runtime cache keeps app-server and all companion executables together per package version', (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-runtime-cache-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const source = path.join(directory, 'source');
@@ -89,30 +89,49 @@ test('runtime cache keeps app-server and Code Mode host together per package ver
   fs.mkdirSync(source);
   const server = path.join(source, 'codex.exe');
   const host = path.join(source, 'codex-code-mode-host.exe');
+  const companions = {
+    runner: path.join(source, 'codex-command-runner.exe'),
+    service: path.join(source, 'codex-windows-sandbox-service.exe'),
+    setup: path.join(source, 'codex-windows-sandbox-setup.exe'),
+  };
   fs.writeFileSync(server, 'server-v1');
   fs.writeFileSync(host, 'host-v1');
+  for (const [name, filename] of Object.entries(companions)) fs.writeFileSync(filename, `${name}-v1`);
 
-  const first = initializeCache({ server, host, cache, version: '26.803.1.0' });
+  const first = initializeCache({ server, host, companions, cache, version: '26.803.1.0' });
   assert.equal(path.basename(first.ServerExecutable), 'codex.exe');
   assert.equal(path.basename(first.CodeModeHostExecutable), 'codex-code-mode-host.exe');
   assert.equal(path.dirname(first.ServerExecutable), path.dirname(first.CodeModeHostExecutable));
   assert.equal(first.ServerSha256, sha256('server-v1'));
   assert.equal(first.CodeModeHostSha256, sha256('host-v1'));
   assert.equal(fs.readFileSync(first.CodeModeHostExecutable, 'utf8'), 'host-v1');
+  assert.equal(first.CommandRunnerSha256, sha256('runner-v1'));
+  assert.equal(first.SandboxServiceSha256, sha256('service-v1'));
+  assert.equal(first.SandboxSetupSha256, sha256('setup-v1'));
+  for (const filename of [first.CommandRunnerExecutable, first.SandboxServiceExecutable, first.SandboxSetupExecutable]) {
+    assert.equal(path.dirname(filename), path.dirname(first.ServerExecutable));
+  }
 
   fs.writeFileSync(host, 'host-v1-repaired');
-  const repaired = initializeCache({ server, host, cache, version: '26.803.1.0' });
+  fs.writeFileSync(companions.setup, 'setup-v1-repaired');
+  const repaired = initializeCache({ server, host, companions, cache, version: '26.803.1.0' });
   assert.equal(repaired.CodeModeHostSha256, sha256('host-v1-repaired'));
   assert.equal(fs.readFileSync(repaired.CodeModeHostExecutable, 'utf8'), 'host-v1-repaired');
+  assert.equal(repaired.SandboxSetupSha256, sha256('setup-v1-repaired'));
 
   fs.writeFileSync(server, 'server-v2');
   fs.writeFileSync(host, 'host-v2');
-  const second = initializeCache({ server, host, cache, version: '26.804.1.0' });
+  for (const [name, filename] of Object.entries(companions)) fs.writeFileSync(filename, `${name}-v2`);
+  const second = initializeCache({ server, host, companions, cache, version: '26.804.1.0' });
   assert.notEqual(path.dirname(second.ServerExecutable), path.dirname(first.ServerExecutable));
   assert.equal(fs.readFileSync(first.ServerExecutable, 'utf8'), 'server-v1');
   assert.equal(fs.readFileSync(first.CodeModeHostExecutable, 'utf8'), 'host-v1-repaired');
+  assert.equal(fs.readFileSync(first.SandboxSetupExecutable, 'utf8'), 'setup-v1-repaired');
   assert.equal(fs.readFileSync(second.ServerExecutable, 'utf8'), 'server-v2');
   assert.equal(fs.readFileSync(second.CodeModeHostExecutable, 'utf8'), 'host-v2');
+  assert.equal(fs.readFileSync(second.CommandRunnerExecutable, 'utf8'), 'runner-v2');
+  assert.equal(fs.readFileSync(second.SandboxServiceExecutable, 'utf8'), 'service-v2');
+  assert.equal(fs.readFileSync(second.SandboxSetupExecutable, 'utf8'), 'setup-v2');
 });
 
 test('SHA-256 helper does not depend on PowerShell module auto-loading', (context) => {

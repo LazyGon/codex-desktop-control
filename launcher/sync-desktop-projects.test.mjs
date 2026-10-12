@@ -170,6 +170,14 @@ test('is idempotent and preserves non-local assignments', () => {
   assert.equal(result.stats.assignmentsSkipped, 1);
 });
 
+test('extended-length Windows cwd belongs to the same project root', () => {
+  const result = reconcileDesktopProjectState({
+    'local-projects': { local: { id: 'local', name: 'repo', rootPaths: ['C:\\repo'] } },
+  }, { projectRoots: ['C:\\repo'], threads: [{ id: 'task', cwd: '\\\\?\\C:\\repo' }] });
+  assert.equal(result.state['thread-project-assignments'].task.projectId, 'local');
+  assert.equal(result.state['thread-project-assignments'].task.cwd, 'C:\\repo');
+});
+
 test('native App Server Project identity removes a stale local assignment', () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'project-alias-'));
   const bridgeState = path.join(temporary, 'state.json');

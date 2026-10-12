@@ -23,6 +23,9 @@ function Get-CodexDesktopPackageInfo {
     $desktopExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\ChatGPT.exe'))
     $bundledServerExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\resources\codex.exe'))
     $bundledCodeModeHostExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\resources\codex-code-mode-host.exe'))
+    $bundledCommandRunnerExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\resources\codex-command-runner.exe'))
+    $bundledSandboxServiceExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\resources\codex-windows-sandbox-service.exe'))
+    $bundledSandboxSetupExecutable = [IO.Path]::GetFullPath((Join-Path $installLocation 'app\resources\codex-windows-sandbox-setup.exe'))
 
     if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
         throw "Desktop executable was not found: $desktopExecutable"
@@ -33,6 +36,15 @@ function Get-CodexDesktopPackageInfo {
     if ($RequireBundledRuntime -and -not (Test-Path -LiteralPath $bundledCodeModeHostExecutable -PathType Leaf)) {
         throw "Bundled Code Mode host executable was not found: $bundledCodeModeHostExecutable"
     }
+    foreach ($companion in @(
+        $bundledCommandRunnerExecutable,
+        $bundledSandboxServiceExecutable,
+        $bundledSandboxSetupExecutable
+    )) {
+        if ($RequireBundledRuntime -and -not (Test-Path -LiteralPath $companion -PathType Leaf)) {
+            throw "Bundled app-server companion executable was not found: $companion"
+        }
+    }
 
     [pscustomobject]@{
         Version = ([version]$package.Version).ToString()
@@ -42,6 +54,9 @@ function Get-CodexDesktopPackageInfo {
         DesktopExecutable = $desktopExecutable
         BundledServerExecutable = $bundledServerExecutable
         BundledCodeModeHostExecutable = $bundledCodeModeHostExecutable
+        BundledCommandRunnerExecutable = $bundledCommandRunnerExecutable
+        BundledSandboxServiceExecutable = $bundledSandboxServiceExecutable
+        BundledSandboxSetupExecutable = $bundledSandboxSetupExecutable
     }
 }
 
