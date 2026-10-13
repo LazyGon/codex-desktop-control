@@ -51,7 +51,7 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS, { contin
 
 export function liveActivityWindow(entries = []) {
   const rows = entries.flatMap(entry => wrapActivityRows(entry.text ?? entry, LIVE_ACTIVITY_COLUMNS,
-    { continuationPrefix: '  ↳ ' }))
+    { continuationPrefix: '  ... ' }))
     .slice(-LIVE_ACTIVITY_ROWS);
   if (!rows.length) rows.push('⏳');
   while (rows.length < LIVE_ACTIVITY_ROWS) rows.push(emptyRow);
@@ -76,6 +76,16 @@ export function publicReasoningText(summary) {
     .join('\n');
 }
 
+function nodeReplActivityTitle(item) {
+  let args = item.arguments;
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { return ''; }
+  }
+  // This known tool's title argument is the public action caption. Do not
+  // display its JavaScript code, other arguments, results, or private reasoning.
+  return typeof args?.title === 'string' ? args.title.trim() : '';
+}
+
 export function liveActivityItemText(item, completed = false) {
   if (!item) return '';
   const failed = item.status === 'failed' || item.status === 'declined' || item.success === false
@@ -92,9 +102,16 @@ export function liveActivityItemText(item, completed = false) {
     case 'fileChange':
       return `${marker} ✏️ ${(item.changes ?? []).map(change => change.path).filter(Boolean).join('\n')}`;
     case 'mcpToolCall':
-      return `${marker} ${[item.server, item.tool].filter(Boolean).join('/')}`;
-    case 'dynamicToolCall':
-      return `${marker} ${[item.namespace, item.tool].filter(Boolean).join('/')}`;
+    case 'dynamicToolCall': {
+      const scope = item.server ?? item.namespace;
+      const isNodeRepl = ['node_repl', 'mcp__node_repl'].includes(scope)
+        || /^mcp__node_repl__/u.test(item.tool ?? '');
+      if (isNodeRepl) {
+        const title = nodeReplActivityTitle(item);
+        return title ? `${marker} ${title}` : '';
+      }
+      return `${marker} ${[scope, item.tool].filter(Boolean).join('/')}`;
+    }
     case 'collabAgentToolCall':
     case 'collabToolCall':
       return `${marker} 👥 ${item.tool ?? ''}`;

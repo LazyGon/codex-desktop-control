@@ -108,7 +108,10 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   code block on the latest card. Public reasoning summaries and tool/command
   activity update in place; long entries wrap by display width and consume
   multiple rows, while short entries share the same scrolling window. Entry
-  icons mark new work; indented `↳` prefixes mark wrapped/continuing rows. Empty
+  icons mark new work; indented ASCII `...` prefixes mark continuing rows without
+  platform-dependent arrow/emoji glyphs. Generic `node_repl/js` rows are omitted;
+  this known tool's public `title` caption is displayed when provided, never its
+  code or other arguments. Empty
   rows are padded from the beginning, not added as content arrives. Raw private
   reasoning deltas/content and tool arguments are not included. The explicit
   wrap width is 48 monospace cells (CJK/emoji count as two); unusually narrow
