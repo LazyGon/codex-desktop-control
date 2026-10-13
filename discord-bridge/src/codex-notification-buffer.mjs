@@ -5,7 +5,6 @@ const CONTROLLER_NOTIFICATION_METHODS = new Set([
   'item/completed',
   'item/reasoning/summaryPartAdded',
   'item/reasoning/summaryTextDelta',
-  'item/reasoning/textDelta',
   'item/started',
   'serverRequest/resolved',
   'thread/archived',
@@ -25,7 +24,6 @@ const CONTROLLER_NOTIFICATION_METHODS = new Set([
 const COALESCIBLE_DELTA_METHODS = new Set([
   'item/agentMessage/delta',
   'item/reasoning/summaryTextDelta',
-  'item/reasoning/textDelta',
 ]);
 
 function sameIdentity(left, right, name) {

@@ -3527,17 +3527,18 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
     });
   }
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const reasoning = liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value;
-    if (reasoning === '要約は完了後の履歴復元で確認') break;
+    const activity = liveAssistant.embeds[0].fields.find((field) => field.name === '進行状況')?.value;
+    if (activity?.includes('Verifying latest fix')) break;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.equal(
-    liveAssistant.embeds[0].fields.find((field) => field.name === 'Reasoning')?.value,
-    '要約は完了後の履歴復元で確認',
-  );
+  const activity = liveAssistant.embeds[0].fields.find((field) => field.name === '進行状況')?.value;
+  assert.match(activity, /Planning latest fix/);
+  assert.match(activity, /Verifying latest fix/);
+  assert.equal(activity.split('\n').slice(1, -1).length, 5);
+  assert.equal(liveAssistant.embeds[0].fields.some(field => ['Current', 'Reasoning'].includes(field.name)), false);
   assert.ok(liveAssistant.embedEdits
-    .flatMap(([embed]) => embed.fields.filter((field) => field.name === 'Reasoning'))
-    .every((field) => field.value === '要約は完了後の履歴復元で確認'));
+    .flatMap(([embed]) => embed.fields.filter((field) => field.name === '進行状況'))
+    .every((field) => field.value.split('\n').slice(1, -1).length === 5));
   assert.equal(pastAssistant.embeds[0].description, assistantText);
   assert.equal(pastAssistant.components[0].components[0].custom_id, 'cx:files:linked');
   assert.equal(pastAssistant.components[0].components[1].custom_id, 'cx:copy:card');

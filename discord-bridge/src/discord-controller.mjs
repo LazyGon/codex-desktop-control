@@ -1,5 +1,12 @@
 import path from 'node:path';
 import { AsyncUserInputController } from './async-user-input.mjs';
+import {
+  liveActivityItemText,
+  liveActivityWindow,
+  publicReasoningText,
+  recordLiveActivity,
+  restoreLiveActivity,
+} from './live-activity.mjs';
 import { isEmptyMcpToolApproval, emptyMcpToolApprovalResponse } from './mcp-empty-approval.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -7077,9 +7084,10 @@ export class DiscordController {
         view.text = activeAgentItem?.text ?? '';
         view.reasoningItemId = activeReasoningItem?.id ?? null;
         view.reasoningPartIndex = null;
-        view.reasoning = activeAgentItem && activeReasoningItem
+        view.reasoning = activeReasoningItem
           ? reasoningSummaryFromTurn({ items: [activeReasoningItem] })
           : '';
+        restoreLiveActivity(view, activeTurn.items);
         await this.#queueTurnViewMutation(
           view,
           () => this.#ensureLiveTurnCard(binding, activeTurn, view, channel, messages),
@@ -7285,7 +7293,7 @@ export class DiscordController {
       else if (message.method === 'item/reasoning/summaryPartAdded') {
         this.#reasoningPartAdded(binding, message.params);
       }
-      else if (['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(message.method)) {
+      else if (message.method === 'item/reasoning/summaryTextDelta') {
         this.#reasoningDelta(binding, message.params);
       }
       else if (message.method === 'item/started') await this.#itemChanged(binding, message.params, false);
@@ -7880,6 +7888,7 @@ export class DiscordController {
     if (partIndex !== null) view.reasoningPartIndex = partIndex;
     view.reasoning += params.delta ?? '';
     if (view.reasoning.length > 12_000) view.reasoning = view.reasoning.slice(-12_000);
+    recordLiveActivity(view, params.itemId, `💭 ${view.reasoning.replaceAll('**', '')}`);
     view.currentItem = 'reasoning';
     this.#scheduleTurnRender(binding, view);
   }
@@ -7931,11 +7940,12 @@ export class DiscordController {
     const view = this.#view(binding.threadId, params.turnId, binding.channelId);
     if (params.item?.type === 'reasoning') {
       this.#selectReasoningItem(view, params.item.id);
-      if (completed && params.item.summary?.length) {
-        view.reasoning = params.item.summary.map((part) => String(part).trim()).filter(Boolean).join('\n');
+      if (params.item.summary?.length) {
+        view.reasoning = publicReasoningText(params.item.summary);
         view.reasoningPartIndex = params.item.summary.length - 1;
       }
     }
+    recordLiveActivity(view, params.item?.id, liveActivityItemText(params.item, completed));
     if (params.item?.type === 'agentMessage' && !completed) {
       await this.#startAgentMessage(binding, params, view, { acceptDeltaAlias: true });
     }
@@ -8303,6 +8313,7 @@ export class DiscordController {
         reasoning: '',
         reasoningItemId: null,
         reasoningPartIndex: null,
+        activityEntries: [],
         currentItem: null,
         items: [],
         plan: [],
@@ -8318,9 +8329,15 @@ export class DiscordController {
   }
 
   #scheduleTurnRender(binding, view) {
-    if (this.stopping || view.status !== 'inProgress' || view.timer || view.renderPromise) return;
+    if (this.stopping || view.status !== 'inProgress') return;
+    if (view.renderPromise) {
+      view.renderRequested = true;
+      return;
+    }
+    if (view.timer) return;
     view.timer = setTimeout(() => {
       view.timer = null;
+      view.renderRequested = false;
       const renderPromise = this.#queueTurnViewMutation(
         view,
         () => this.#renderTurn(binding, view),
@@ -8330,6 +8347,10 @@ export class DiscordController {
         .catch((error) => this.#log('turn-render-failed', { error: error.message }))
         .finally(() => {
           if (view.renderPromise === renderPromise) view.renderPromise = null;
+          if (view.renderRequested) {
+            view.renderRequested = false;
+            this.#scheduleTurnRender(binding, view);
+          }
         });
     }, this.config.liveUpdateIntervalMs);
     view.timer.unref?.();
@@ -8614,12 +8635,7 @@ export class DiscordController {
         { name: 'Message', value: view.currentMessageId ? `\`${view.currentMessageId}\`` : '(pending)', inline: true },
         { name: 'Elapsed', value: `${elapsed}s`, inline: true },
       );
-    if (view.reasoningItemId || view.currentItem === 'reasoning') {
-      // Streaming summaries change line count and make the latest Discord card
-      // jump while someone is reading it. Keep this field a stable height.
-      embed.addFields({ name: 'Reasoning', value: '要約は完了後の履歴復元で確認' });
-    }
-    if (view.currentItem) embed.addFields({ name: 'Current', value: truncate(view.currentItem, 600) });
+    embed.addFields({ name: '進行状況', value: liveActivityWindow(view.activityEntries) });
     if (view.plan.length) {
       embed.addFields({
         name: 'Plan',

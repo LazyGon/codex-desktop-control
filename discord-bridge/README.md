@@ -104,10 +104,15 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   mirrored cards remain in the ledger, and live user messages and completions
   continue normally. Explicit `履歴復元` still reads every turn in its selected
   1-, 3-, or 7-day window, one App Server page at a time.
-- Shows current commentary, a fixed-height reasoning indicator, plans, tool
-  progress, and token usage only on the latest card. Streaming reasoning
-  summaries are omitted there so the card does not jump as lines arrive;
-  completed summaries remain available through `履歴復元`. A past commentary
+- Shows current commentary, plans, token usage, and a five-row `進行状況`
+  code block on the latest card. Public reasoning summaries and tool/command
+  activity update in place; long entries wrap by display width and consume
+  multiple rows, while short entries share the same scrolling window. Empty
+  rows are padded from the beginning, not added as content arrives. Raw private
+  reasoning deltas/content and tool arguments are not included. The explicit
+  wrap width is 48 monospace cells (CJK/emoji count as two); unusually narrow
+  Discord clients may still add their own wrapping. Completed summaries also
+  remain available through `履歴復元`. A past commentary
   card contains only its title,
   message, task ID, turn ID, and message ID; a final card uses task and turn ID.
 - Mirrors asynchronous `request_user_input_async` questions from

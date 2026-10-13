@@ -45,6 +45,8 @@ test('coalesces only adjacent compatible content deltas in exact order', () => {
 test('retains controller structural notifications and drops unused output floods', () => {
   assert.equal(isControllerCodexNotification({ method: 'turn/completed' }), true);
   assert.equal(isControllerCodexNotification({ method: 'item/agentMessage/delta' }), true);
+  assert.equal(isControllerCodexNotification({ method: 'item/reasoning/summaryTextDelta' }), true);
+  assert.equal(isControllerCodexNotification({ method: 'item/reasoning/textDelta' }), false);
   assert.equal(isControllerCodexNotification({ method: 'item/commandExecution/outputDelta' }), false);
   assert.equal(isControllerCodexNotification({ method: 'turn/diff/updated' }), false);
 });
