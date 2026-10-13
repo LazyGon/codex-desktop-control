@@ -51,7 +51,7 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS, { contin
 
 export function liveActivityWindow(entries = []) {
   const rows = entries.flatMap(entry => wrapActivityRows(entry.text ?? entry, LIVE_ACTIVITY_COLUMNS,
-    { continuationPrefix: '  ... ' }))
+    { continuationPrefix: '  ↳ ' }))
     .slice(-LIVE_ACTIVITY_ROWS);
   if (!rows.length) rows.push('⏳');
   while (rows.length < LIVE_ACTIVITY_ROWS) rows.push(emptyRow);

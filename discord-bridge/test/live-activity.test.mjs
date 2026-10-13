@@ -21,19 +21,19 @@ test('one long command occupies several wrapped rows; only the latest five rows 
   const rows = wrapActivityRows(command);
   assert.ok(rows.length > 5);
   assert.equal(rows.join(''), command);
-  const continued = wrapActivityRows(command, 48, { continuationPrefix: '  ... ' });
+  const continued = wrapActivityRows(command, 48, { continuationPrefix: '  ↳ ' });
   assert.deepEqual(contentRows(liveActivityWindow(['old command', command])), continued.slice(-5));
-  assert.ok(contentRows(liveActivityWindow([command])).every(row => row.startsWith('  ... ')));
+  assert.ok(contentRows(liveActivityWindow([command])).every(row => row.startsWith('  ↳ ')));
   assert.deepEqual(contentRows(liveActivityWindow(['git status', 'git diff', 'npm test'])).slice(0, 3),
     ['git status', 'git diff', 'npm test']);
 });
 
 test('entry icons and indented continuation markers distinguish new work from wrapped lines', () => {
   const rows = contentRows(liveActivityWindow(['💭 First line\nSecond line', '⏳ npm test', '✅ git diff']));
-  assert.deepEqual(rows.slice(0, 4), ['💭 First line', '  ... Second line', '⏳ npm test', '✅ git diff']);
+  assert.deepEqual(rows.slice(0, 4), ['💭 First line', '  ↳ Second line', '⏳ npm test', '✅ git diff']);
   const long = contentRows(liveActivityWindow(['⏳ ' + '日本語👨‍👩‍👧‍👦'.repeat(40)]));
   const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  assert.ok(long.every(row => row.startsWith('  ... ')));
+  assert.ok(long.every(row => row.startsWith('  ↳ ')));
   assert.ok(long.every(row => [...segments.segment(row)]
     .reduce((cells, { segment }) => cells + activityCellWidth(segment), 0) <= 48));
 });
