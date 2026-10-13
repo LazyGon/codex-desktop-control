@@ -21,13 +21,16 @@ export function activityCellWidth(grapheme) {
   ) ? 2 : 1;
 }
 
-export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS) {
+export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS, { continuationPrefix = '' } = {}) {
   const rows = [];
+  const continuationCells = [...segmenter.segment(continuationPrefix)]
+    .reduce((width, { segment }) => width + activityCellWidth(segment), 0);
   const safe = String(text ?? '').replaceAll('```', '``\u200b`').replaceAll('\t', '    ')
     .replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
   for (const source of safe.split(/\r?\n/).filter(line => line.trim())) {
-    let row = '', cells = 0;
+    let row = rows.length ? continuationPrefix : '';
+    let cells = rows.length ? continuationCells : 0;
     for (const { segment } of segmenter.segment(source)) {
       // Discord embed fields are capped at 1024 UTF-16 code units. Bound each
       // row too, including pathological combining sequences, without splitting
@@ -36,7 +39,7 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS) {
       const width = activityCellWidth(display);
       if (cells + width > columns || row.length + display.length > 190) {
         if (row) rows.push(row);
-        row = ''; cells = 0;
+        row = continuationPrefix; cells = continuationCells;
       }
       row += display;
       cells += width;
@@ -47,7 +50,8 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS) {
 }
 
 export function liveActivityWindow(entries = []) {
-  const rows = entries.flatMap(entry => wrapActivityRows(entry.text ?? entry))
+  const rows = entries.flatMap(entry => wrapActivityRows(entry.text ?? entry, LIVE_ACTIVITY_COLUMNS,
+    { continuationPrefix: '  ↳ ' }))
     .slice(-LIVE_ACTIVITY_ROWS);
   if (!rows.length) rows.push('⏳');
   while (rows.length < LIVE_ACTIVITY_ROWS) rows.push(emptyRow);

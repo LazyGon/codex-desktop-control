@@ -107,7 +107,8 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
 - Shows current commentary, plans, token usage, and a five-row `進行状況`
   code block on the latest card. Public reasoning summaries and tool/command
   activity update in place; long entries wrap by display width and consume
-  multiple rows, while short entries share the same scrolling window. Empty
+  multiple rows, while short entries share the same scrolling window. Entry
+  icons mark new work; indented `↳` prefixes mark wrapped/continuing rows. Empty
   rows are padded from the beginning, not added as content arrives. Raw private
   reasoning deltas/content and tool arguments are not included. The explicit
   wrap width is 48 monospace cells (CJK/emoji count as two); unusually narrow
