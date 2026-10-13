@@ -20,10 +20,15 @@ export function readJsonIfPresent(filePath) {
   }
 }
 
-export function atomicWriteJson(filePath, value, { space = 2 } = {}) {
+export function atomicWriteJson(filePath, value, { space = 2, flush = false } = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, space)}\n`, 'utf8');
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, space)}\n`, { encoding: 'utf8', flush });
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch {}
+    throw error;
+  }
   for (let attempt = 0; ; attempt += 1) {
     try {
       fs.renameSync(temporaryPath, filePath);

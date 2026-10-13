@@ -211,6 +211,29 @@ test('atomicWriteJson preserves pretty output by default and supports compact ou
   }
 });
 
+test('atomicWriteJson requests a flushed replacement before rename and preserves the old file on write failure', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-atomic-json-flush-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'state.json');
+  atomicWriteJson(filePath, { version: 'old' });
+  const originalWrite = fs.writeFileSync;
+  let flushes = 0;
+  context.mock.method(fs, 'writeFileSync', (target, text, options) => {
+    assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).version, 'old');
+    assert.equal(options.flush, true);
+    flushes += 1;
+    return originalWrite(target, text, options);
+  });
+  atomicWriteJson(filePath, { version: 'new' }, { flush: true });
+  assert.equal(flushes, 1);
+  assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).version, 'new');
+  context.mock.restoreAll();
+  context.mock.method(fs, 'writeFileSync', () => { throw new Error('Simulated disk flush failure'); });
+  assert.throws(() => atomicWriteJson(filePath, { version: 'failed' }, { flush: true }), /disk flush failure/);
+  assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).version, 'new');
+  assert.deepEqual(fs.readdirSync(directory), ['state.json']);
+});
+
 test('session completion append reads only new bytes and keeps the cache on unchanged calls', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-session-incremental-'));
   const sessionPath = path.join(directory, 'session.jsonl');

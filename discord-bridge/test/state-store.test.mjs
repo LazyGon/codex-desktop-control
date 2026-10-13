@@ -38,7 +38,7 @@ test('StateStore initializes a new installation and preserves hidden state on re
   assert.equal(second.binding('thread-1').hidden, true);
 });
 
-test('StateStore hides bindings in one bounded batch', () => {
+test('StateStore hides bindings in one batch without an arbitrary entry ceiling', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-hidden-batch-'));
   try {
     const store = new StateStore(directory, '123456789012345');
@@ -52,10 +52,9 @@ test('StateStore hides bindings in one bounded batch', () => {
     assert.equal(store.binding('one').hidden, true);
     assert.equal(store.binding('two').projectKey, 'app-server:native');
     assert.equal(store.binding('one').updatedAt, store.binding('two').updatedAt);
-    assert.throws(
-      () => store.hideBindings(Array.from({ length: 51 }, (_, index) => ({ threadId: `t-${index}` }))),
-      /At most 50/,
-    );
+    store.hideBindings(Array.from({ length: 51 }, (_, index) => ({ threadId: `t-${index}` })));
+    assert.equal(store.binding('t-50').hidden, true);
+    assert.equal(Object.keys(store.snapshot().bindings).length, 53);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

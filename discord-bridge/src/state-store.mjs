@@ -557,7 +557,6 @@ export class StateStore {
 
   hideBindings(entries) {
     if (!Array.isArray(entries) || entries.length === 0) return;
-    if (entries.length > 50) throw new Error('At most 50 hidden Discord bindings may be persisted per batch.');
     const normalizedEntries = entries.map(({ threadId, patch = {} }) => {
       if (typeof threadId !== 'string' || !threadId || threadId === 'undefined') {
         throw new Error('A valid threadId is required for a hidden Discord binding.');
@@ -618,6 +617,8 @@ export class StateStore {
   #write() {
     // Preserve the synchronous atomic save boundary while avoiding indentation
     // overhead on this large, frequently rewritten machine-readable snapshot.
-    atomicWriteJson(this.filePath, this.value, { space: 0 });
+    // Flush the replacement contents before publishing the snapshot. A rename
+    // alone does not flush cached writes when Windows crashes.
+    atomicWriteJson(this.filePath, this.value, { space: 0, flush: true });
   }
 }
