@@ -67,7 +67,7 @@ export function liveActivityWindow(entries = []) {
       rows.unshift(wrapped[0], ...tail);
     } else rows.unshift(...wrapped);
   }
-  if (!rows.length) rows.push('実行中');
+  if (!rows.length) rows.push('▶️');
   while (rows.length < LIVE_ACTIVITY_ROWS) rows.push(emptyRow);
   return `\`\`\`text\n${rows.join('\n')}\n\`\`\``;
 }
@@ -105,7 +105,7 @@ export function liveActivityItemText(item, completed = false) {
   const failed = item.status === 'failed' || item.status === 'declined' || item.success === false
     || (typeof item.exitCode === 'number' && item.exitCode !== 0);
   const done = completed || item.status === 'completed';
-  const marker = item.status === 'declined' ? '拒否' : failed ? '失敗' : done ? '完了' : '実行中';
+  const marker = item.status === 'declined' ? '❌ 拒否' : failed ? '❌' : done ? '✅' : '▶️';
   switch (item.type) {
     case 'reasoning': {
       const summary = publicReasoningText(item.summary).replaceAll('**', '');

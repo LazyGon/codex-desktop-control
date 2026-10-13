@@ -111,8 +111,9 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   visible entry retains its first command/action row; clipped entries show
   that header plus their latest rows, with `…` marking omitted middle rows.
   Indented `↳` prefixes still mark ordinary wrapped/continuing rows. Short
-  text labels identify status (`実行中`, `完了`, `失敗`, `拒否`) and work type
-  (such as `検討`, `検索`, or `ファイル変更`), instead of unexplained emojis.
+  leading status icons are `▶️` (running), `✅` (completed), and `❌`
+  (failed; declined requests also say `拒否`). Work types use short text labels
+  such as `検討`, `子タスク`, `検索`, and `ファイル変更`, not secondary emojis.
   Generic `node_repl/js` rows are omitted;
   this known tool's public `title` caption is displayed when provided, never its
   code or other arguments. Empty

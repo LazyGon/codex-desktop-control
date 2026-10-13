@@ -30,12 +30,12 @@ test('one long command retains its header plus the latest rows within the five-r
     ['git status', 'git diff', 'npm test']);
 });
 
-test('text status labels and unchanged continuation markers distinguish new work from wrapped lines', () => {
-  const rows = contentRows(liveActivityWindow(['検討 First line\nSecond line', '実行中 npm test', '完了 git diff']));
-  assert.deepEqual(rows.slice(0, 4), ['検討 First line', '  ↳ Second line', '実行中 npm test', '完了 git diff']);
-  const long = contentRows(liveActivityWindow(['実行中 ' + '日本語👨‍👩‍👧‍👦'.repeat(40)]));
+test('leading status icons and unchanged continuation markers distinguish new work from wrapped lines', () => {
+  const rows = contentRows(liveActivityWindow(['検討 First line\nSecond line', '▶️ npm test', '✅ git diff']));
+  assert.deepEqual(rows.slice(0, 4), ['検討 First line', '  ↳ Second line', '▶️ npm test', '✅ git diff']);
+  const long = contentRows(liveActivityWindow(['▶️ ' + '日本語👨‍👩‍👧‍👦'.repeat(40)]));
   const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  assert.ok(long[0].startsWith('実行中 '));
+  assert.ok(long[0].startsWith('▶️ '));
   assert.ok(long[1].startsWith('  … '));
   assert.ok(long.slice(2).every(row => row.startsWith('  ↳ ')));
   assert.ok(long.every(row => [...segments.segment(row)]
@@ -43,9 +43,9 @@ test('text status labels and unchanged continuation markers distinguish new work
 });
 
 test('partial older entries keep their own header and latest result, never an orphaned tail', () => {
-  const older = '完了 npm test\nsetup\nprepare\nrun\nreport\nexit 0';
-  assert.deepEqual(contentRows(liveActivityWindow([older, '実行中 git diff'])),
-    ['完了 npm test', '  … run', '  ↳ report', '  ↳ exit 0', '実行中 git diff']);
+  const older = '✅ npm test\nsetup\nprepare\nrun\nreport\nexit 0';
+  assert.deepEqual(contentRows(liveActivityWindow([older, '▶️ git diff'])),
+    ['✅ npm test', '  … run', '  ↳ report', '  ↳ exit 0', '▶️ git diff']);
   const crowded = contentRows(liveActivityWindow([older, 'one', 'two', 'three', 'four']));
   assert.deepEqual(crowded.slice(0, 4), ['one', 'two', 'three', 'four']);
   assert.equal(crowded[4], '\u200b');
@@ -65,10 +65,10 @@ test('generic node_repl rows are omitted while their public action titles are us
   }
   const labelled = { type: 'mcpToolCall', server: 'node_repl', tool: 'js',
     arguments: { title: '表示の折り返しを確認', code: 'PRIVATE', key: 'PRIVATE' } };
-  assert.equal(liveActivityItemText(labelled), '実行中 表示の折り返しを確認');
+  assert.equal(liveActivityItemText(labelled), '▶️ 表示の折り返しを確認');
   assert.equal(liveActivityItemText({ ...labelled, arguments: JSON.stringify(labelled.arguments) }, true),
-    '完了 表示の折り返しを確認');
-  assert.equal(liveActivityItemText({ type: 'mcpToolCall', server: 'other', tool: 'js' }), '実行中 ツール other/js');
+    '✅ 表示の折り返しを確認');
+  assert.equal(liveActivityItemText({ type: 'mcpToolCall', server: 'other', tool: 'js' }), '▶️ ツール other/js');
   const view = {};
   restoreLiveActivity(view, [{ ...labelled, id: 'labelled' },
     { id: 'generic', type: 'mcpToolCall', server: 'node_repl', tool: 'js' }]);
@@ -115,7 +115,7 @@ test('streamed updates replace the same entry and actual tool progress shares th
   assert.match(liveActivityWindow(view.activityEntries), /git diff/);
   recordLiveActivity(view, 'command', liveActivityItemText({ type: 'commandExecution', command: 'git diff', exitCode: 1 }, true));
   assert.equal(view.activityEntries.length, 2);
-  assert.match(liveActivityWindow(view.activityEntries), /失敗 git diff/);
+  assert.match(liveActivityWindow(view.activityEntries), /❌ git diff/);
   assert.match(liveActivityWindow(view.activityEntries), /exit 1/);
 });
 
@@ -123,7 +123,7 @@ test('only public summary and tool identity are rendered, never raw reasoning or
   const item = { type: 'reasoning', summary: ['**Public section**', { text: 'Public explanation' }], content: ['PRIVATE'] };
   assert.equal(publicReasoningText(item.summary), '**Public section**\nPublic explanation');
   assert.equal(liveActivityItemText(item), '検討 Public section\nPublic explanation');
-  assert.equal(liveActivityItemText({ type: 'mcpToolCall', server: 'tools', tool: 'search', arguments: { secret: 'PRIVATE' } }), '実行中 ツール tools/search');
+  assert.equal(liveActivityItemText({ type: 'mcpToolCall', server: 'tools', tool: 'search', arguments: { secret: 'PRIVATE' } }), '▶️ ツール tools/search');
   const view = {};
   restoreLiveActivity(view, [{ ...item, id: 'reasoning' }, { id: 'tool', type: 'commandExecution', command: 'npm test', status: 'inProgress' }]);
   const output = liveActivityWindow(view.activityEntries);
@@ -132,7 +132,7 @@ test('only public summary and tool identity are rendered, never raw reasoning or
   assert.equal(output.includes('PRIVATE'), false);
 });
 
-test('activity labels name the work and distinguish failed, completed, running and declined tools', () => {
+test('only leading status uses icons while work types use readable text', () => {
   for (const [item, label] of [
     [{ type: 'fileChange', changes: [{ path: 'app.mjs' }] }, 'ファイル変更 app.mjs'],
     [{ type: 'collabAgentToolCall', tool: 'spawn_agent' }, '子タスク spawn_agent'],
@@ -143,10 +143,11 @@ test('activity labels name the work and distinguish failed, completed, running a
     [{ type: 'sleep', durationMs: 1000 }, '待機 1s'],
     [{ type: 'contextCompaction' }, 'コンテキスト整理'],
   ]) {
-    assert.equal(liveActivityItemText(item), `実行中 ${label}`);
-    assert.equal(liveActivityItemText(item, true), `完了 ${label}`);
-    assert.equal(liveActivityItemText({ ...item, status: 'failed' }, true), `失敗 ${label}`);
-    assert.equal(liveActivityItemText({ ...item, status: 'declined' }, true), `拒否 ${label}`);
+    assert.equal(liveActivityItemText(item), `▶️ ${label}`);
+    assert.equal(liveActivityItemText(item, true), `✅ ${label}`);
+    assert.equal(liveActivityItemText({ ...item, status: 'failed' }, true), `❌ ${label}`);
+    assert.equal(liveActivityItemText({ ...item, status: 'declined' }, true), `❌ 拒否 ${label}`);
+    assert.equal(/👥|🔎|✏️|🖼️|🗜️/u.test(liveActivityItemText(item)), false);
   }
-  assert.equal(contentRows(liveActivityWindow())[0], '実行中');
+  assert.equal(contentRows(liveActivityWindow())[0], '▶️');
 });
