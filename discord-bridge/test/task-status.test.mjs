@@ -102,6 +102,48 @@ test('a newly failed turn creates its final card and does not reset the task pan
   assert.match(JSON.stringify(f.messages.get(f.stateStore.binding('task').controlPanelMessageId).embeds), /systemError/);
 });
 
+test('a terminal model-capacity error appears once on its failed card, not as raw JSON', async context => {
+  const f = await fixture(context);
+  const error = {
+    message: 'Selected model is at capacity. Please try a different model.',
+    codexErrorInfo: 'serverOverloaded', additionalDetails: null, misalignment: null,
+  };
+  const notification = { error, willRetry: false, turnId: 'capacity-turn' };
+  const initialMessageCount = f.messages.size;
+  await f.notify('error', notification);
+  assert.equal(f.messages.size, initialMessageCount);
+  await f.notify('turn/completed', { turn: {
+    id: 'capacity-turn', status: 'failed', error, items: [],
+  } });
+  const record = f.stateStore.turnRecord('task', 'capacity-turn');
+  assert.equal(record.finalMessageIds.length, 1);
+  const card = f.messages.get(record.finalMessageIds[0]);
+  assert.match(card.embeds[0].title, /failed/);
+  assert.match(card.embeds[0].description, /Selected model is at capacity/);
+  assert.equal(f.channel.name, '🔴-test');
+  assert.ok([...f.messages.values()].every(message => !message.content.includes('**error**')
+    && !message.content.includes('codexErrorInfo')));
+  const completedMessageCount = f.messages.size;
+  await f.notify('error', notification);
+  assert.equal(f.messages.size, completedMessageCount);
+});
+
+test('retry progress, warnings, and errors without a turn retain their standalone notices', async context => {
+  const f = await fixture(context);
+  await f.notify('error', {
+    error: { message: 'Temporary connection failure' }, willRetry: true, turnId: 'retry-turn',
+  });
+  await f.notify('warning', { message: 'A warning', turnId: 'retry-turn' });
+  await f.notify('guardianWarning', { message: 'A guardian warning', turnId: 'retry-turn' });
+  await f.notify('error', { error: { message: 'Error without a completion card' }, willRetry: false });
+  const notices = [...f.messages.values()].map(message => message.content);
+  assert.ok(notices.includes('通信エラーです。再試行中です。'));
+  assert.ok(notices.includes('**warning**\nA warning'));
+  assert.ok(notices.includes('**guardianWarning**\nA guardian warning'));
+  assert.ok(notices.some(content => content.startsWith('**error**\n')
+    && content.includes('Error without a completion card')));
+});
+
 test('failed completion stays red through panel repost and a new turn clears it', async context => {
   const f = await fixture(context);
   await f.complete('failed-turn', 'failed');

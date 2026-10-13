@@ -7297,6 +7297,9 @@ export class DiscordController {
       else if (message.method === 'thread/tokenUsage/updated') this.#tokenUsageChanged(binding, message.params);
       else if (message.method === 'turn/completed') await this.#turnCompleted(binding, message.params);
       else if (message.method === 'error' || message.method === 'warning' || message.method === 'guardianWarning') {
+        // A terminal turn error is rendered by turn/completed's failed card.
+        // Keep retry progress and errors without a turn (no final card) visible.
+        if (message.method === 'error' && message.params?.willRetry === false && turnId) return;
         const retryStatus = message.method === 'error' ? codexRetryStatusText(message.params) : null;
         await this.#postTaskMessage(
           binding,
