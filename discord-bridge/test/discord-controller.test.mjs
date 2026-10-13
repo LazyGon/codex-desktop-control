@@ -1818,6 +1818,74 @@ test('controller shutdown clears polling and recovery timers before Discord clos
   assert.equal(controller.completionRecoveryJobs.size, 0);
 });
 
+test('controller shutdown cancels queued archive mirrors and post-sync cleanup', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-stop-archive-sync-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const desktopStatePath = path.join(directory, '.codex-global-state.json');
+  fs.writeFileSync(desktopStatePath, JSON.stringify({ 'local-projects': {} }));
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({ controlChannelId: 'control-channel' });
+  const archived = Array.from({ length: 10 }, (_, index) => ({
+    id: `archived-${index}`, cwd: 'C:\\git\\work', status: { type: 'idle' },
+  }));
+  for (const thread of archived) {
+    stateStore.setBinding(thread.id, { archived: true, channelId: `old-${thread.id}` });
+  }
+  const codex = new EventEmitter();
+  codex.connected = true;
+  codex.listAllProjects = async () => [];
+  codex.listAllThreads = async ({ archived: isArchived }) => isArchived ? archived : [];
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  let releaseFetches;
+  const fetchGate = new Promise((resolve) => { releaseFetches = resolve; });
+  let started;
+  const workerStarted = new Promise((resolve) => { started = resolve; });
+  let channelFetches = 0;
+  let channelCreates = 0;
+  let guildFetches = 0;
+  client.channels = { fetch: async () => {
+    channelFetches += 1;
+    if (channelFetches === 4) started();
+    await fetchGate;
+    return null;
+  } };
+  const channels = new Map();
+  channels.find = (predicate) => [...channels.values()].find(predicate);
+  const guild = { channels: {
+    fetch: async () => { guildFetches += 1; return channels; },
+    create: async () => { channelCreates += 1; throw new Error('Must not create after stop'); },
+  } };
+  const controller = new DiscordController({
+    client, codex, stateStore,
+    config: { guildId: 'guild-1', authorizedUserIds: ['user-1'], desktopGlobalStatePath: desktopStatePath },
+    logDir: directory,
+  });
+  controller.infrastructureReady = Promise.resolve({ guild, completions: {}, controlCategory: {} });
+  controller.attach();
+  let replied;
+  const completed = new Promise((resolve) => { replied = resolve; });
+  client.emit('interactionCreate', {
+    guildId: 'guild-1', channelId: 'control-channel', user: { id: 'user-1' },
+    customId: 'cx:ui:control:sync', deferred: false, replied: false,
+    isAutocomplete: () => false, isChatInputCommand: () => false,
+    isStringSelectMenu: () => false, isButton: () => true,
+    isModalSubmit: () => false, isRepliable: () => true,
+    deferReply: async function () { this.deferred = true; },
+    editReply: async (payload) => { replied(payload); },
+  });
+  await workerStarted;
+  const stopping = controller.stop();
+  releaseFetches();
+  const stopped = await stopping;
+  await completed;
+  assert.equal(stopped.timedOut, false);
+  assert.equal(channelCreates, 0);
+  assert.equal(channelFetches, 4);
+  assert.equal(guildFetches, 1);
+  assert.equal(Object.values(stateStore.snapshot().bindings).every((binding) => binding.channelId.startsWith('old-')), true);
+});
+
 test('controller shutdown waits up to five minutes in production and reports a stuck operation', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-controller-stop-timeout-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

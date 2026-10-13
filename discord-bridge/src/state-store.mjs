@@ -1,10 +1,10 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
   atomicWriteJson,
   deepClone,
   projectIdFromKey,
-  readJsonIfPresent,
 } from './util.mjs';
 
 function initialState(guildId) {
@@ -42,8 +42,24 @@ function patchChanges(current, patch) {
 export class StateStore {
   constructor(dataDir, guildId) {
     this.filePath = path.join(dataDir, 'state.json');
-    const persisted = readJsonIfPresent(this.filePath);
-    this.value = persisted?.guildId === guildId ? persisted : initialState(guildId);
+    let persisted;
+    try {
+      persisted = JSON.parse(fs.readFileSync(this.filePath, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw new Error('Discord state could not be read; refusing to reset visibility or recreate mirrors.', { cause: error });
+      }
+      if (fs.existsSync(path.join(dataDir, 'runtime.json'))) {
+        throw new Error('Discord state is missing from an existing installation; restore state before starting the bridge.');
+      }
+    }
+    if (persisted !== undefined && (!persisted || persisted.guildId !== guildId)) {
+      throw new Error('Discord state guild does not match the configured guild; refusing to reset state.');
+    }
+    this.value = persisted ?? initialState(guildId);
+    if (!Number.isInteger(this.value.schemaVersion) || this.value.schemaVersion < 1 || this.value.schemaVersion > 8) {
+      throw new Error('Unsupported Discord state schema; refusing to reset state.');
+    }
     if (this.value.schemaVersion === 1) {
       this.value.infrastructure.controlCategoryId ??= this.value.infrastructure.categoryId ?? null;
       delete this.value.infrastructure.categoryId;
@@ -90,7 +106,6 @@ export class StateStore {
       this.value.hiddenProjects ??= {};
       this.value.schemaVersion = 8;
     }
-    if (this.value.schemaVersion !== 8) this.value = initialState(guildId);
     delete this.value.bindings?.undefined;
     delete this.value.subagentThreads?.undefined;
     this.value.hiddenProjects ??= {};

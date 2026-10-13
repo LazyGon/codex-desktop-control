@@ -5,6 +5,39 @@ import os from 'node:os';
 import path from 'node:path';
 import { StateStore } from '../src/state-store.mjs';
 
+test('StateStore refuses unreadable, mismatched, and unsupported persisted state without overwriting it', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-refuse-reset-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'state.json');
+  for (const text of [
+    '\u0000\u0000',
+    '{"guildId":"guild-1",',
+    'null',
+    JSON.stringify({ guildId: 'other-guild', schemaVersion: 8 }),
+    JSON.stringify({ guildId: 'guild-1', schemaVersion: 9 }),
+    JSON.stringify({ guildId: 'guild-1' }),
+  ]) {
+    fs.writeFileSync(filePath, text);
+    assert.throws(() => new StateStore(directory, 'guild-1'), /refusing to reset/);
+    assert.equal(fs.readFileSync(filePath, 'utf8'), text);
+  }
+  fs.rmSync(filePath);
+  fs.writeFileSync(path.join(directory, 'runtime.json'), '{}');
+  assert.throws(() => new StateStore(directory, 'guild-1'), /missing from an existing installation/);
+  assert.equal(fs.existsSync(filePath), false);
+});
+
+test('StateStore initializes a new installation and preserves hidden state on reload', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-state-hidden-reload-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const first = new StateStore(directory, 'guild-1');
+  first.setHiddenProject('project-1', { name: 'Hidden project' });
+  first.hideBinding('thread-1', { projectKey: 'project-1' });
+  const second = new StateStore(directory, 'guild-1');
+  assert.equal(second.isProjectHidden('project-1'), true);
+  assert.equal(second.binding('thread-1').hidden, true);
+});
+
 test('StateStore hides bindings in one bounded batch', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discord-hidden-batch-'));
   try {
