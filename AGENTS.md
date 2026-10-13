@@ -154,7 +154,11 @@ decisions; the verification owner retains ordinary Product proof.
 
 - `control/system-error-recovery.mjs` uses the verified canonical shared AppServer.
   The current-user Limited `Codex System Error Recovery` scheduled task invokes
-  its hidden worker at logon and once per minute. No separate server is created.
+  `control/system-error-recovery-launcher.py` through the existing windowless
+  `pythonw.exe` at logon and once per minute. The Node worker is launched with
+  `CREATE_NO_WINDOW`; PowerShell `-WindowStyle Hidden` alone did not prevent
+  Windows Terminal from briefly appearing and taking focus on this PC. No
+  separate server is created.
 - Only the latest confirmed typed terminal transient failure qualifies. Active,
   completed, interrupted, paused/budget-limited goals, excluded task IDs, native
   child tasks and unconfirmed direct-input owners are skipped. Workflow HOLD,
@@ -183,6 +187,10 @@ decisions; the verification owner retains ordinary Product proof.
   changed error messages/details never create a new restart key. Historical
   error-dependent journals remain immutable and fence the same thread/turn via
   a forward index. Their UNKNOWN/accepted/aborted claims are not cleared.
+- Existing registration updates change only the action, preserving its triggers,
+  principal, settings and enabled state. The manual PowerShell wrapper uses
+  `ProcessStartInfo.CreateNoWindow` and waits for the real launcher exit code;
+  it does not depend on PATHEXT or detached native-command exit tracking.
 - Run `control/Register-SystemErrorRecovery.ps1 -Mode Status` for scheduler
   readback; `-Mode Stop` disables both config and task, and `-Mode Enable` restores
   them. The Node entrypoint also accepts `status`, `stop`, `enable`, `dry-run` and

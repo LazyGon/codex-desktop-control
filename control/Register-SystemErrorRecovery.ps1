@@ -9,7 +9,9 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $root = Split-Path -Parent $PSScriptRoot
 $wrapper = Join-Path $PSScriptRoot 'Invoke-SystemErrorRecovery.ps1'
 $module = Join-Path $PSScriptRoot 'system-error-recovery.mjs'
-$powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$pythonw = Join-Path $env:USERPROFILE '.cache/codex-runtimes/codex-primary-runtime/dependencies/python/pythonw.exe'
+$launcher = Join-Path $PSScriptRoot 'system-error-recovery-launcher.py'
+if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf) -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Windowless recovery runtime or launcher is missing.' }
 if (-not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw 'Recovery Node runtime is missing.' }
 function Get-OwnedTask {
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -24,23 +26,28 @@ function Get-OwnedTask {
     return $existing
 }
 if ($Mode -eq 'Install') {
-    $null = Get-OwnedTask
-    $action = New-ScheduledTaskAction -Execute $powershell -WorkingDirectory $root -Argument (
-        '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File "{0}" -NodePath "{1}"' -f $wrapper, $NodePath)
+    $existing = Get-OwnedTask
+    $action = New-ScheduledTaskAction -Execute $pythonw -WorkingDirectory $root -Argument (
+        '"{0}" --mode run --node-path "{1}"' -f $launcher, $NodePath)
     $minute = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
     $logon = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
     $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
         -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $null = Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($minute, $logon) `
-        -Principal $principal -Settings $settings -Description $description -Force
+    if ($existing) {
+        # Preserve existing triggers, principal, settings and enabled/disabled state.
+        $null = Set-ScheduledTask -TaskName $taskName -TaskPath $existing.TaskPath -Action $action
+    } else {
+        $null = Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($minute, $logon) `
+            -Principal $principal -Settings $settings -Description $description
+    }
 } elseif ($Mode -eq 'Stop') {
-    & $NodePath $module stop
+    & $wrapper -Mode stop -NodePath $NodePath
     if ($LASTEXITCODE -ne 0) { throw 'Recovery config stop failed.' }
     if (Get-OwnedTask) { $null = Disable-ScheduledTask -TaskName $taskName }
 } elseif ($Mode -eq 'Enable') {
     if (-not (Get-OwnedTask)) { throw 'Install the owned recovery task first.' }
-    & $NodePath $module enable
+    & $wrapper -Mode enable -NodePath $NodePath
     if ($LASTEXITCODE -ne 0) { throw 'Recovery config enable failed.' }
     $null = Enable-ScheduledTask -TaskName $taskName
 }
