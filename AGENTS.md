@@ -149,3 +149,49 @@ decisions; the verification owner retains ordinary Product proof.
   takes effect at the next normal or individually authorized shared startup;
   do not treat the running server as updated. See launcher-powershell-fix.json
   in the same evidence directory.
+
+## System-error recovery (2026-10-13)
+
+- `control/system-error-recovery.mjs` uses the verified canonical shared AppServer.
+  The current-user Limited `Codex System Error Recovery` scheduled task invokes
+  its hidden worker at logon and once per minute. No separate server is created.
+- Only the latest confirmed typed terminal transient failure qualifies. Active,
+  completed, interrupted, paused/budget-limited goals, excluded task IDs, native
+  child tasks and unconfirmed direct-input owners are skipped. Workflow HOLD,
+  INCOMPLETE, NOT_RUN and UNKNOWN delivery results are not system errors.
+- Ordinary PC tasks are discovered in persistent ten-item pages and active loaded
+  tasks are also read. Native children remain parent-owned and are explicitly
+  reported as `native-child-owner-route`; this utility cannot resume them through
+  the ordinary AppServer route. Missing metadata fails closed and is reported.
+  No complete-inventory or live-failure recovery claim follows from registration
+  or a successful cycle with zero eligible failures.
+- Same-thread recovery preserves model, effort, workspace, role, approval and
+  sandbox by supplying no settings overrides. Rate eligibility uses the actual
+  top-level `ordinaryUsageAllowed` flag; account and credit values are not logged.
+- The utility records an active goal identity and exact inProgress turn. The PO
+  authorizes restoring that same goal only when the observed turn subsequently
+  has a typed terminal system failure and becomes blocked, with no intervening
+  goal/turn change. Initial blocked goals are ambiguous and remain untouched.
+  This is temporal evidence: a simultaneous manual block cannot be distinguished
+  by the current API, which has no causal-reason field. Paused/completed/changed
+  objectives and budgets remain protected; usage counters are never reset.
+- An exclusive durable episode journal precedes resume/goal/start. A timeout or
+  crash leaves the episode claimed and cannot trigger a blind resend. A genuinely
+  new failed turn can be retried after backoff. Deferred inventory is persisted
+  so scan/time budgets do not permanently starve older tasks.
+- Episode identity is the fixed local domain plus exact task and failed-turn IDs;
+  changed error messages/details never create a new restart key. Historical
+  error-dependent journals remain immutable and fence the same thread/turn via
+  a forward index. Their UNKNOWN/accepted/aborted claims are not cleared.
+- Run `control/Register-SystemErrorRecovery.ps1 -Mode Status` for scheduler
+  readback; `-Mode Stop` disables both config and task, and `-Mode Enable` restores
+  them. The Node entrypoint also accepts `status`, `stop`, `enable`, `dry-run` and
+  `run`. Config and sanitized cycle/episode state are under
+  `state/global-system-error-recovery-20261013/`.
+- Add intentional design waits to `config.json.excludedThreadIds` before leaving
+  them unattended if their later system failures must not be resumed. Stop never
+  kills an existing task/turn; the worker rereads config before each mutation.
+- PID reuse or an unreadable lock fails closed. A repair lock left by a terminated
+  repair process needs an ownership check and operator cleanup; never delete a
+  journal to force a resend. No recovery mechanism adds Product scope, authority,
+  account spend, billing, service restart, or external-operation permission.

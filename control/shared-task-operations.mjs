@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { AppServerClient } from '../discord-bridge/src/app-server-client.mjs';
 import { validateLoopbackEndpoint } from './codex-shared.mjs';
@@ -13,9 +14,12 @@ export function readJson(file) {
 }
 
 export function saveJson(file, value) {
-  const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n');
-  fs.renameSync(temporary, file);
+  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, 'wx');
+  try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  try { fs.renameSync(temporary, file); }
+  finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
 }
 
 export function deliveryFor(threadId, activeTurn, message) {
@@ -25,16 +29,16 @@ export function deliveryFor(threadId, activeTurn, message) {
     : ['turn/start', { threadId, input }];
 }
 
-export async function connectCanonical() {
+export async function connectCanonical({ requestTimeoutMs = 300_000 } = {}) {
   const state = readJson(path.join(repository, 'launcher/state/current.json'));
   const endpoint = validateLoopbackEndpoint(state.websocketUrl);
   if (!state.desktopConnectionVerified) throw new Error('Canonical Desktop connection is not verified.');
-  const client = new AppServerClient(endpoint);
+  const client = new AppServerClient(endpoint, { requestTimeoutMs });
   try { await client.connect(); return client; }
   catch (error) { client.close(); throw error; }
 }
 
-async function listPages(client, method, params) {
+export async function listPages(client, method, params) {
   const rows = [], seen = new Set();
   let cursor;
   do {
