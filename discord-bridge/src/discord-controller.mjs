@@ -7888,7 +7888,7 @@ export class DiscordController {
     if (partIndex !== null) view.reasoningPartIndex = partIndex;
     view.reasoning += params.delta ?? '';
     if (view.reasoning.length > 12_000) view.reasoning = view.reasoning.slice(-12_000);
-    recordLiveActivity(view, params.itemId, `💭 ${view.reasoning.replaceAll('**', '')}`);
+    recordLiveActivity(view, params.itemId, liveActivityItemText({ type: 'reasoning', summary: [view.reasoning] }));
     view.currentItem = 'reasoning';
     this.#scheduleTurnRender(binding, view);
   }

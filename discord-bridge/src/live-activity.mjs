@@ -50,10 +50,24 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS, { contin
 }
 
 export function liveActivityWindow(entries = []) {
-  const rows = entries.flatMap(entry => wrapActivityRows(entry.text ?? entry, LIVE_ACTIVITY_COLUMNS,
-    { continuationPrefix: '  ↳ ' }))
-    .slice(-LIVE_ACTIVITY_ROWS);
-  if (!rows.length) rows.push('⏳');
+  const rows = [];
+  for (const entry of [...entries].reverse()) {
+    const remaining = LIVE_ACTIVITY_ROWS - rows.length;
+    if (!remaining) break;
+    const wrapped = wrapActivityRows(entry.text ?? entry, LIVE_ACTIVITY_COLUMNS,
+      { continuationPrefix: '  ↳ ' });
+    if (wrapped.length > remaining) {
+      // Never show an orphaned tail: retain this entry's command/action header.
+      // One remaining row cannot show both the header and a clipping marker;
+      // omit that older entry rather than make a partial command look complete.
+      if (remaining === 1) break;
+      const tail = wrapped.slice(-(remaining - 1));
+      // Same-width prefix, so the row/field budgets and graphemes stay intact.
+      tail[0] = tail[0].replace(/^  ↳ /u, '  … ');
+      rows.unshift(wrapped[0], ...tail);
+    } else rows.unshift(...wrapped);
+  }
+  if (!rows.length) rows.push('実行中');
   while (rows.length < LIVE_ACTIVITY_ROWS) rows.push(emptyRow);
   return `\`\`\`text\n${rows.join('\n')}\n\`\`\``;
 }
@@ -91,16 +105,16 @@ export function liveActivityItemText(item, completed = false) {
   const failed = item.status === 'failed' || item.status === 'declined' || item.success === false
     || (typeof item.exitCode === 'number' && item.exitCode !== 0);
   const done = completed || item.status === 'completed';
-  const marker = failed ? '🔴' : done ? '✅' : '⏳';
+  const marker = item.status === 'declined' ? '拒否' : failed ? '失敗' : done ? '完了' : '実行中';
   switch (item.type) {
     case 'reasoning': {
       const summary = publicReasoningText(item.summary).replaceAll('**', '');
-      return summary ? `💭 ${summary}` : '';
+      return summary ? `検討 ${summary}` : '';
     }
     case 'commandExecution':
       return `${marker} ${item.command ?? ''}${done && item.exitCode != null ? `\nexit ${item.exitCode}` : ''}`;
     case 'fileChange':
-      return `${marker} ✏️ ${(item.changes ?? []).map(change => change.path).filter(Boolean).join('\n')}`;
+      return `${marker} ファイル変更 ${(item.changes ?? []).map(change => change.path).filter(Boolean).join('\n')}`;
     case 'mcpToolCall':
     case 'dynamicToolCall': {
       const scope = item.server ?? item.namespace;
@@ -110,23 +124,23 @@ export function liveActivityItemText(item, completed = false) {
         const title = nodeReplActivityTitle(item);
         return title ? `${marker} ${title}` : '';
       }
-      return `${marker} ${[scope, item.tool].filter(Boolean).join('/')}`;
+      return `${marker} ツール ${[scope, item.tool].filter(Boolean).join('/')}`;
     }
     case 'collabAgentToolCall':
     case 'collabToolCall':
-      return `${marker} 👥 ${item.tool ?? ''}`;
+      return `${marker} 子タスク ${item.tool ?? ''}`;
     case 'subAgentActivity':
-      return `${marker} 👥 ${item.agentPath ?? ''} ${item.kind ?? ''}`;
+      return `${marker} 子タスク ${item.agentPath ?? ''} ${item.kind ?? ''}`;
     case 'webSearch':
-      return `${marker} 🔎 ${item.query ?? item.action?.query ?? item.action?.url ?? ''}`;
+      return `${marker} 検索 ${item.query ?? item.action?.query ?? item.action?.url ?? ''}`;
     case 'imageView':
-      return `${marker} 🖼️ ${item.path ?? ''}`;
+      return `${marker} 画像確認 ${item.path ?? ''}`;
     case 'imageGeneration':
-      return `${marker} 🖼️`;
+      return `${marker} 画像生成`;
     case 'sleep':
-      return `${marker} ${Math.round((item.durationMs ?? 0) / 1000)}s`;
+      return `${marker} 待機 ${Math.round((item.durationMs ?? 0) / 1000)}s`;
     case 'contextCompaction':
-      return `${marker} 🗜️`;
+      return `${marker} コンテキスト整理`;
     default:
       return '';
   }

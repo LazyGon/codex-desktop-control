@@ -107,8 +107,12 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
 - Shows current commentary, plans, token usage, and a five-row `進行状況`
   code block on the latest card. Public reasoning summaries and tool/command
   activity update in place; long entries wrap by display width and consume
-  multiple rows, while short entries share the same scrolling window. Entry
-  icons mark new work; indented `↳` prefixes mark wrapped/continuing rows.
+  multiple rows, while short entries share the same scrolling window. Each
+  visible entry retains its first command/action row; clipped entries show
+  that header plus their latest rows, with `…` marking omitted middle rows.
+  Indented `↳` prefixes still mark ordinary wrapped/continuing rows. Short
+  text labels identify status (`実行中`, `完了`, `失敗`, `拒否`) and work type
+  (such as `検討`, `検索`, or `ファイル変更`), instead of unexplained emojis.
   Generic `node_repl/js` rows are omitted;
   this known tool's public `title` caption is displayed when provided, never its
   code or other arguments. Empty

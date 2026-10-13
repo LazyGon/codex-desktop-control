@@ -73,6 +73,7 @@ test('live public deltas and commands update the same five-row field before comp
   await f.notify('item/reasoning/summaryTextDelta', { itemId: 'summary', summaryIndex: 0, delta: 'Checking the layout' });
   await f.flush();
   assert.match(f.activity(), /Checking the layout/);
+  assert.match(f.activity(), /検討 Checking the layout/);
   await f.notify('item/reasoning/textDelta', { itemId: 'raw', delta: 'PRIVATE_REASONING' });
   await f.notify('item/started', { item: { id: 'raw', type: 'reasoning', summary: [], content: ['PRIVATE_REASONING'] } });
   await f.notify('item/started', { item: { id: 'command-1', type: 'commandExecution', command: 'npm test', status: 'inProgress' } });
@@ -88,7 +89,24 @@ test('live public deltas and commands update the same five-row field before comp
   await f.flush();
   const rows = f.activity().split('\n').slice(1, -1);
   assert.equal(rows.length, 5);
+  assert.match(rows[0], /^実行中 node test\.mjs/);
+  assert.match(rows[1], /^  … /);
   assert.ok(rows.every(row => row.includes('日本語') || row.includes('引数')));
+  await f.notify('item/completed', { item: { id: 'long-command', type: 'commandExecution',
+    command: 'node test.mjs ' + '日本語引数 '.repeat(30), status: 'completed', exitCode: 1 } });
+  await f.flush();
+  const completed = f.activity().split('\n').slice(1, -1);
+  assert.match(completed[0], /^失敗 node test\.mjs/);
+  assert.equal(completed.at(-1), '  ↳ exit 1');
+  assert.equal(f.activity().includes('🔴'), false);
+  await f.notify('item/started', { item: { id: 'generic', type: 'mcpToolCall', server: 'node_repl', tool: 'js' } });
+  await f.notify('item/started', { item: { id: 'caption', type: 'mcpToolCall', server: 'node_repl', tool: 'js',
+    arguments: { title: '検証結果を確認', code: 'PRIVATE_CODE' } } });
+  await f.flush();
+  assert.match(f.activity(), /実行中 検証結果を確認/);
+  assert.match(f.activity(), /失敗 node test\.mjs/);
+  assert.equal(f.activity().includes('node_repl'), false);
+  assert.equal(f.activity().includes('PRIVATE_CODE'), false);
 });
 
 test('a delta arriving during a Discord edit renders again without waiting for the elapsed timer', { timeout: 5000 }, async context => {
