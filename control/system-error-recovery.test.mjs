@@ -63,7 +63,9 @@ test('actual capacity fixture is retryable only when latest terminal and ordinar
   assert.equal(eligibility(thread('t'), [{ id: 'done', status: 'completed' }, failed('f')], null), 'no-latest-terminal-error');
   assert.equal(eligibility(thread('t'), [{ id: 'stop', status: 'interrupted', error: null }], null), 'no-latest-terminal-error');
   assert.equal(eligibility({ ...thread('t'), canAcceptDirectInput: null }, [failed('f')], null), 'not-confirmed-direct-input');
-  assert.equal(eligibility({ ...thread('t'), parentThreadId: 'parent' }, [failed('f')], null), 'native-child-owner-route');
+  assert.equal(eligibility({ ...thread('t'), parentThreadId: 'parent' }, [failed('f')], null), 'eligible');
+  assert.equal(eligibility({ ...thread('t'), parentThreadId: 'parent', canAcceptDirectInput: false,
+    source: { subAgent: { thread_spawn: { parent_thread_id: 'parent' } } } }, [failed('f')], null), 'native-child-owner-route');
   assert.equal(eligibility(thread('t'), [failed('f')], null, ['t']), 'excluded');
 });
 test('intentional/protected goal states and initial blocked do not resume', () => {

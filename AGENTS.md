@@ -195,3 +195,38 @@ decisions; the verification owner retains ordinary Product proof.
   repair process needs an ownership check and operator cleanup; never delete a
   journal to force a resend. No recovery mechanism adds Product scope, authority,
   account spend, billing, service restart, or external-operation permission.
+
+### Parent notification successor (2026-10-13 direct PO)
+
+- Native child terminal transient failures notify their genuine parent once per
+  failed child turn. Parent identity comes from canonical `parentThreadId` and
+  `source.subAgent.thread_spawn.parent_thread_id` (or the existing camel-case
+  codec); conflicting/self/missing relationships never select a manager fallback.
+  The notice asks the parent to reread the child and resume that same owner with
+  supported collaboration. The utility never directly resumes a native child.
+- Native metadata/turn reads are separated from its unsupported goal API. Old
+  failed turns superseded by completed/inProgress/interrupted turns do not notify.
+  The existing native own-turn timestamp selector excludes inherited pre-birth
+  parent turns. An unknown birth cut fails closed rather than inventing a failure.
+- An accepted task recovery or same-goal restoration also notifies a genuine
+  parent when defined. Root ordinary tasks have no invented notification target.
+- Parent paused/completed/blocked/budget-limited/excluded states never receive an
+  automatic start. Active parents get exact-turn `turn/steer`; idle parents can
+  get same-thread `turn/start` only with an existing active, unexhausted goal.
+  Parent settings are inherited; no parent goal is restored merely to notify.
+- `parent-notices/` is a separate durable episode journal. A pending protected
+  parent can be reconsidered after a genuine state change; dispatching/accepted/
+  UNKNOWN notices are never resent. Notice failure never repeats child recovery.
+  Config stop/exclusions and cycle/start budgets apply to notification delivery.
+- Pending notices use a persisted rotating cursor. One default notice slot is
+  reserved for new failures; rediscovered queued/claimed episodes consume no new
+  slot. At a one-notice limit, pending and new lanes alternate. Unused slots drain
+  the remaining rotated queue after task scanning.
+- Accepted recovery and goal-restoration evidence is durable before later reads
+  and is the source for reconstructing missing pending recovery notices after a
+  crash. Enqueue precedes notification budget checks; a newer/active child does
+  not lose its already-confirmed recovery notification or repeat recovery.
+- A genuine parent relationship alone does not make a task native. Explicit
+  native source/subagent metadata or denied direct input selects the parent-owned
+  route. Confirmed ordinary direct-input tasks with a genuine parent keep ordinary
+  same-thread recovery and subsequently notify that parent.
