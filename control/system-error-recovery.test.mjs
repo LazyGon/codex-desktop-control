@@ -151,6 +151,94 @@ test('observed active exact inProgress turn permits bounded same-goal recovery a
   assert.equal(goalIdentity(r.goal), identity); assert.equal(r.goal.tokensUsed, used);
   assert.equal([...st.records.values()][0].recoveryObservation.turnId, 'failed-task');
 });
+
+test('goal auto-start visible only at pre-start retains exact active evidence for a fast next failure', async () => {
+  const c = mocked({ initialGoal: goal('active'), onRead(r, n) {
+    // The first post-goal read is stale; the pre-start snapshot first sees auto-start.
+    if (n === 5) {
+      r.turns = [{ id: 'goal-auto-start', status: 'inProgress', startedAt: 210, error: null }, ...r.turns];
+      r.thread.status = { type: 'active' };
+    }
+  } }), s = { threads: {} }, st = memoryStore(), r = c.records.get('task');
+  r.turns[0].status = 'inProgress'; r.turns[0].error = null; r.thread.status = { type: 'active' };
+  await runCycle(c, defaultConfig, s, st, () => 150000);
+  r.turns = [failed('failed-task')]; r.thread.status = { type: 'idle' }; r.goal = goal('blocked');
+  await runCycle(c, defaultConfig, s, st, () => 210000);
+  assert.equal(c.calls.filter(x => x.method === 'thread/goal/set').length, 1);
+  assert.equal(c.calls.filter(x => x.method === 'turn/start').length, 0);
+  assert.equal(st.state.threads.task.activeGoalObservation.turnId, 'goal-auto-start');
+  assert.equal(st.state.threads.task.activeGoalObservation.turnStatus, 'inProgress');
+  assert.equal(st.state.threads.task.activeGoalObservation.goalIdentity, goalIdentity(r.goal));
+  assert.equal(st.state.threads.task.latestTurnId, 'goal-auto-start');
+  assert.equal(st.state.threads.task.latestTurnStatus, 'inProgress');
+  assert.equal(st.state.threads.task.recoveryObservation, undefined);
+  assert.equal(st.state.threads.task.count, 1); assert.equal(st.state.threads.task.nextEligibleAt, 270000);
+  r.turns = [{ ...failed('goal-auto-start'), startedAt: 210, completedAt: 248 }];
+  r.thread.status = { type: 'idle' }; r.goal.status = 'blocked'; r.goal.updatedAt = 248;
+  assert.equal(eligibility(r.thread, r.turns, r.goal, [], st.state.threads.task), 'eligible');
+  const early = await runCycle(c, defaultConfig, s, st, () => 248000);
+  assert.equal(early.results[0].action, 'backoff'); assert.equal(st.records.size, 1);
+  const later = await runCycle(c, defaultConfig, s, st, () => 270000);
+  assert.equal(later.resumed, 1); assert.equal(st.records.size, 2);
+  assert.equal([...st.records.values()][1].recoveryObservation.turnId, 'goal-auto-start');
+  assert.equal(s.threads.task.count, 2); assert.equal(s.threads.task.nextEligibleAt, 390000);
+});
+
+test('accepted recovery readback saves the new active turn without resetting retry count or backoff', async () => {
+  const c = mocked({ initialGoal: goal('active') }), s = { threads: {} }, st = memoryStore(), r = c.records.get('task');
+  const after = await runCycle(c, defaultConfig, s, st, () => 210000);
+  assert.equal(after.resumed, 1); assert.equal(after.results[0].readback, 'verified');
+  assert.equal(st.state.threads.task.activeGoalObservation.turnId, 'accepted');
+  assert.equal(st.state.threads.task.activeGoalObservation.turnStatus, 'inProgress');
+  assert.equal(st.state.threads.task.latestTurnId, 'accepted');
+  assert.equal(st.state.threads.task.latestTurnStatus, 'inProgress');
+  assert.equal(st.state.threads.task.goalStatus, 'active');
+  assert.equal(st.state.threads.task.count, 1); assert.equal(st.state.threads.task.nextEligibleAt, 270000);
+  r.turns = [{ ...failed('accepted'), startedAt: 210, completedAt: 248 }];
+  r.thread.status = { type: 'idle' }; r.goal.status = 'blocked'; r.goal.updatedAt = 248;
+  const early = await runCycle(c, defaultConfig, s, st, () => 248000);
+  assert.equal(early.results[0].action, 'backoff'); assert.equal(st.records.size, 1);
+  assert.equal(c.calls.filter(x => x.method === 'turn/start').length, 1);
+  assert.equal(s.threads.task.count, 1); assert.equal(s.threads.task.nextEligibleAt, 270000);
+});
+
+test('pause, changed objective and exhausted budget remain protected during goal auto-start race', async () => {
+  for (const [label, change, expected] of [
+    ['pause', r => r.goal.status = 'paused', 'protected-goal'],
+    ['objective', r => r.goal.objective = 'Different objective', 'blocked-cause-unproven'],
+    ['budget', r => r.goal.tokensUsed = r.goal.tokenBudget, 'goal-budget-exhausted-or-unconfirmed'],
+  ]) {
+    const c = mocked({ initialGoal: goal('active'), onRead(r, n) {
+      if (n === 5) {
+        r.turns = [{ id: 'protected-auto-start', status: 'inProgress', startedAt: 210, error: null }, ...r.turns];
+        r.thread.status = { type: 'active' }; change(r);
+      }
+    } }), s = { threads: {} }, st = memoryStore(), r = c.records.get('task');
+    r.turns[0].status = 'inProgress'; r.turns[0].error = null; r.thread.status = { type: 'active' };
+    await runCycle(c, defaultConfig, s, st, () => 150000);
+    r.turns = [failed('failed-task')]; r.thread.status = { type: 'idle' }; r.goal = goal('blocked');
+    await runCycle(c, defaultConfig, s, st, () => 210000);
+    assert.equal(c.calls.filter(x => x.method === 'turn/start').length, 0, label);
+    if (label !== 'budget') assert.notEqual(st.state.threads.task.activeGoalObservation?.turnId, 'protected-auto-start', label);
+    r.turns = [{ ...failed('protected-auto-start'), startedAt: 210, completedAt: 248 }];
+    r.thread.status = { type: 'idle' }; if (label !== 'pause') r.goal.status = 'blocked'; r.goal.updatedAt = 248;
+    const later = await runCycle(c, defaultConfig, s, st, () => 270000);
+    assert.equal(later.results[0].action, expected, label);
+    assert.equal(st.records.size, 1, label);
+    assert.equal(c.calls.filter(x => x.method === 'thread/goal/set').length, 1, label);
+    assert.equal(c.calls.filter(x => x.method === 'turn/start').length, 0, label);
+  }
+});
+
+test('accepted turn identity alone with unavailable readback never fabricates an inProgress observation', async () => {
+  const c = mocked({ initialGoal: goal('active'), afterReadError: true }), s = { threads: {} }, st = memoryStore();
+  const after = await runCycle(c, defaultConfig, s, st, () => 210000);
+  assert.equal(after.resumed, 1); assert.equal(after.results[0].readback, 'unavailable');
+  assert.notEqual(st.state.threads.task.activeGoalObservation?.turnId, 'accepted');
+  const r = c.records.get('task'); r.thread.status = { type: 'idle' };
+  assert.equal(eligibility(r.thread, [{ ...failed('accepted'), completedAt: 248 }],
+    { ...r.goal, status: 'blocked', updatedAt: 248 }, [], st.state.threads.task), 'blocked-cause-unproven');
+});
 test('new goal/objective, later goal edit or different failure turn cannot reuse active observation', async () => {
   for (const change of [r => r.goal.objective = 'Different', r => r.goal.updatedAt = 201, r => r.turns[0].id = 'new-turn']) {
     const c = mocked({ initialGoal: goal('active') }), s = { threads: {} }, st = memoryStore(), r = c.records.get('task');

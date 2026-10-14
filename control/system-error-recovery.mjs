@@ -256,10 +256,23 @@ export function validateConfig(c) {
 function observation(thread, turns, goal, time, old = {}) {
   const next = { ...old, latestTurnId: turns[0]?.id ?? null, latestTurnStatus: turns[0]?.status ?? null,
     goalStatus: goal?.status ?? null, identityHash: hashIdentity(thread) };
-  if (goal?.status === 'active') next.activeGoalObservation = { goalIdentity: goalIdentity(goal),
-    goalUpdatedAt: goal.updatedAt ?? null, observedAt: time, turnId: turns[0]?.id ?? null, turnStatus: turns[0]?.status ?? null };
+  if (goal?.status === 'active' && turns[0]?.status === 'inProgress') {
+    next.activeGoalObservation = { goalIdentity: goalIdentity(goal),
+      goalUpdatedAt: goal.updatedAt ?? null, observedAt: time, turnId: turns[0].id, turnStatus: 'inProgress' };
+    // A confirmed running turn replaces the previous failure's causal tuple.
+    delete next.recoveryObservation;
+  }
   if (turns[0]?.status === 'completed') { next.count = 0; next.nextEligibleAt = 0; }
   return next;
+}
+
+
+function rememberActiveSnapshot(snapshot, state, store, time) {
+  if (snapshot.goal?.status !== 'active' || snapshot.turns[0]?.status !== 'inProgress') return false;
+  const id = snapshot.thread.id;
+  state.threads[id] = observation(snapshot.thread, snapshot.turns, snapshot.goal, time, state.threads[id]);
+  store.saveState(state);
+  return true;
 }
 
 // Only terminal failure episodes qualify. A read/connection failure is never a task failure.
@@ -420,6 +433,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
           if (fresh.turns.some(t => t.status === 'inProgress') || fresh.thread.status?.type === 'active') {
             attempt.phase = 'active-after-goal-resume'; store.update(key, attempt);
             const active = fresh.turns.find(t => t.status === 'inProgress');
+            if (active) rememberActiveSnapshot({ ...fresh, turns: [active] }, state, store, now());
             attempt.observedActiveTurnId = active?.id ?? null;
             store.update(key, attempt);
             if (active) report.resumed++; result.action = attempt.phase; continue;
@@ -427,6 +441,15 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         }
         // Recheck races and intentional stops after goal restoration.
         fresh = await snapshot(client, id, config.requestTimeoutMs);
+        if (sameIdentity(s.thread, fresh.thread) && goalIdentity(fresh.goal) === attempt.goalIdentity
+            && rememberActiveSnapshot(fresh, state, store, now())) {
+          attempt.phase = 'active-before-start';
+          attempt.observedActiveTurnId = fresh.turns[0].id;
+          store.update(key, attempt);
+          if (attempt.goalRestored) report.resumed++;
+          result.action = attempt.phase;
+          continue;
+        }
         if (eligibility(fresh.thread, fresh.turns, fresh.goal, config.excludedThreadIds, recoveryPrior) !== 'eligible'
             || episodeKey(id, fresh.turns[0]) !== key || !sameIdentity(s.thread, fresh.thread)
             || goalIdentity(fresh.goal) !== attempt.goalIdentity) {
@@ -443,8 +466,15 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         attempt.phase = 'accepted'; attempt.acceptedTurnId = response.turn.id;
         store.update(key, attempt); report.resumed++; result.action = 'accepted';
         queueRecoveryNotice(store, attempt, now, dryRun);
+        // An ID alone is not running-state evidence. Preserve a typed running ack
+        // only with the active same-goal preflight immediately preceding it.
+        if (response.turn.status === 'inProgress' && fresh.goal?.status === 'active') {
+          rememberActiveSnapshot({ thread: fresh.thread, turns: [response.turn], goal: fresh.goal }, state, store, now());
+        }
         try {
           const after = await snapshot(client, id, config.requestTimeoutMs);
+          if (sameIdentity(s.thread, after.thread) && goalIdentity(after.goal) === attempt.goalIdentity
+              && after.turns[0]?.id === response.turn.id) rememberActiveSnapshot(after, state, store, now());
           attempt.readback = sameIdentity(s.thread, after.thread) && goalIdentity(after.goal) === attempt.goalIdentity
             && after.turns.some(t => t.id === response.turn.id) ? 'verified' : 'changed-or-not-visible';
         } catch { attempt.readback = 'unavailable'; }

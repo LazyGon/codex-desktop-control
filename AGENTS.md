@@ -179,6 +179,12 @@ decisions; the verification owner retains ordinary Product proof.
   This is temporal evidence: a simultaneous manual block cannot be distinguished
   by the current API, which has no causal-reason field. Paused/completed/changed
   objectives and budgets remain protected; usage counters are never reset.
+- A goal restoration may automatically start a new turn before an explicit
+  `turn/start`. Confirmed active-goal/inProgress snapshots from that race and
+  accepted-start readback are saved immediately with the exact new turn. A
+  typed inProgress start receipt may also preserve the active preflight tuple;
+  an accepted ID alone never creates running-state evidence. This prevents a
+  rapid capacity failure between minute polls from losing its causal history.
 - An exclusive durable episode journal precedes resume/goal/start. A timeout or
   crash leaves the episode claimed and cannot trigger a blind resend. A genuinely
   new failed turn can be retried after backoff. Deferred inventory is persisted
