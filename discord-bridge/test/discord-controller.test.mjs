@@ -39,6 +39,7 @@ import {
   subagentOwnTurns,
   subagentScanPlan,
   transcriptReadWindowOptions,
+  taskMirrorOrder,
 } from '../src/discord-controller.mjs';
 import {
   CONTROL_PANEL_COLOR,
@@ -50,6 +51,20 @@ import { projectCategoryName } from '../src/util.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
 import { DeliveryOutbox } from '../src/delivery-outbox.mjs';
+
+test('task mirror discovery precedes existing mirror refresh without reordering either group', () => {
+  const threads = ['existing-1','new-1','existing-2','missing-channel','hidden','new-2'].map(id => ({id}));
+  const bindings = [
+    {threadId:'existing-1',channelId:'channel-1'},
+    {threadId:'existing-2',channelId:'channel-2'},
+    {threadId:'missing-channel',channelId:null},
+    {threadId:'hidden',channelId:'hidden-channel',hidden:true},
+  ];
+  assert.deepEqual(taskMirrorOrder(threads, bindings).map(thread=>thread.id),
+    ['new-1','missing-channel','hidden','new-2','existing-1','existing-2']);
+  assert.deepEqual(threads.map(thread=>thread.id),
+    ['existing-1','new-1','existing-2','missing-channel','hidden','new-2']);
+});
 
 test('managed project category cleanup removes empty overflow categories but preserves occupied ones', () => {
   const category = (id, children) => ({
@@ -1783,6 +1798,71 @@ test('reconnect task discovery waits until subscription restoration is ready', a
   }
   assert.equal(projectListCalls, 1);
   await controller.stop();
+});
+
+test('task sync status identifies the exact pending read without exposing task contents', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-sync-progress-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const desktopStatePath = path.join(directory, 'desktop.json');
+  fs.writeFileSync(desktopStatePath, '{}');
+  const stateStore = new StateStore(directory, 'guild-1');
+  stateStore.setInfrastructure({ controlChannelId: 'control-channel' });
+  const client = new EventEmitter();
+  client.user = { id: 'bot-user' };
+  const codex = new EventEmitter();
+  codex.connected = true;
+  codex.listAllProjects = async () => [{ id: 'project-1', name: 'Example', roots: [] }];
+  const globalRead = Promise.withResolvers();
+  const projectRead = Promise.withResolvers();
+  const archiveRead = Promise.withResolvers();
+  const globalGate = Promise.withResolvers();
+  const projectGate = Promise.withResolvers();
+  const archiveGate = Promise.withResolvers();
+  codex.listAllThreads = async ({ archived, projectId }) => {
+    if (archived) { archiveRead.resolve(); return archiveGate.promise; }
+    if (projectId) { projectRead.resolve(); return projectGate.promise; }
+    globalRead.resolve();
+    return globalGate.promise;
+  };
+  const controller = new DiscordController({
+    client, codex, stateStore,
+    config: { guildId: 'guild-1', authorizedUserIds: ['user-1'], desktopGlobalStatePath: desktopStatePath },
+    logDir: directory,
+  });
+  controller.attach();
+  assert.deepEqual(controller.taskSyncStatus(), { phase: 'idle', running: false });
+  const replied = Promise.withResolvers();
+  client.emit('interactionCreate', {
+    guildId: 'guild-1', channelId: 'control-channel', user: { id: 'user-1' },
+    customId: 'cx:ui:control:sync', deferred: false, replied: false,
+    isAutocomplete: () => false, isChatInputCommand: () => false,
+    isStringSelectMenu: () => false, isButton: () => true,
+    isModalSubmit: () => false, isRepliable: () => true,
+    deferReply: async function () { this.deferred = true; },
+    editReply: async () => replied.resolve(),
+  });
+  await globalRead.promise;
+  const status = controller.taskSyncStatus();
+  assert.equal(status.phase, 'globalThreadList');
+  assert.equal(status.archived, false);
+  assert.equal(status.running, true);
+  assert.ok(status.startedAt && status.updatedAt);
+  status.phase = 'modified-copy';
+  assert.equal(controller.taskSyncStatus().phase, 'globalThreadList');
+  globalGate.resolve([]);
+  await projectRead.promise;
+  assert.equal(controller.taskSyncStatus().phase, 'projectThreadList');
+  assert.equal(controller.taskSyncStatus().projectId, 'project-1');
+  projectGate.resolve([]);
+  await archiveRead.promise;
+  assert.equal(controller.taskSyncStatus().archived, true);
+  assert.equal(controller.taskSyncStatus().projectId, undefined);
+  const stopping = controller.stop();
+  archiveGate.resolve([]);
+  assert.equal((await stopping).timedOut, false);
+  await replied.promise;
+  assert.equal(controller.taskSyncStatus().phase, 'stopped');
+  assert.equal(controller.taskSyncStatus().running, false);
 });
 
 test('controller shutdown clears polling and recovery timers before Discord closes', async (context) => {

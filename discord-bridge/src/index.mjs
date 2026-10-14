@@ -18,6 +18,7 @@ import { isTransientCommunicationError } from './communication-error.mjs';
 import { DiscordController } from './discord-controller.mjs';
 import { DiscordGatewayHealth } from './discord-gateway-health.mjs';
 import { createDiscordRestAgent, discordRestOptions } from './discord-network.mjs';
+import { attachChannelCreateDiagnostics } from './discord-rest-diagnostics.mjs';
 import { StateStore } from './state-store.mjs';
 import { TaskListFederation } from './task-list-federation.mjs';
 import { executeTaskOperation } from './task-peer-control.mjs';
@@ -77,6 +78,8 @@ const client = new Client({
   allowedMentions: { parse: [] },
   rest: discordRestOptions(config, discordRestAgent),
 });
+const channelCreateRest = attachChannelCreateDiagnostics(client.rest, config.guildId,
+  (event, metadata) => appendJsonLine(processLog, event, metadata));
 const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
 const controller = new DiscordController({
   client,
@@ -144,6 +147,8 @@ function writeRuntime(phase, extra = {}) {
     discordUser: client.user?.tag ?? null,
     discordGateway,
     codex: codex.status(),
+    taskSync: controller.taskSyncStatus(),
+    channelCreateRest: channelCreateRest.snapshot(),
     taskControl: taskListFederation ? {
       enabled: config.taskControlEnabled,
       ready: taskListFederation.controlReady,

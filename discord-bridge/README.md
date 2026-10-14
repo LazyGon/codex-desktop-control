@@ -479,6 +479,42 @@ manual startup. `Start-DiscordBridge.ps1` is the host's internal child-process
 entry point and is retained for diagnostics.
 `Stop-DiscordBridge.ps1` writes a stop request and waits for a clean shutdown.
 It deliberately does not use `Stop-Process`.
+`-NoWait` only writes that same graceful request; its caller must separately
+verify the original process identities have exited before starting a successor.
+
+### Missing task channels
+
+New or unbound task mirrors are synchronized before existing mirrors. Inspect
+`data/runtime.json` for `taskSync.phase` and `taskSync.pendingThreads` to locate
+the exact pending operation. Bridge/Gateway readiness alone does not establish
+that a task has its channel or control card.
+
+`channelCreateRest` records only channel-create HTTP status, numeric rate-limit
+timing and safe transport error codes. It never records request bodies, tokens,
+URLs or conversation text. A `rate-limited` entry can legitimately leave the
+same create pending until Discord's actual Retry-After expires; restarting or
+issuing another create is not a remedy. Limits are not hardcoded. See the
+[official rate-limit specification](https://docs.discord.com/developers/topics/rate-limits).
+
+Channel creation is journaled under `data/channel-create-journal/` before the
+request is sent. Concurrent callers join one operation. Network errors and 5xx
+responses do not automatically replay an ambiguous write; its journal remains
+fenced across restarts. A retained crash lock also fails closed. Preserve the
+current record and immutable event history rather than deleting either to retry.
+
+For an unresolved create, first obtain a fresh authoritative guild channel list.
+Reconcile an existing exact task-topic channel through ordinary synchronization
+without creating another one. If absent, a forward recovery decision requires
+the original actor's confirmed exit, explicit recovery authorization, and hashes
+of the closed-actor and channel-read evidence via
+`TaskChannelCreateJournal.reconcileAbsent`. This permits one new normal-sync
+attempt, but does not prove that the old request never executed. Do not apply
+absence recovery to a still-running rate-limit wait.
+
+Verify the actual channel's exact task topic, project category, inherited private
+permissions, local binding and bot-owned control card before reporting recovery.
+Task discovery does not authorize creating a replacement Codex task or starting
+its stopped turn.
 
 Logs are append-only JSONL under `logs/`. Runtime state and task/channel
 bindings are atomically persisted under `data/`. The latest accepted text-inbox

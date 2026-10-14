@@ -102,6 +102,7 @@ import {
   splitArchiveManifest,
 } from './split-archive.mjs';
 import { LatestUpdateQueue } from './latest-update-queue.mjs';
+import { TaskChannelCreateJournal } from './task-channel-create-journal.mjs';
 import { codexRetryStatusText } from './communication-error.mjs';
 import {
   accountUsageEmbed,
@@ -544,6 +545,15 @@ export function projectCategoryCollisionCandidates({
   ];
 }
 
+export function taskMirrorOrder(threads, bindings = []) {
+  const mirrored = new Set(bindings.filter((binding) => binding.channelId && !binding.hidden)
+    .map((binding) => binding.threadId));
+  return [
+    ...threads.filter((thread) => !mirrored.has(thread.id)),
+    ...threads.filter((thread) => mirrored.has(thread.id)),
+  ];
+}
+
 export function projectVisibilityCatalog({
   projectCategories = [],
   hiddenProjects = [],
@@ -717,6 +727,7 @@ export class DiscordController {
     incomingAttachmentStore = null,
     deliveryOutbox = null,
     deliveryOutboxDirectory = path.join(logDir, 'delivery-outbox'),
+    channelCreateJournal = null,
   }) {
     this.client = client;
     this.codex = codex;
@@ -753,6 +764,9 @@ export class DiscordController {
       deliveryOutboxDirectory,
     );
     this.deliveryOutbox.ensureDirectory();
+    this.channelCreateJournal = channelCreateJournal ?? new TaskChannelCreateJournal(
+      path.join(path.dirname(deliveryOutboxDirectory), 'channel-create-journal'),
+    );
     this.discordRecoveryCursorExistedAtConstruction = Boolean(this.deliveryOutbox.recoveryCursor());
     this.deliveryOutbox.initializeRecoveryCursor(discordSnowflakeAt());
     this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
@@ -767,6 +781,8 @@ export class DiscordController {
     this.taskSyncTimer = null;
     this.taskSyncInitialTimer = null;
     this.taskSyncPromise = null;
+    this.taskSyncState = { phase: 'idle' };
+    this.taskSyncPendingThreads = new Map();
     this.taskSyncAfterSubscriptionRestore = false;
     this.deliveryOutboxDrainPromise = null;
     this.discordRecoveryPromise = null;
@@ -4229,11 +4245,13 @@ export class DiscordController {
     return Boolean(thread?.id) && !thread.ephemeral && !thread.parentThreadId;
   }
 
-  async #listAllThreadsWithProjects(projectState, archived, search = null) {
+  async #listAllThreadsWithProjects(projectState, archived, search = null, onRead = null) {
     const nativeProjectIds = [...(projectState?.appServerProjects?.keys?.() ?? [])];
+    onRead?.({ phase: 'globalThreadList', archived });
     const globalThreads = await this.codex.listAllThreads({ archived, search });
     const projectResults = [];
     for (const projectId of nativeProjectIds) {
+      onRead?.({ phase: 'projectThreadList', archived, projectId });
       projectResults.push({
         projectId,
         threads: await this.codex.listAllThreads({ archived, projectId, search }),
@@ -4317,12 +4335,34 @@ export class DiscordController {
 
   async #syncAllTasks() {
     if (this.taskSyncPromise) return this.taskSyncPromise;
+    this.taskSyncState = { phase: 'starting', startedAt: new Date().toISOString() };
     this.taskSyncPromise = this.#performTaskSync();
     try {
-      return await this.taskSyncPromise;
+      const result = await this.taskSyncPromise;
+      this.#setTaskSyncPhase({ phase: this.stopping ? 'stopped' : 'completed' });
+      return result;
+    } catch (error) {
+      this.#setTaskSyncPhase({ phase: 'failed' });
+      throw error;
     } finally {
       this.taskSyncPromise = null;
     }
+  }
+
+  taskSyncStatus() {
+    return { ...this.taskSyncState, running: Boolean(this.taskSyncPromise),
+      ...(this.taskSyncPendingThreads.size ? {
+        pendingThreads: [...this.taskSyncPendingThreads].map(([threadId, phase]) => ({ threadId, phase })),
+      } : {}),
+    };
+  }
+
+  #setTaskSyncPhase(details) {
+    this.taskSyncState = {
+      startedAt: this.taskSyncState.startedAt,
+      ...details,
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   async #performTaskSync() {
@@ -4360,16 +4400,19 @@ export class DiscordController {
     let archivedThreads;
     let projectState;
     try {
+      this.#setTaskSyncPhase({ phase: 'pendingBindings', count: this.pendingChannelBindings.size });
       if (this.pendingChannelBindings.size > 0) {
         await Promise.allSettled([...this.pendingChannelBindings.values()]);
       }
       if (this.stopping) return result;
       markPhase('pendingBindings');
+      this.#setTaskSyncPhase({ phase: 'projectList' });
       projectState = await this.#loadProjectState();
       if (this.stopping) return result;
-      activeThreads = await this.#listAllThreadsWithProjects(projectState, false);
+      const onRead = (details) => this.#setTaskSyncPhase(details);
+      activeThreads = await this.#listAllThreadsWithProjects(projectState, false, null, onRead);
       if (this.stopping) return result;
-      archivedThreads = await this.#listAllThreadsWithProjects(projectState, true);
+      archivedThreads = await this.#listAllThreadsWithProjects(projectState, true, null, onRead);
     } finally {
       releaseTaskList();
       if (this.taskListBarrier === listBarrier) this.taskListBarrier = null;
@@ -4378,8 +4421,10 @@ export class DiscordController {
     markPhase('listThreads');
     const syncableActive = activeThreads.filter((thread) => this.#isSyncableThread(thread));
     const syncableArchived = archivedThreads.filter((thread) => this.#isSyncableThread(thread));
+    this.#setTaskSyncPhase({ phase: 'infrastructure' });
     const { guild, controlCategory, completions } = await this.infrastructureReady;
     if (this.stopping) return result;
+    this.#setTaskSyncPhase({ phase: 'guildChannels' });
     const channels = await guild.channels.fetch();
     if (this.stopping) return result;
     const context = {
@@ -4390,6 +4435,7 @@ export class DiscordController {
       projectState,
     };
     markPhase('discordSetup');
+    this.#setTaskSyncPhase({ phase: 'classification' });
     const classified = (threads) => threads.map((thread) => {
       const project = projectDescriptorForThread(
         thread,
@@ -4431,6 +4477,7 @@ export class DiscordController {
     if (this.stopping) return result;
 
     const hiddenThreadIds = new Set(hiddenEntries.map((entry) => entry.thread.id));
+    this.#setTaskSyncPhase({ phase: 'hiddenCleanup' });
     for (let offset = 0; offset < hiddenEntries.length; offset += 50) {
       const hideBatch = [];
       for (const entry of hiddenEntries.slice(offset, offset + 50)) {
@@ -4544,13 +4591,15 @@ export class DiscordController {
     markPhase('hiddenCleanup');
 
     const syncThreads = async (threads, isArchived) => {
+      threads = taskMirrorOrder(threads, stateBindingSummaries(this.stateStore));
       let nextIndex = 0;
       const worker = async () => {
         while (!this.stopping && nextIndex < threads.length) {
           const thread = threads[nextIndex];
           nextIndex += 1;
           try {
-            const synced = await this.#syncTaskChannel(thread, isArchived, context);
+            const synced = await this.#syncTaskChannel(thread, isArchived, context,
+              (phase) => this.taskSyncPendingThreads.set(thread.id, phase));
             if (synced.created) {
               result.created += 1;
               result.channels.push(synced.channel.id);
@@ -4566,32 +4615,40 @@ export class DiscordController {
               cwd: thread.cwd,
               error: error.stack ?? error.message,
             });
+          } finally {
+            this.taskSyncPendingThreads.delete(thread.id);
           }
         }
       };
       await Promise.all(Array.from({ length: Math.min(4, threads.length) }, () => worker()));
     };
 
+    this.#setTaskSyncPhase({ phase: 'activeTasks', count: active.length });
     await syncThreads(active, false);
     if (this.stopping) return result;
     markPhase('activeTasks');
+    this.#setTaskSyncPhase({ phase: 'archivedTasks', count: archived.length });
     await syncThreads(archived, true);
     if (this.stopping) return result;
     markPhase('archivedTasks');
     markPhase('appServerProjects');
+    this.#setTaskSyncPhase({ phase: 'subagents' });
     const subagents = await this.#syncSubagentsForTasks(active);
     if (this.stopping) return result;
     result.subagentsCreated = subagents.created;
     result.subagentsExisting = subagents.existing;
     result.subagentsFailed = subagents.failed;
     markPhase('subagents');
+    this.#setTaskSyncPhase({ phase: 'channelRefresh' });
     context.channels = await guild.channels.fetch();
     if (this.stopping) return result;
     markPhase('channelRefresh');
+    this.#setTaskSyncPhase({ phase: 'categoryCleanup' });
     const categoryCleanup = await this.#cleanupEmptyManagedCategories(context);
     result.moved += categoryCleanup.moved;
     result.removedEmptyCategories = categoryCleanup.removed;
     markPhase('categoryCleanup');
+    this.#setTaskSyncPhase({ phase: 'controlPanel' });
     await this.#ensureControlPanel();
     markPhase('controlPanel');
     result.phaseMs = phaseMs;
@@ -5228,6 +5285,14 @@ export class DiscordController {
       channel = context.channels.find((candidate) => candidate?.type === ChannelType.GuildText
         && candidate.topic?.includes(`Codex task: ${thread.id}`));
     }
+    if (!channel) {
+      const confirmed = this.channelCreateJournal.read(thread.id);
+      if (confirmed?.phase === 'confirmed' && confirmed.guildId === this.config.guildId) {
+        const candidate = await this.client.channels.fetch(confirmed.channelId).catch(() => null);
+        if (candidate?.type === ChannelType.GuildText && candidate.guildId === confirmed.guildId
+          && candidate.topic?.includes(`Codex task: ${thread.id}`)) channel = candidate;
+      }
+    }
     const noticeCount = await this.#deleteCompletionNoticesForBinding(refreshed, context);
     let deleted = 0;
     if (channel) {
@@ -5454,7 +5519,8 @@ export class DiscordController {
     return { moved, removed };
   }
 
-  async #syncTaskChannel(thread, archived, context) {
+  async #syncTaskChannel(thread, archived, context, onProgress = () => {}) {
+    onProgress('channelLookup');
     if (this.stopping) return { channel: null, created: false, moved: false };
     const existingBinding = stateBindingSummary(this.stateStore, thread.id);
     thread = taskThreadForDisplay(thread, existingBinding);
@@ -5468,6 +5534,7 @@ export class DiscordController {
     }
 
     if (this.stopping) return { channel, created: false, moved: false };
+    onProgress('targetCategory');
     const target = await this.#targetCategory(thread, archived, channel?.parentId, context);
     if (this.stopping) return { channel, created: false, moved: false };
     const desiredName = taskChannelName(thread);
@@ -5480,15 +5547,18 @@ export class DiscordController {
     let created = false;
     let moved = false;
     if (!channel) {
-      channel = await context.guild.channels.create({
+      onProgress('channelCreate');
+      channel = await this.channelCreateJournal.create({ threadId: thread.id,
+        guildId: this.config.guildId, categoryId: target.category.id }, () => context.guild.channels.create({
         name: desiredName,
         type: ChannelType.GuildText,
         parent: target.category.id,
         topic: desiredTopic,
-      });
+      }));
       created = true;
     } else {
       if (channel.parentId !== target.category.id) {
+        onProgress('channelMove');
         await this.#moveTaskChannel(channel, target.category.id, 'Reconcile Codex task category');
         moved = true;
       }
@@ -5502,17 +5572,21 @@ export class DiscordController {
       }
     }
     if (this.stopping) return { channel, created, moved };
+    onProgress('channelPermissions');
     if (!channel.permissionsLocked) await channel.lockPermissions();
     if (this.stopping) return { channel, created, moved };
 
+    onProgress('channelBinding');
     await this.#bindChannel(thread, channel, {
       archived,
       categoryId: target.category.id,
       projectKey: target.project.key,
       projectId: target.project.id,
       subscribe: !archived && (!existingBinding || existingBinding.archived || existingBinding.hidden),
+      onProgress,
     });
     if (this.stopping) return { channel, created, moved };
+    onProgress('taskPanel');
     await this.#ensureTaskPanel(thread, channel, archived);
     const recoveryBinding = stateBindingSummary(this.stateStore, thread.id) ?? existingBinding;
     const recoveryTurnMessages = stateTurnRecordSummaries(this.stateStore, thread.id);
@@ -5931,6 +6005,7 @@ export class DiscordController {
 
   async #bindChannel(thread, channel, {
     archived = false, categoryId = channel.parentId, projectKey = null, projectId = null, subscribe = false,
+    onProgress = () => {},
   } = {}) {
     const colliding = this.stateStore.bindingByChannel(channel.id);
     if (colliding && colliding.threadId !== thread.id) this.stateStore.removeBinding(colliding.threadId);
@@ -5940,6 +6015,7 @@ export class DiscordController {
     if (sessionPath
       && !existing?.forkedFromThreadId
       && !this.forkMetadataCheckedThreadIds.has(thread.id)) {
+      onProgress('forkMetadata');
       const forkInfo = await readSessionForkInfo(sessionPath, thread.id);
       if (forkInfo) {
         this.forkMetadataCheckedThreadIds.add(thread.id);
@@ -5976,7 +6052,10 @@ export class DiscordController {
       lastCompletedTurnId: existing?.lastCompletedTurnId ?? null,
       snapshotInitialized: existing?.snapshotInitialized ?? false,
     });
-    if (subscribe) await this.codex.resumeThread(thread.id);
+    if (subscribe) {
+      onProgress('subscription');
+      await this.codex.resumeThread(thread.id);
+    }
   }
 
   async #fetchChannelHistory(channel, maximum = 1000) {

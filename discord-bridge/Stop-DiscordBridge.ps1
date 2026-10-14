@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [switch]$NoWait
 )
 
 Set-StrictMode -Version Latest
@@ -20,6 +21,11 @@ $pidText = (Get-Content -Raw -LiteralPath $lockPath).Trim()
 $temporary = "$stopPath.$PID.tmp"
 [IO.File]::WriteAllText($temporary, "requestedAt=$([DateTimeOffset]::Now.ToString('o'))`nrequesterPid=$PID`n", [Text.UTF8Encoding]::new($false))
 Move-Item -LiteralPath $temporary -Destination $stopPath -Force
+
+if ($NoWait) {
+    Write-Output "Graceful stop requested once (PID $pidText); completion must be verified by the caller."
+    return
+}
 
 $deadline = [DateTimeOffset]::Now.AddSeconds($TimeoutSeconds)
 while ((Test-Path -LiteralPath $lockPath) -and [DateTimeOffset]::Now -lt $deadline) {
