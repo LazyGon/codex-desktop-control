@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { connectCanonical, readJson, saveJson, deliveryFor } from './shared-task-operations.mjs';
 import { uuidV7TimestampMs, turnTimestampMs } from '../discord-bridge/src/recent-history.mjs';
+import { checkedJson } from '../state/rvm-fast-operations-20261007/operation-io.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultDirectory = path.join(root, 'state/global-system-error-recovery-20261013');
@@ -61,6 +62,50 @@ export function observedGoalRecovery(thread, turns, goal, previous) {
     && previous.latestTurnId === last.id && previous.latestTurnStatus === 'inProgress'
     && previous.goalStatus === 'active' && previous.identityHash === hashIdentity(thread);
 }
+function blockedWorkMatches(thread, goal, record) {
+  if (record?.schemaVersion !== 1 || goal?.status !== 'blocked'
+      || record.goalIdentity !== goalIdentity(goal) || record.goalUpdatedAt !== goal.updatedAt
+      || !Number.isFinite(goal.updatedAt) || record.identityHash !== hashIdentity(thread)
+      || record.turnStatus !== 'inProgress' || !record.turnId || !Number.isFinite(record.observedAt)
+      || thread.archived || thread.canAcceptDirectInput !== true
+      || parentRelationship(thread).invalid || parentRelationship(thread).native
+      || (Number.isFinite(goal.tokenBudget) && goal.tokenBudget > 0
+        && (!Number.isFinite(goal.tokensUsed) || goal.tokensUsed >= goal.tokenBudget))) return false;
+  try {
+    const permit = checkedJson(record.authorizationPin);
+    return permit.schemaVersion === 1 && permit.kind === 'po-directed-blocked-work'
+      && typeof permit.authorizingThreadId === 'string' && !!permit.authorizingThreadId
+      && permit.targetThreadId === thread.id && permit.initialTurnId === record.initialTurnId
+      && typeof permit.initialTurnId === 'string' && !!permit.initialTurnId
+      && permit.goalIdentity === record.goalIdentity && permit.goalUpdatedAt === record.goalUpdatedAt
+      && permit.identityHash === record.identityHash;
+  } catch { return false; }
+}
+// A specific PO-directed running work turn can fail while an older goal remains
+// blocked. This evidence permits work continuation only; it never activates the goal.
+export function authorizeBlockedWork(s, authorizationPin, time = Date.now()) {
+  const last = s.turns[0], permit = checkedJson(authorizationPin);
+  const record = { schemaVersion: 1, authorizationPin, initialTurnId: last?.id,
+    goalIdentity: goalIdentity(s.goal), goalUpdatedAt: s.goal?.updatedAt,
+    identityHash: hashIdentity(s.thread), turnId: last?.id, turnStatus: 'inProgress', observedAt: time };
+  if (parentRelationship(s.thread).invalid || parentRelationship(s.thread).native
+      || s.thread.archived || s.thread.canAcceptDirectInput !== true
+      || !s.thread.cwd || !s.thread.model || !s.thread.modelProvider
+      || last?.status !== 'inProgress' || permit.initialTurnId !== last.id
+      || !blockedWorkMatches(s.thread, s.goal, record)
+      || (Number.isFinite(last.startedAt) && time < last.startedAt * 1000)
+      || (Number.isFinite(s.goal.tokenBudget) && s.goal.tokenBudget > 0
+        && (!Number.isFinite(s.goal.tokensUsed) || s.goal.tokensUsed >= s.goal.tokenBudget))) {
+    throw new Error('Blocked work authorization does not match current running work');
+  }
+  return observation(s.thread, s.turns, s.goal, time, { blockedWorkObservation: record });
+}
+export function observedBlockedWorkRecovery(thread, turns, goal, previous) {
+  const record = previous?.blockedWorkObservation, last = turns[0];
+  return blockedWorkMatches(thread, goal, record) && last?.id === record.turnId
+    && terminalTransient(turns) && Number.isFinite(last.completedAt)
+    && record.observedAt <= last.completedAt * 1000;
+}
 export function eligibility(thread, turns, goal, excluded = [], previous = null) {
   if (excluded.includes(thread.id)) return 'excluded';
   if (parentRelationship(thread).invalid) return 'invalid-parent-source';
@@ -71,7 +116,8 @@ export function eligibility(thread, turns, goal, excluded = [], previous = null)
   if (Number.isFinite(goal?.tokenBudget) && goal.tokenBudget > 0
       && (!Number.isFinite(goal.tokensUsed) || goal.tokensUsed >= goal.tokenBudget)) return 'goal-budget-exhausted-or-unconfirmed';
   if (goal && !['active', 'blocked'].includes(goal.status)) return 'unknown-goal-status';
-  if (goal?.status === 'blocked' && !observedGoalRecovery(thread, turns, goal, previous)) return 'blocked-cause-unproven';
+  if (goal?.status === 'blocked' && !observedGoalRecovery(thread, turns, goal, previous)
+      && !observedBlockedWorkRecovery(thread, turns, goal, previous)) return 'blocked-cause-unproven';
   const last = turns[0];
   if (last?.status !== 'failed' || !last.error) return 'no-latest-terminal-error';
   const kind = errorKind(last.error);
@@ -102,7 +148,7 @@ export function sameIdentity(a, b) {
   return !!a && !!b && ['id', 'cwd', 'model', 'modelProvider', 'reasoningEffort', 'parentThreadId', 'agentRole']
     .every(k => (a[k] ?? null) === (b[k] ?? null));
 }
-function hashIdentity(thread) {
+export function hashIdentity(thread) {
   return hash(Object.fromEntries(['id', 'cwd', 'model', 'modelProvider', 'reasoningEffort', 'parentThreadId', 'agentRole']
     .map(k => [k, thread[k] ?? null])));
 }
@@ -262,8 +308,28 @@ function observation(thread, turns, goal, time, old = {}) {
     // A confirmed running turn replaces the previous failure's causal tuple.
     delete next.recoveryObservation;
   }
+  if (old.blockedWorkObservation) {
+    const record = old.blockedWorkObservation, last = turns[0];
+    if (!blockedWorkMatches(thread, goal, record) || last?.id !== record.turnId
+        || !['inProgress', 'failed'].includes(last.status)
+        || (last.status === 'failed' && !observedBlockedWorkRecovery(thread, turns, goal, old))) {
+      delete next.blockedWorkObservation;
+    }
+  }
   if (turns[0]?.status === 'completed') { next.count = 0; next.nextEligibleAt = 0; }
   return next;
+}
+
+function blockedWorkSuccessor(s, prior, time) {
+  if (!blockedWorkMatches(s.thread, s.goal, prior) || s.turns[0]?.status !== 'inProgress') return null;
+  return { ...prior, turnId: s.turns[0].id, observedAt: time };
+}
+function rememberBlockedWorkSnapshot(s, record, state, store, time) {
+  const id = s.thread.id;
+  state.threads[id] = observation(s.thread, s.turns, s.goal, time,
+    { ...state.threads[id], blockedWorkObservation: record });
+  delete state.threads[id].recoveryObservation;
+  store.saveState(state);
 }
 
 
@@ -283,6 +349,20 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
   if (!config.enabled) return { ...report, disabled: true };
   state.threads ??= {};
   state.noticeQueue ??= { pendingAfterKey: null, singletonPendingTurn: false };
+  // A confirmed running start receipt is durable before the state write. Recover
+  // only that exact successor, never a different manually started work turn.
+  for (const recovery of [...(store.recoveryRecords?.() ?? [])].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
+    const old = state.threads[recovery.threadId]?.blockedWorkObservation;
+    const next = recovery.blockedWorkSuccessor;
+    if (old && next && recovery.phase === 'accepted' && old.turnId === recovery.failedTurnId
+        && next.turnId === recovery.acceptedTurnId && next.initialTurnId === old.initialTurnId
+        && canonical(next.authorizationPin) === canonical(old.authorizationPin)
+        && next.goalIdentity === old.goalIdentity && next.goalUpdatedAt === old.goalUpdatedAt
+        && next.identityHash === old.identityHash && next.turnStatus === 'inProgress') {
+      state.threads[recovery.threadId].blockedWorkObservation = next;
+      delete state.threads[recovery.threadId].recoveryObservation;
+    }
+  }
   // Reconstruct from the recovery journal even after a crash before finally/enqueue.
   for (const recovery of store.recoveryRecords?.() ?? []) queueRecoveryNotice(store, recovery, now, dryRun);
   report.parentNotices = []; report.noticeStarts = 0; report.parentNoticeAttempts = 0;
@@ -348,7 +428,8 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
       const entry = observation(s.thread, s.turns, s.goal, now(), prior);
       state.threads[id] = entry;
       // Retain the causal tuple across a preflight/read failure, before any mutation.
-      if (eligible === 'eligible' && s.goal?.status === 'blocked' && !entry.recoveryObservation) entry.recoveryObservation = prior;
+      if (eligible === 'eligible' && observedGoalRecovery(s.thread, s.turns, s.goal, recoveryPrior)
+          && !entry.recoveryObservation) entry.recoveryObservation = prior;
       if (entry.recoveryObservation?.latestTurnId !== s.turns[0]?.id) delete entry.recoveryObservation;
       if (!dryRun) store.saveState(state);
       const result = { id, action: eligible }; report.results.push(result);
@@ -390,6 +471,8 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         originalGoalStatus: fresh.goal?.status ?? null,
         objectiveSha256: fresh.goal ? hash(fresh.goal.objective) : null,
         goalIdentity: goalIdentity(fresh.goal), recoveryObservation: fresh.goal?.status === 'blocked' ? recoveryPrior.activeGoalObservation : null,
+        blockedWorkRecovery: observedBlockedWorkRecovery(fresh.thread, fresh.turns, fresh.goal, recoveryPrior)
+          ? recoveryPrior.blockedWorkObservation : null,
         usageBefore: fresh.goal ? { tokensUsed: fresh.goal.tokensUsed, timeUsedSeconds: fresh.goal.timeUsedSeconds } : null,
         identity: { cwd: fresh.thread.cwd, model: fresh.thread.model, modelProvider: fresh.thread.modelProvider,
           reasoningEffort: fresh.thread.reasoningEffort } };
@@ -412,7 +495,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
             || goalIdentity(fresh.goal) !== attempt.goalIdentity || s.goal?.updatedAt !== fresh.goal?.updatedAt) {
           attempt.phase = 'changed-after-session'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
-        if (fresh.goal?.status === 'blocked') {
+        if (fresh.goal?.status === 'blocked' && !attempt.blockedWorkRecovery) {
           if (store.allowed && !store.allowed(id)) {
             attempt.phase = 'config-stopped'; store.update(key, attempt); result.action = attempt.phase; continue;
           }
@@ -459,12 +542,21 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         if (store.allowed && !store.allowed(id)) {
           attempt.phase = 'config-stopped'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
+        if (attempt.blockedWorkRecovery && !blockedWorkMatches(fresh.thread, fresh.goal, attempt.blockedWorkRecovery)) {
+          attempt.phase = 'authorization-changed'; store.update(key, attempt); result.action = attempt.phase; continue;
+        }
         const [method, params] = deliveryFor(id, null, message);
         params.clientUserMessageId = 'system-error-recovery:' + key;
         const response = await client.call(method, params, config.requestTimeoutMs);
         if (!response.turn?.id) throw new Error('Missing accepted turn identity');
         attempt.phase = 'accepted'; attempt.acceptedTurnId = response.turn.id;
+        if (attempt.blockedWorkRecovery) {
+          attempt.blockedWorkSuccessor = blockedWorkSuccessor(
+            { thread: fresh.thread, turns: [response.turn], goal: fresh.goal }, attempt.blockedWorkRecovery, now());
+        }
         store.update(key, attempt); report.resumed++; result.action = 'accepted';
+        if (attempt.blockedWorkSuccessor) rememberBlockedWorkSnapshot(
+          { thread: fresh.thread, turns: [response.turn], goal: fresh.goal }, attempt.blockedWorkSuccessor, state, store, now());
         queueRecoveryNotice(store, attempt, now, dryRun);
         // An ID alone is not running-state evidence. Preserve a typed running ack
         // only with the active same-goal preflight immediately preceding it.
@@ -473,6 +565,14 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         }
         try {
           const after = await snapshot(client, id, config.requestTimeoutMs);
+          if (attempt.blockedWorkRecovery && after.turns[0]?.id === response.turn.id) {
+            const successor = blockedWorkSuccessor(after, attempt.blockedWorkRecovery, now());
+            if (successor) {
+              attempt.blockedWorkSuccessor = successor;
+              store.update(key, attempt);
+              rememberBlockedWorkSnapshot(after, successor, state, store, now());
+            }
+          }
           if (sameIdentity(s.thread, after.thread) && goalIdentity(after.goal) === attempt.goalIdentity
               && after.turns[0]?.id === response.turn.id) rememberActiveSnapshot(after, state, store, now());
           attempt.readback = sameIdentity(s.thread, after.thread) && goalIdentity(after.goal) === attempt.goalIdentity
@@ -494,6 +594,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
   await drainPending(Math.max(0, noticeLimit - report.parentNoticeAttempts));
   report.scanDeferred = state.scan.pendingIds.length;
   report.goalRecoveryPolicy = 'Previously observed active same goal/inProgress turn -> exact transient failed same turn and blocked. Temporal causal evidence authorized by PO; manual simultaneous block remains an inference limitation.';
+  report.blockedWorkRecoveryPolicy = 'Explicit pinned PO authorization for an exact running work turn under an unchanged blocked goal; only confirmed automatic successor turns inherit it. The goal remains blocked.';
   report.finishedAt = new Date(now()).toISOString();
   return report;
 }

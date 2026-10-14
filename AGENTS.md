@@ -185,6 +185,17 @@ decisions; the verification owner retains ordinary Product proof.
   typed inProgress start receipt may also preserve the active preflight tuple;
   an accepted ID alone never creates running-state evidence. This prevents a
   rapid capacity failure between minute polls from losing its causal history.
+- A PO-directed work turn under an already blocked goal may instead have an
+  explicit `po-directed-blocked-work` authorization pin. `authorizeBlockedWork`
+  admits only that exact ordinary inProgress turn and goal/identity cut. Recovery
+  then continues the work without setting the historical goal active. Only a
+  confirmed automatic successor inherits the permit; its running receipt is
+  saved in the episode journal before state, including the fast-failure gap.
+  Completion, interruption, unrelated turns, changed goal status/updatedAt,
+  objective, budget, task identity, missing or changed permit bytes revoke it.
+  Initial blocked tasks without that exact permit remain untouched. This adds
+  no Product scope or automatic sign-in; Windows sign-out/restart still ends
+  Interactive workers until the user signs in again.
 - An exclusive durable episode journal precedes resume/goal/start. A timeout or
   crash leaves the episode claimed and cannot trigger a blind resend. A genuinely
   new failed turn can be retried after backoff. Deferred inventory is persisted
