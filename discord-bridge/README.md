@@ -516,6 +516,21 @@ permissions, local binding and bot-owned control card before reporting recovery.
 Task discovery does not authorize creating a replacement Codex task or starting
 its stopped turn.
 
+The read-only `control/Wait-TaskMirror.ps1` worker can observe an already pending
+create for an existing one-shot completion receiver. Its job supplies the exact
+Bridge identity, target task, runtime/binding paths and an evidence-based
+diagnostic checkpoint. It makes no Discord or task requests itself. Cancellation
+only ends observation; it does not cancel or repeat the pending create.
+
+`control/Read-AtomicJson.ps1` reads atomically published UTF-8 snapshots with
+ReadWrite/Delete file sharing, allowing the publisher to replace a path without
+invalidating an open file generation. Only Win32 sharing/lock violations (32/33)
+defer to the next filesystem notification. Missing files, malformed JSON and
+invalid UTF-8 fail closed; diagnostics retain only error type/HResult/read role.
+Old admitted workers and receipts remain immutable; a known observer failure
+requires actual-state diagnosis before a distinct repair registration. These
+workers last for the current boot, not across an unregistered OS restart.
+
 Logs are append-only JSONL under `logs/`. Runtime state and task/channel
 bindings are atomically persisted under `data/`. The latest accepted text-inbox
 message is stored under `data/transfer-text/`. None of these locations contains
