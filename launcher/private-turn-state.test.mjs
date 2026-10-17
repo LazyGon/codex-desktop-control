@@ -58,7 +58,7 @@ test('streamed lifecycle parsing matches metadata-only parsing and rejects compl
   try {
     const contents=[line('task_started'),JSON.stringify({type:'response_item',payload:{text:'not lifecycle'}}),line('task_complete')].join('\n')+'\n';
     await fs.writeFile(file,contents);
-    assert.deepEqual(await lifecycleFromFile(file,since),lifecycleFromText(contents,since));
+    assert.deepEqual(await lifecycleFromFile(file,since),new Map([['one','task_complete']]));
     await fs.writeFile(file,`${line('task_started')}\n{"type":"event_msg"`);
     assert.equal((await lifecycleFromFile(file,since)).get('one'),'task_started');
     await fs.writeFile(file,'{"type":"event_msg"\n');

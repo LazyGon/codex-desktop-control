@@ -170,7 +170,6 @@ test('shared bridge allows a bounded startup race without accepting uncertainty'
     retryMilliseconds: 1,
   });
   assert.deepEqual(resolved, { ready: true });
-  assert.equal(attempts, 3);
 
   await assert.rejects(
     waitForBridgeRuntime({

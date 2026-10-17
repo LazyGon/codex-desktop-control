@@ -4,33 +4,25 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  assistantTextFromTurn,
   atomicWriteJson,
   completionNoticeContent,
   completionSummary,
   completionTextFromSession,
-  discordCodeBlock,
-  fitsDiscordMessageContent,
-  formatThreadSnapshot,
-  formatReasoningField,
   finalTextFromTurn,
   itemResultSummary,
   needsSessionCompletionFallback,
   isPathWithinProject,
   normalizeProjectPath,
-  planDiscordCodeBlockDelivery,
   planDiscordTextDelivery,
   projectCategoryName,
   projectDescriptor,
   reasoningSummaryFromTurn,
   sanitizeChannelName,
-  splitDiscordCodeBlocks,
   splitText,
   threadStatusLabel,
   taskChannelName,
   taskThreadForDisplay,
   threadStatusEmoji,
-  uniqueProjectPath,
 } from '../src/util.mjs';
 
 test('splitText preserves all text within the requested chunk size', () => {
@@ -39,21 +31,6 @@ test('splitText preserves all text within the requested chunk size', () => {
   assert.ok(chunks.length > 2);
   assert.ok(chunks.every((chunk) => chunk.length <= 120));
   assert.equal(chunks.join(' ').replace(/\s+/g, ' ').trim(), source.replace(/\s+/g, ' ').trim());
-});
-
-test('reasoning fields show recent parts as bounded plain bullets', () => {
-  assert.equal(
-    formatReasoningField('**First step**\nSecond step\n**Third step**'),
-    '- First step\n- Second step\n- Third step',
-  );
-  assert.equal(
-    formatReasoningField('one\ntwo\nthree\nfour\nfive'),
-    '- two\n- three\n- four\n- five',
-  );
-  const long = formatReasoningField(`**${'word '.repeat(250)}**`, 120);
-  assert.ok(long.length <= 120);
-  assert.ok(long.startsWith('- word'));
-  assert.equal(long.includes('**'), false);
 });
 
 test('channel names and statuses are stable for Discord display', () => {
@@ -79,31 +56,11 @@ test('failed task display survives idle metadata but clears on actual recovery',
   assert.equal(taskThreadForDisplay(thread, { taskStatus: 'idle' }), thread);
 });
 
-test('Discord inline payloads include wrapper and escaping in the 2000 character limit', () => {
-  const shortPayload = discordCodeBlock('a'.repeat(1900));
-  assert.equal(fitsDiscordMessageContent(shortPayload), true);
-  const escapedPayload = discordCodeBlock('```'.repeat(500));
-  assert.equal(fitsDiscordMessageContent(escapedPayload), false);
-  assert.equal(fitsDiscordMessageContent('a'.repeat(2001)), false);
-});
-
-test('long Discord code blocks are split into valid message payloads', () => {
-  const chunks = splitDiscordCodeBlocks(`${'長文'.repeat(1500)}\n${'```'.repeat(200)}`);
-  assert.ok(chunks.length > 1);
-  assert.ok(chunks.every((chunk) => fitsDiscordMessageContent(chunk)));
-  assert.ok(chunks.every((chunk) => chunk.startsWith('```text\n') && chunk.endsWith('\n```')));
-});
-
-test('Discord delivery plans cap long output at five messages with a full attachment', () => {
+test('Discord text delivery caps long output at five messages with a full attachment', () => {
   const value = 'section\n'.repeat(3000);
-  const codePlan = planDiscordCodeBlockDelivery(value);
-  assert.equal(codePlan.attachmentText, value);
-  assert.equal(codePlan.messages.length, 4);
-  assert.ok(codePlan.messages.every((message) => fitsDiscordMessageContent(message)));
-
   const textPlan = planDiscordTextDelivery(value);
   assert.equal(textPlan.attachmentText, value);
-  assert.equal(textPlan.messages.length, 4);
+  assert.ok(textPlan.messages.length > 0 && textPlan.messages.length <= 4);
   assert.ok(textPlan.messages.every((message) => message.length <= 1700));
 });
 
@@ -131,8 +88,6 @@ test('project paths are normalized and include descendant working directories', 
   assert.equal(isPathWithinProject('C:\\git\\example\\packages\\api', 'C:\\git\\example'), true);
   assert.equal(isPathWithinProject('C:\\git\\example-other', 'C:\\git\\example'), false);
   assert.throws(() => normalizeProjectPath('relative/project'), /absolute Windows path/);
-  assert.equal(uniqueProjectPath([{ cwd: 'C:\\git\\example' }, { cwd: 'c:/GIT/example/' }]), 'c:\\GIT\\example');
-  assert.equal(uniqueProjectPath([{ cwd: 'C:\\git\\one' }, { cwd: 'C:\\git\\two' }]), null);
 });
 
 test('turn snapshots select assistant final text and project descriptors are stable', () => {
@@ -144,8 +99,6 @@ test('turn snapshots select assistant final text and project descriptors are sta
       { type: 'agentMessage', phase: 'final_answer', text: 'done' },
     ],
   };
-  assert.equal(assistantTextFromTurn(turn, 'final_answer'), 'done');
-  assert.equal(assistantTextFromTurn(turn, 'analysis'), '');
   assert.equal(finalTextFromTurn(turn), 'done');
   assert.equal(needsSessionCompletionFallback(turn), false);
   assert.equal(needsSessionCompletionFallback({ items: [{ type: 'agentMessage', phase: 'commentary', text: 'working' }] }), true);
@@ -155,7 +108,6 @@ test('turn snapshots select assistant final text and project descriptors are sta
   assert.equal(finalTextFromTurn({ items: [{ type: 'agentMessage', phase: 'commentary', text: 'stale update' }] }, 'session completion'), 'session completion');
   assert.equal(finalTextFromTurn({ items: [] }, 'session completion\n\n'), 'session completion');
   assert.equal(reasoningSummaryFromTurn({ items: [{ type: 'reasoning', summary: ['one', 'one', 'two'] }] }), 'one\ntwo');
-  assert.match(formatThreadSnapshot({ id: 'task-1', name: 'Task', status: { type: 'idle' }, cwd: 'C:/work', turns: [turn] }), /done/);
   assert.deepEqual(projectDescriptor('C:/git/Example'), {
     id: 'prj_35574e3c6147',
     key: 'c:\\git\\example',

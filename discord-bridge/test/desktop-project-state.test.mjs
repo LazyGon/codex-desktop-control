@@ -6,16 +6,13 @@ import path from 'node:path';
 import {
   appServerProjectForThread,
   appServerProjectKey,
-  desktopProjectForThread,
   desktopProjectSnapshot,
-  projectCwdForThread,
   projectDescriptorForThread,
   projectDescriptorsFromSnapshot,
   projectForThread,
   readDesktopProjectSnapshot,
   withAppServerProjects,
 } from '../src/desktop-project-state.mjs';
-import { projectIdFromKey } from '../src/util.mjs';
 
 test('groups Desktop tasks without a project assignment or saved root as projectless', () => {
   const snapshot = desktopProjectSnapshot({
@@ -31,18 +28,13 @@ test('groups Desktop tasks without a project assignment or saved root as project
     id: 'generated',
     cwd: 'C:\\Users\\example\\Documents\\Codex\\2026-07-25\\new-chat',
   };
-  assert.equal(projectCwdForThread(generated, snapshot), null);
   assert.deepEqual(projectDescriptorForThread(generated, snapshot), {
-    id: projectIdFromKey('__no_project__'),
+    id: 'prj_e1bdad172a61',
     key: '__no_project__',
     path: '(no project)',
     name: 'Codex - No Project',
   });
 
-  assert.equal(
-    projectCwdForThread({ id: 'assigned', cwd: 'C:\\git\\work' }, snapshot),
-    'C:\\git\\work',
-  );
   assert.deepEqual(
     projectDescriptorForThread({ id: 'assigned', cwd: 'C:\\git\\work' }, snapshot),
     {
@@ -64,7 +56,6 @@ test('resolves unassigned future tasks from the most specific containing project
   });
 
   const thread = { id: 'future', cwd: 'c:\\RUNTIME\\runs\\dedicated\\RUN-2\\scratch\\workspace' };
-  assert.equal(desktopProjectForThread(thread, snapshot).projectId, 'local-specific');
   assert.deepEqual(projectDescriptorForThread(thread, snapshot), {
     id: 'local-specific',
     key: 'local-specific',
@@ -123,10 +114,8 @@ test('falls back to App Server cwd when Desktop state cannot be read', (context)
   const snapshot = readDesktopProjectSnapshot(path.join(directory, 'missing.json'));
 
   assert.equal(snapshot.available, false);
-  assert.equal(
-    projectCwdForThread({ id: 'thread', cwd: 'C:\\git\\work' }, snapshot),
-    'C:\\git\\work',
-  );
+  assert.equal(projectDescriptorForThread({ id: 'thread', cwd: 'C:\\git\\work' }, snapshot).path,
+    'C:\\git\\work');
 });
 
 test('App Server native project identity takes precedence over conflicting Desktop assignment', () => {

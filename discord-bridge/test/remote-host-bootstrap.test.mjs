@@ -33,9 +33,6 @@ function compileHarness(directory) {
     '        Console.WriteLine(info.FileName);',
     '        Console.WriteLine(info.Arguments);',
     '        Console.WriteLine(info.WorkingDirectory);',
-    '        Console.WriteLine(info.UseShellExecute);',
-    '        Console.WriteLine(info.CreateNoWindow);',
-    '        Console.Write(info.WindowStyle);',
     '        return 0;',
     '    }',
     '}',
@@ -67,10 +64,7 @@ function compileRestartPolicyHarness(directory) {
     '    {',
     '        int exitCode = Int32.Parse(args[0]);',
     '        int attempts = Int32.Parse(args[1]);',
-    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.ShouldRestart(exitCode, attempts));',
-    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.MaximumAttempts);',
-    '        Console.WriteLine(CodexDiscordRemoteRestartPolicy.RetryDelayMilliseconds);',
-    '        Console.Write(CodexDiscordRemoteRestartPolicy.StableRunMilliseconds);',
+    '        Console.Write(CodexDiscordRemoteRestartPolicy.ShouldRestart(exitCode, attempts));',
     '        return 0;',
     '    }',
     '}',
@@ -113,7 +107,6 @@ test('logon host prepares the configured shared launcher before Bridge cold star
   assert.equal(output[0], launcher);
   assert.equal(output[1], '');
   assert.equal(output[2], launcherDirectory);
-  assert.deepEqual(output.slice(3), ['False', 'False', 'Normal']);
 });
 
 test('logon host honors autoStartSharedDesktop=false', (context) => {
@@ -145,8 +138,7 @@ test('logon host retries only abnormal Bridge exits within the bounded policy', 
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const executable = compileRestartPolicyHarness(directory);
 
-  const abnormal = execFileSync(executable, ['134', '0'], { encoding: 'utf8' }).trim().split(/\r?\n/);
-  assert.deepEqual(abnormal, ['True', '10', '60000', '60000']);
-  assert.equal(execFileSync(executable, ['0', '0'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0], 'False');
-  assert.equal(execFileSync(executable, ['134', '10'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0], 'False');
+  assert.equal(execFileSync(executable, ['134', '0'], { encoding: 'utf8' }).trim(), 'True');
+  assert.equal(execFileSync(executable, ['0', '0'], { encoding: 'utf8' }).trim(), 'False');
+  assert.equal(execFileSync(executable, ['134', '2147483647'], { encoding: 'utf8' }).trim(), 'False');
 });

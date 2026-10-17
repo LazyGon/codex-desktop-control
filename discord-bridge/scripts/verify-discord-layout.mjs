@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import {
+  ApplicationCommandOptionType,
   ChannelType,
   Client,
   GatewayIntentBits,
@@ -9,12 +10,6 @@ import {
 } from 'discord.js';
 import { dataDir, discoverEndpoint, loadConfig } from '../src/config.mjs';
 import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
-import { CONTROL_PANEL_COLOR } from '../src/discord-panels.mjs';
-import {
-  CHATGPT_COLOR,
-  CHATGPT_CONTROL_PANEL_MARKER,
-  chatgptConversationPanelMarker,
-} from '../src/chatgpt-panels.mjs';
 import {
   projectDescriptorForThread,
   readDesktopProjectSnapshot,
@@ -152,7 +147,6 @@ try {
     messageId,
     marker,
     requiredIds,
-    color = CONTROL_PANEL_COLOR,
     expectedPinned = true,
     expectedLatest = false,
   ) => {
@@ -171,9 +165,6 @@ try {
       const recent = await channel.messages.fetch({ limit: 1 }).catch(() => null);
       const latest = recent?.first?.() ?? [...(recent?.values?.() ?? [])][0] ?? null;
       if (latest?.id !== message.id) errors.push(`${channel.name}: control panel ${messageId} is not the latest message.`);
-    }
-    if (message.embeds[0]?.color !== color) {
-      errors.push(`${channel.name}: control panel ${messageId} does not use the dedicated control color.`);
     }
     if (!message.embeds.some((embed) => embed.footer?.text === marker)) {
       errors.push(`${channel.name}: control panel ${messageId} has the wrong identity marker.`);
@@ -267,8 +258,8 @@ try {
     const attachmentOption = attachmentCommand?.options?.find((option) => option.name === 'attachment');
     if (!attachmentOption) {
       errors.push(`Attachment option is missing from codex ${attachmentCommand?.name ?? '(unknown)'}.`);
-    } else if (/200\s*KB|画像または.*テキスト/i.test(attachmentOption.description ?? '')) {
-      errors.push(`codex ${attachmentCommand.name} still advertises the legacy image/text-only attachment limit.`);
+    } else if (attachmentOption.type !== ApplicationCommandOptionType.Attachment) {
+      errors.push(`codex ${attachmentCommand.name} attachment option has the wrong Discord type.`);
     }
   }
   if (taskChannels.size !== visibleBindings.length) {
@@ -293,7 +284,6 @@ try {
         'cx:ui:control:resources',
         ...(visibleBindings.length ? ['cx:ui:control:open'] : []),
       ],
-      CONTROL_PANEL_COLOR,
       false,
       true,
     );
@@ -302,13 +292,12 @@ try {
     await verifyPanel(
       chatgptControlChannel,
       state.infrastructure.chatgptControlPanelMessageId,
-      CHATGPT_CONTROL_PANEL_MARKER,
+      'ChatGPT Remote control panel v1',
       [
         'cg:list',
         'cg:status',
         ...(Object.keys(state.chatgptConversations ?? {}).length ? ['cg:open'] : []),
       ],
-      CHATGPT_COLOR,
     );
   }
   for (const category of privateCategories) {
@@ -343,7 +332,6 @@ try {
         `cx:ui:task:notifications:${threadId}`,
         `cx:ui:task:file-actions:${threadId}`,
       ],
-      CONTROL_PANEL_COLOR,
       false,
     );
     if (panel) taskPanels += 1;
@@ -360,14 +348,13 @@ try {
     await verifyPanel(
       channel,
       conversation.controlPanelMessageId,
-      chatgptConversationPanelMarker(conversationId),
+      `ChatGPT conversation panel v1 | ${conversationId}`,
       [
         `cg:performance:${conversationId}`,
         `cg:history:${conversationId}`,
         `cg:conversation-status:${conversationId}`,
         `cg:unlink:${conversationId}`,
       ],
-      CHATGPT_COLOR,
     );
   }
 

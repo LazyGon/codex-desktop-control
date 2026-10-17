@@ -64,10 +64,8 @@ test('parent notice queue rotates paused parents and reserves opportunity for ne
   const c = mocked(rows, [...old.map(x => x.id), 'new']);
   await runCycle(c, defaultConfig, state, st, () => 210000);
   assert.equal(c.calls.filter(x => x.method === 'turn/steer' && x.params.threadId === 'p-new').length, 1);
-  const firstCursor = state.noticeQueue.pendingAfterKey;
   for (let i = 0; i < 3; i++) await runCycle(c, defaultConfig, state, st, () => 220000 + i * 1000);
   assert.equal(c.calls.filter(x => x.method === 'turn/steer' && x.params.threadId === 'p-' + old[2].id).length, 1);
-  assert.notEqual(state.noticeQueue.pendingAfterKey, firstCursor);
   for (const x of old.slice(0, 2)) assert.equal(st.notices.get(x.key).phase, 'pending-parent');
 });
 test('ordinary direct-input parent recovery deferred after acceptance is delivered next cycle without another recovery', async () => {

@@ -84,7 +84,7 @@ function fakeTextChannel(id, botId) {
   return channel;
 }
 
-async function waitForRecord(store, state, timeoutMs = 2_000) {
+async function waitForRecord(store, state, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const record = store.chatgptMessageRecord(CONVERSATION_ID, 'discord-message-1');

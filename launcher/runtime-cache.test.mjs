@@ -160,5 +160,4 @@ test('SHA-256 helper does not depend on PowerShell module auto-loading', (contex
     command,
   ], { encoding: 'utf8', env: environment }).trim();
   assert.equal(output, sha256('module-independent-hash'));
-  assert.doesNotMatch(fs.readFileSync(helperPath, 'utf8'), /Get-FileHash/);
 });

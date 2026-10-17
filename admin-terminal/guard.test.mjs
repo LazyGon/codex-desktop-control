@@ -42,9 +42,10 @@ test('guard result survives the installed legacy host code-page decoder', () => 
   const unicodeSession = { ...session, cwd: unicodeWorkspace };
   const admitted = checkRequest(unicodeRequest, config, unicodeSession);
   const legacyDecoder = new TextDecoder('shift_jis');
-  const legacyBytes = Buffer.from(JSON.stringify(admitted), 'utf8');
-  assert.notEqual(legacyDecoder.decode(legacyBytes), JSON.stringify(admitted));
   const envelope = guardResultJson(admitted);
   assert.match(envelope, /^[\x00-\x7f]*$/);
-  assert.deepEqual(JSON.parse(legacyDecoder.decode(Buffer.from(envelope, 'utf8'))), admitted);
+  assert.deepEqual(JSON.parse(legacyDecoder.decode(Buffer.from(envelope, 'utf8'))), {
+    threadId: request.threadId, workspace: unicodeWorkspace, model: 'unchanged',
+    sandbox: 'dangerFullAccess', approvalPolicy: 'never',
+  });
 });

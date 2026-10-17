@@ -109,20 +109,6 @@ test('managed transport refuses an unmanaged codex_app definition', {
   assert.deepEqual(fs.readdirSync(directory), ['config.toml']);
 });
 
-test('shared launcher repairs config before reuse and also pins the server override', () => {
-  const source = fs.readFileSync(startPath, 'utf8');
-  const installIndex = source.indexOf('$configInstall = Install-CodexAppToolsSharedConfig');
-  const desktopIndex = source.indexOf('$existingDesktopRoots = @(');
-  const serverIndex = source.indexOf('$serverProcess = Start-Process @serverStartParameters');
-  assert.ok(installIndex >= 0, 'The launcher must ensure the stable user-level transport.');
-  assert.ok(desktopIndex > installIndex, 'Config repair must run even when Desktop is already open.');
-  assert.ok(serverIndex > desktopIndex);
-  assert.match(source, /\$codexAppToolsDefinition\.Override/);
-  assert.match(source, /codexAppToolsTransportSchemaVersion/);
-  assert.match(source, /ConvertTo-WindowsCommandLineArgument/);
-  assert.match(source, /ArgumentList = \(@\(/);
-});
-
 test('current Codex accepts a new-thread enabled_tools override over the pinned transport', {
   skip: process.platform !== 'win32',
 }, (context) => {

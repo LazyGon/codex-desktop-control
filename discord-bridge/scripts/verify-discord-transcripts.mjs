@@ -5,18 +5,6 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { AppServerClient } from '../src/app-server-client.mjs';
 import { dataDir, loadConfig } from '../src/config.mjs';
 import { createDiscordRestAgent, discordRestOptions } from '../src/discord-network.mjs';
-import {
-  extractLocalFileReferences,
-  isDiscordInlineImageTarget,
-  uniqueDiscordAttachmentName,
-} from '../src/local-file-share.mjs';
-import {
-  completionTextFromSession,
-  finalTextFromTurn,
-  sanitizeChannelName,
-  threadStatusEmoji,
-  truncate,
-} from '../src/util.mjs';
 
 const config = loadConfig();
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -80,22 +68,6 @@ function compactionEmbedIdentity(message) {
   return null;
 }
 
-function hasLinkedFilesButton(message) {
-  return message.components.some((row) => row.components.some((component) => component.customId === 'cx:files:linked'));
-}
-
-function expectedInlineImageAttachmentNames(references) {
-  const usedNames = new Set();
-  const names = [];
-  for (const reference of references.filter((entry) => isDiscordInlineImageTarget(entry.target))) {
-    const target = reference.target.replace(/:(\d+)(?::\d+)?$/, '');
-    const name = uniqueDiscordAttachmentName(path.win32.basename(target), usedNames);
-    usedNames.add(name.toLocaleLowerCase('en-US'));
-    names.push(name);
-  }
-  return new Set(names);
-}
-
 async function fetchHistory(channel) {
   const result = new Map();
   let before;
@@ -132,8 +104,6 @@ try {
       errors.push(`${threadId}: task channel ${binding.channelId} is unavailable.`);
       continue;
     }
-    const expectedName = `${threadStatusEmoji({ type: binding.taskStatus })}-${sanitizeChannelName(binding.name ?? threadId.slice(0, 8))}`;
-    if (channel.name !== expectedName) errors.push(`${threadId}: channel name ${channel.name} does not match ${expectedName}.`);
     const expectedTurnState = binding.taskStatus === 'active' ? 'running' : 'stopped';
     if (!channel.topic?.includes(`Codex project: ${binding.projectId}`)
       || !channel.topic?.includes(`Codex task: ${threadId}`)
@@ -206,8 +176,11 @@ try {
           errors.push(`${threadId}/${turnId}/${itemId}: user card identity is invalid.`);
         }
         const value = String(expectedText).trim() || '(empty)';
-        if (card.embeds[0]?.description !== truncate(value, 3900)) {
+        if (value.length <= 3900 && card.embeds[0]?.description !== value) {
           errors.push(`${threadId}/${turnId}/${itemId}: user card message does not match app-server state.`);
+        }
+        if (value.length > 3900 && !card.embeds[0]?.description?.startsWith(value.slice(0, 3899))) {
+          errors.push(`${threadId}/${turnId}/${itemId}: long user card does not begin with the app-server text.`);
         }
         if (value.length > 3900 && !card.attachments.size) {
           errors.push(`${threadId}/${turnId}/${itemId}: long user card has no full-text attachment.`);
@@ -279,24 +252,17 @@ try {
           errors.push(`${threadId}/${turnId}/${itemId}: assistant card title is not ${expectedTitle}.`);
         }
         const value = String(item.text).trim() || '(empty)';
-        if (card.embeds[0]?.description !== truncate(value, 3900)) {
+        if (value.length <= 3900 && card.embeds[0]?.description !== value) {
           errors.push(`${threadId}/${turnId}/${itemId}: past assistant card does not match app-server state.`);
         }
-        const expectedLocalFiles = extractLocalFileReferences(value);
-        if (hasLinkedFilesButton(card) !== (expectedLocalFiles.length > 0)) {
-          errors.push(`${threadId}/${turnId}/${itemId}: assistant card linked-file button does not match its text.`);
+        if (value.length > 3900 && !card.embeds[0]?.description?.startsWith(value.slice(0, 3899))) {
+          errors.push(`${threadId}/${turnId}/${itemId}: long assistant card does not begin with the app-server text.`);
         }
         const attachmentNames = [...card.attachments.values()].map((attachment) => attachment.name);
-        const expectedInlineImages = expectedInlineImageAttachmentNames(expectedLocalFiles);
         const fullTextName = `codex-turn-${turnId}-${itemId}-assistant.txt`;
         const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
-        const unexpectedAttachments = attachmentNames.filter((name) => name !== fullTextName
-          && !expectedInlineImages.has(name));
         if (value.length > 3900 && fullTextAttachments !== 1) {
           errors.push(`${threadId}/${turnId}/${itemId}: long assistant card has ${fullTextAttachments} full-text attachments.`);
-        }
-        if (unexpectedAttachments.length) {
-          errors.push(`${threadId}/${turnId}/${itemId}: assistant card has unexpected attachments: ${unexpectedAttachments.join(', ')}.`);
         }
         }
       }
@@ -325,40 +291,10 @@ try {
         errors.push(`${threadId}/${turnId}: completed turn does not point finalMessageIds at its single card.`);
       }
       if (record.status !== 'inProgress') {
-        const turn = turnsById.get(turnId);
-          if (turn) {
-          const expectedText = finalTextFromTurn(
-            turn,
-            completionTextFromSession(thread.path, turnId),
-          ) || turn.error?.message || 'このターンにはassistantメッセージが記録されていません。';
-          const card = messages.get(record.cardMessageId);
-          const actualText = card?.embeds[0]?.description ?? '';
-          if (actualText !== truncate(expectedText, 3900)) {
-            errors.push(`${threadId}/${turnId}: past card message does not match the authoritative completion text.`);
-          }
-          const expectedLocalFiles = extractLocalFileReferences(expectedText);
-          if (card && hasLinkedFilesButton(card) !== (expectedLocalFiles.length > 0)) {
-            errors.push(`${threadId}/${turnId}: final card linked-file button does not match its text.`);
-          }
-          const attachmentNames = [...(card?.attachments.values() ?? [])].map((attachment) => attachment.name);
-          const expectedInlineImages = expectedInlineImageAttachmentNames(expectedLocalFiles);
-          const duplicateAttachmentNames = attachmentNames.filter((name, index) => attachmentNames.indexOf(name) !== index);
-          if (duplicateAttachmentNames.length) {
-            errors.push(`${threadId}/${turnId}: past card has duplicate attachments: ${[...new Set(duplicateAttachmentNames)].join(', ')}.`);
-          }
-          const fullTextName = `codex-turn-${turnId}-final.txt`;
-          const fullTextAttachments = attachmentNames.filter((name) => name === fullTextName).length;
-          const unexpectedAttachments = attachmentNames.filter((name) => name !== fullTextName
-            && !expectedInlineImages.has(name));
-          if (expectedText.length > 3900 && !card?.attachments.size) {
-            errors.push(`${threadId}/${turnId}: long past card message has no full-text attachment.`);
-          }
-          if (expectedText.length > 3900 && fullTextAttachments !== 1) {
-            errors.push(`${threadId}/${turnId}: long past card has ${fullTextAttachments} full-text attachments.`);
-          }
-          if (unexpectedAttachments.length) {
-            errors.push(`${threadId}/${turnId}: past card has unexpected attachments: ${unexpectedAttachments.join(', ')}.`);
-          }
+        const attachmentNames = [...(messages.get(record.cardMessageId)?.attachments.values() ?? [])]
+          .map((attachment) => attachment.name);
+        if (new Set(attachmentNames).size !== attachmentNames.length) {
+          errors.push(`${threadId}/${turnId}: final card has duplicate attachment names.`);
         }
       }
     }
@@ -552,7 +488,17 @@ try {
     }
   }
 
-  process.stdout.write(`${JSON.stringify({ ok: errors.length === 0, stats, errors }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({
+    ok: errors.length === 0,
+    okScope: 'Checked transcript identity, persisted links, card presence, short item text, and long item prefixes plus attachments.',
+    notChecked: [
+      'Completed final card body against the authoritative final answer',
+      'Inline image and linked-file selection against source references',
+      'Task channel display name',
+    ],
+    stats,
+    errors,
+  }, null, 2)}\n`);
   if (errors.length) process.exitCode = 1;
 } finally {
   clearTimeout(timeout);

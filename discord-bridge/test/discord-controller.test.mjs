@@ -41,13 +41,7 @@ import {
   transcriptReadWindowOptions,
   taskMirrorOrder,
 } from '../src/discord-controller.mjs';
-import {
-  CONTROL_PANEL_COLOR,
-  CONTROL_PANEL_MARKER,
-  taskPanelMarker,
-} from '../src/discord-panels.mjs';
 import { discover7Zip } from '../src/split-archive.mjs';
-import { projectCategoryName } from '../src/util.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { readSessionTurnCardOrder } from '../src/session-message-order.mjs';
 import { DeliveryOutbox } from '../src/delivery-outbox.mjs';
@@ -106,18 +100,6 @@ test('only visible active task bindings keep a managed project category active',
 
   assert.deepEqual([...active], ['app-server:visible']);
   assert.equal(active.has('app-server:catalog-only'), false);
-});
-
-test('task synchronization does not eagerly create categories for catalog-only projects', () => {
-  const source = fs.readFileSync(new URL('../src/discord-controller.mjs', import.meta.url), 'utf8');
-  const archivedSyncEnd = source.indexOf("markPhase('archivedTasks');");
-  const appServerProjectsPhase = source.indexOf("markPhase('appServerProjects');", archivedSyncEnd);
-  assert.notEqual(archivedSyncEnd, -1);
-  assert.notEqual(appServerProjectsPhase, -1);
-  assert.doesNotMatch(
-    source.slice(archivedSyncEnd, appServerProjectsPhase),
-    /#ensureProjectCategories/,
-  );
 });
 
 test('managed archive category cleanup compacts occupied overflow and preserves one empty base', () => {
@@ -339,7 +321,7 @@ test('project category collision and overflow keep the PC suffix and visible tru
 
 test('new PC-first category names retain the collision tag and visible truncation', () => {
   const descriptor = { key: 'local-1',
-    name: projectCategoryName('x'.repeat(200), 'Codex [Alias] Task - ', '', true) };
+    name: `Codex [Alias] Task - ${'x'.repeat(200)}` };
   const names = managedProjectCategoryNames(descriptor, [
     { projectKey: 'local-2', name: descriptor.name },
   ], 2, '', true);
@@ -442,7 +424,7 @@ test('control channel messages replace the unpinned control card at the latest p
     return message;
   };
   makeMessage('control-panel-old', {
-    embeds: [{ footer: { text: CONTROL_PANEL_MARKER } }],
+    embeds: [{ footer: { text: 'Codex Remote UI / control-panel' } }],
     pinned: true,
   });
   const laterMessage = makeMessage('later-message', {
@@ -491,7 +473,7 @@ test('control channel messages replace the unpinned control card at the latest p
   assert.equal(panelId, 'control-panel-new-1');
   assert.equal([...messages.keys()].at(-1), panelId);
   assert.equal(panel.pinned, false);
-  assert.equal(panel.embeds[0].footer.text, CONTROL_PANEL_MARKER);
+  assert.equal(panel.embeds[0].footer.text, 'Codex Remote UI / control-panel');
   assert.equal(newPanelPinned, 0);
   assert.equal(oldPanelUnpinned, 1);
   assert.equal(oldPanelDeleted, 1);
@@ -2680,7 +2662,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     return message;
   };
   const oldPanel = makeMessage('panel-old', {
-    embeds: [{ footer: { text: taskPanelMarker(binding.threadId) } }],
+    embeds: [{ footer: { text: `Codex Remote UI / task-panel / ${binding.threadId}` } }],
   });
   oldPanel.pinned = true;
   const liveCommentary = makeMessage('assistant-live', {
@@ -2800,7 +2782,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   const panel = channelMessages.get(binding.controlPanelMessageId);
   assert.ok(panel);
   assert.equal(panel.pinned, false);
-  assert.equal(panel.embeds[0].footer.text, taskPanelMarker(binding.threadId));
+  assert.equal(panel.embeds[0].footer.text, `Codex Remote UI / task-panel / ${binding.threadId}`);
   assert.equal(panel.embeds[0].fields.find((field) => field.name === 'Status').value, 'idle');
   assert.deepEqual(Object.keys(binding.turnMessages['turn-complete'].userEntries), ['persisted-user']);
   assert.equal(binding.turnMessages['turn-complete'].userEntries['persisted-user'].messageIds.length, 1);
@@ -2810,7 +2792,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
   const finalIndex = sent.findIndex((message) => message.embeds[0]?.title === 'Codex turn completed');
   const panelIndex = sent.findIndex((message) => message.id === panel.id);
   assert.ok(finalIndex >= 0 && panelIndex > finalIndex);
-  assert.equal(sent[finalIndex].embeds[0].color, 0x1971c2);
+  assert.equal(sent[finalIndex].embeds[0].description, 'Finished.');
   assert.equal(sent[finalIndex].components[0].components.at(-1).custom_id, 'cx:copy:card');
   assert.equal(binding.turnMessages['turn-complete'].finalText, 'Finished.');
   const completionNotice = [...completionMessages.values()][0];
@@ -2822,8 +2804,6 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     parse: [],
     users: ['subscriber-user'],
   });
-  assert.equal(panel.embeds[0].color, CONTROL_PANEL_COLOR);
-  assert.notEqual(sent[finalIndex].embeds[0].color, panel.embeds[0].color);
 
   const sentBeforeLateItem = sent.length;
   codex.emit('notification', {
@@ -2851,7 +2831,7 @@ test('completed turns retry transient delivery failure, do not backfill commenta
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(binding.controlPanelMessageId, firstPanelId);
-  assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === taskPanelMarker(binding.threadId)).length, 1);
+  assert.equal([...channelMessages.values()].filter((message) => message.embeds[0]?.footer?.text === `Codex Remote UI / task-panel / ${binding.threadId}`).length, 1);
   assert.equal(binding.turnMessages['turn-complete'].finalizedAt, finalizedAt);
   assert.equal(sent.length, sentCount);
   assert.deepEqual(binding.turnMessages['turn-complete'].assistantEntries['persisted-commentary'].messageIds, [liveCommentary.id]);
@@ -3383,7 +3363,6 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
     ['codex-image-tool-image-restored-1.png'],
   );
   assert.ok(sent.indexOf(runningAfterRestore) > sent.indexOf(restoredImageCard));
-  assert.equal(userCard.embeds[0].color, 0xe67e22);
   assert.equal(userCard.embeds[0].description, 'run the requested task');
   assert.equal(userCard.components[0].components[0].custom_id, 'cx:copy:card');
   assert.deepEqual(userCard.embeds[0].fields.map((field) => field.name), ['Task', 'Turn', 'Message']);

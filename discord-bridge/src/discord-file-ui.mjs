@@ -18,16 +18,6 @@ export function formatFileSize(size) {
   return `${(size / 1024 ** 3).toFixed(1)} GB`;
 }
 
-export function linkedFilesComponents(count) {
-  if (!count) return [];
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('cx:files:linked')
-      .setLabel(`Linked files (${count})`)
-      .setStyle(ButtonStyle.Secondary),
-  )];
-}
-
 export function contentCardComponents(linkedFileCount = 0) {
   const row = new ActionRowBuilder();
   if (linkedFileCount) {

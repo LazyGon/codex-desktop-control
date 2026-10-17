@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { connectCanonical, readJson, saveJson, deliveryFor } from './shared-task-operations.mjs';
 import { uuidV7TimestampMs, turnTimestampMs } from '../discord-bridge/src/recent-history.mjs';
-import { checkedJson } from '../state/rvm-fast-operations-20261007/operation-io.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultDirectory = path.join(root, 'state/global-system-error-recovery-20261013');
@@ -61,6 +60,13 @@ export function observedGoalRecovery(thread, turns, goal, previous) {
     && Number.isFinite(active.observedAt) && active.observedAt <= last.completedAt * 1000
     && previous.latestTurnId === last.id && previous.latestTurnStatus === 'inProgress'
     && previous.goalStatus === 'active' && previous.identityHash === hashIdentity(thread);
+}
+function checkedJson(pin) {
+  if (!pin || !/^[0-9a-f]{64}$/.test(pin.sha256) || !Number.isSafeInteger(pin.byteLength)) throw new Error('PIN_SHAPE');
+  const bytes = fs.readFileSync(pin.file);
+  if (crypto.createHash('sha256').update(bytes).digest('hex') !== pin.sha256
+      || bytes.length !== pin.byteLength) throw new Error('PIN_DRIFT');
+  return JSON.parse(bytes);
 }
 function blockedWorkMatches(thread, goal, record) {
   if (record?.schemaVersion !== 1 || goal?.status !== 'blocked'

@@ -173,21 +173,10 @@ export function desktopProjectRootForThread(thread, snapshot) {
     : null;
 }
 
-export function desktopProjectForThread(thread, snapshot) {
-  return desktopProjectAssignmentForThread(thread, snapshot)
-    ?? desktopProjectRootForThread(thread, snapshot);
-}
-
 export function projectForThread(thread, snapshot) {
   return appServerProjectForThread(thread, snapshot)
     ?? desktopProjectAssignmentForThread(thread, snapshot)
     ?? desktopProjectRootForThread(thread, snapshot);
-}
-
-export function projectCwdForThread(thread, snapshot) {
-  const project = projectForThread(thread, snapshot);
-  if (project) return thread?.cwd ?? project.rootPaths[0] ?? null;
-  return snapshot?.available ? null : thread?.cwd ?? null;
 }
 
 export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ', categorySuffix = '',

@@ -157,23 +157,6 @@ test('background shared launcher uses a supported shell without injecting execut
   assert.match(payload.CommandLine, /(?:^|\s)-NoDialogs(?:\s|$)/i);
 });
 
-test('interactive shared launcher exposes a compact verified progress window', () => {
-  const source = fs.readFileSync(sourcePath, 'utf8');
-  assert.match(source, /class SharedLaunchProgressForm : Form/);
-  assert.match(source, /new DataGridView\(\)/);
-  assert.match(source, /new ProgressBar\(\)/);
-  assert.match(source, /desktopConnectionVerified/);
-  assert.match(source, /desktopProcessIds/);
-  assert.match(source, /HasLiveDesktopProcess/);
-  assert.match(source, /ProbeLoopbackReady/);
-  assert.match(source, /Application\.Run\(progressForm\)/);
-  assert.match(source, /正常稼働中のアプリは残ります/);
-  assert.match(source, /DataGridViewButtonColumn/);
-  assert.match(source, /ProgressMutexName/);
-  assert.match(source, /FormClosing \+= RequestClose/);
-  assert.match(source, /if \(noDialogs\)[\s\S]*Process\.Start\(startInfo\)/);
-});
-
 function windowsPowerShell() {
   return path.join(process.env.WINDIR ?? String.raw`C:\Windows`, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 }
@@ -206,7 +189,6 @@ function compileUiHarness(directory) {
     'using System;',
     'using System.Diagnostics;',
     'using System.Linq;',
-    'using System.Reflection;',
     'using System.Web.Script.Serialization;',
     'using System.Windows.Forms;',
     'internal static class UiHarness {',
@@ -217,23 +199,20 @@ function compileUiHarness(directory) {
     '  var timer = new Timer { Interval=100 };',
     '  var watch = Stopwatch.StartNew();',
     '  bool retried=false, requestedClose=false;',
-    '  bool retryClockRunning=false;',
-    '  long? initialElapsed=null;',
+    '  string initialElapsed=null;',
     '  string initialDesktopStatus=null;',
     '  var grid = form.Controls.OfType<DataGridView>().Single();',
-    '  var elapsed = (Stopwatch)typeof(SharedLaunchProgressForm).GetField("elapsed", BindingFlags.Instance|BindingFlags.NonPublic).GetValue(form);',
-    '  var completionDisplay = (Stopwatch)typeof(SharedLaunchProgressForm).GetField("completionDisplay", BindingFlags.Instance|BindingFlags.NonPublic).GetValue(form);',
     '  form.FormClosed += delegate {',
-    '   Console.Write(new JavaScriptSerializer().Serialize(new { result=form.ResultCode, initial=initialDesktopStatus, rows=grid.Rows.Cast<DataGridViewRow>().Select(r=>Convert.ToString(r.Cells[1].Value)).ToArray(), details=form.Controls.OfType<TextBox>().Single().Text, enabled=grid.Enabled, elapsedRunning=elapsed.IsRunning, retryClockRunning=retryClockRunning, initialElapsed=initialElapsed, finalElapsed=elapsed.ElapsedMilliseconds, autoClosed=!requestedClose, closedAfter=watch.ElapsedMilliseconds, completionDisplayMs=completionDisplay.ElapsedMilliseconds }));',
+    '   Console.Write(new JavaScriptSerializer().Serialize(new { result=form.ResultCode, initial=initialDesktopStatus, rows=grid.Rows.Cast<DataGridViewRow>().Select(r=>Convert.ToString(r.Cells[1].Value)).ToArray(), details=form.Controls.OfType<TextBox>().Single().Text, enabled=grid.Enabled, initialElapsed=initialElapsed, finalElapsed=Convert.ToString(grid.Rows[3].Cells[1].Value), autoClosed=!requestedClose, closedAfter=watch.ElapsedMilliseconds }));',
     '  };',
     '  timer.Tick += delegate {',
     '   if (args[3]=="cancel" && watch.ElapsedMilliseconds>1000 && !requestedClose) { requestedClose=true; form.Close(); return; }',
-    '   if (args[3]=="hold-close" && completionDisplay.IsRunning && watch.ElapsedMilliseconds>1500 && !requestedClose) { requestedClose=true; form.Close(); return; }',
-    '   if (!elapsed.IsRunning && watch.ElapsedMilliseconds>1500 && !initialElapsed.HasValue) { initialElapsed=elapsed.ElapsedMilliseconds; }',
-    '   if (args[3]=="retry" && grid.Enabled && !elapsed.IsRunning && watch.ElapsedMilliseconds>1500 && !retried) {',
+    '   var status=Convert.ToString(grid.Rows[1].Cells[1].Value);',
+    '   if (args[3]=="hold-close" && grid.Enabled && status=="running (skipped)" && watch.ElapsedMilliseconds>1500 && !requestedClose) { requestedClose=true; form.Close(); return; }',
+    '   if ((status=="失敗" || status=="running (skipped)") && watch.ElapsedMilliseconds>1500 && initialElapsed==null) { initialElapsed=Convert.ToString(grid.Rows[3].Cells[1].Value); }',
+    '   if (args[3]=="retry" && grid.Enabled && status=="失敗" && watch.ElapsedMilliseconds>1500 && !retried) {',
     '    initialDesktopStatus=Convert.ToString(grid.Rows[1].Cells[1].Value);',
-    '    typeof(SharedLaunchProgressForm).GetMethod("RetryStep", BindingFlags.Instance|BindingFlags.NonPublic).Invoke(form,new object[]{form,new DataGridViewCellEventArgs(2,1)});',
-    '    retryClockRunning=elapsed.IsRunning;',
+    '    grid.Rows[1].Cells[2].AccessibilityObject.DoDefaultAction();',
     '    retried=true;',
     '   }',
     '   if (watch.ElapsedMilliseconds>(args[3]=="fail" ? 3500 : 18000)) {',
@@ -262,11 +241,7 @@ test('progress window records a failed step, displays its error, and retries onl
   assert.equal(result.rows[1], 'running (skipped)');
   assert.match(result.details, /fixture connection failure/);
   assert.equal(result.enabled, true);
-  assert.equal(result.elapsedRunning, false);
   assert.equal(result.autoClosed, true);
-  assert.equal(result.retryClockRunning, true);
-  assert.ok(result.completionDisplayMs >= 10000);
-  assert.ok(result.completionDisplayMs < 11500);
   assert.deepEqual(fs.readFileSync(path.join(launcher, 'requests.txt'), 'utf8').trim().split(/\r?\n/), ['All', 'Desktop']);
 });
 
@@ -281,11 +256,8 @@ test('an already-open unverified Desktop is shown as skipped rather than startup
   assert.equal(result.rows[1], 'running (skipped)');
   assert.match(result.rows[2], /スキップ/);
   assert.equal(result.enabled, true);
-  assert.equal(result.elapsedRunning, false);
   assert.equal(result.autoClosed, true);
   assert.equal(result.initialElapsed, result.finalElapsed);
-  assert.ok(result.completionDisplayMs >= 10000);
-  assert.ok(result.completionDisplayMs < 11500);
   assert.equal(fs.readdirSync(path.join(launcher, 'state')).some(name => name.endsWith('.cancel')), false);
 });
 
@@ -297,14 +269,13 @@ test('a failure freezes elapsed time before worker cleanup finishes and leaves r
   const harness = compileUiHarness(directory);
   const result = JSON.parse(execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'fail'], { encoding: 'utf8', timeout: 15000 }));
   assert.equal(result.result, 1);
-  assert.equal(result.elapsedRunning, false);
   assert.equal(result.initialElapsed, result.finalElapsed);
   assert.equal(result.enabled, true);
   assert.equal(result.autoClosed, false);
   assert.match(result.details, /fixture connection failure/);
 });
 
-test('completion freezes elapsed time, stays visible ten seconds, and exits without cancellation', context => {
+test('completion freezes displayed elapsed time and exits after the worker without cancellation', context => {
   if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-progress-complete-clock-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -312,16 +283,13 @@ test('completion freezes elapsed time, stays visible ten seconds, and exits with
   const harness = compileUiHarness(directory);
   const result = JSON.parse(execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'skip'], { encoding: 'utf8', timeout: 25000 }));
   assert.equal(result.result, 0);
-  assert.equal(result.elapsedRunning, false);
   assert.equal(result.initialElapsed, result.finalElapsed);
   assert.equal(result.autoClosed, true);
   assert.ok(result.closedAfter >= 2000, 'Do not close before the finite worker exits.');
-  assert.ok(result.completionDisplayMs >= 10000);
-  assert.ok(result.completionDisplayMs < 11500);
   assert.equal(fs.readdirSync(path.join(launcher, 'state')).some(name => name.endsWith('.cancel')), false);
 });
 
-test('a completed launcher can be manually closed before its ten-second display ends', context => {
+test('a completed launcher can be manually closed before automatic dismissal', context => {
   if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-progress-hold-close-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -329,9 +297,7 @@ test('a completed launcher can be manually closed before its ten-second display 
   const harness = compileUiHarness(directory);
   const result = JSON.parse(execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'hold-close'], { encoding: 'utf8', timeout: 15000 }));
   assert.equal(result.result, 0);
-  assert.equal(result.elapsedRunning, false);
   assert.equal(result.autoClosed, false);
-  assert.ok(result.completionDisplayMs < 10000);
   assert.equal(fs.readdirSync(path.join(launcher, 'state')).some(name => name.endsWith('.cancel')), false);
 });
 

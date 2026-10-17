@@ -4631,7 +4631,6 @@ export class DiscordController {
     await syncThreads(archived, true);
     if (this.stopping) return result;
     markPhase('archivedTasks');
-    markPhase('appServerProjects');
     this.#setTaskSyncPhase({ phase: 'subagents' });
     const subagents = await this.#syncSubagentsForTasks(active);
     if (this.stopping) return result;

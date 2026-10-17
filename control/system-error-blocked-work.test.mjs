@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { authorizeBlockedWork, observedBlockedWorkRecovery, hashIdentity, goalIdentity,
+import { createHash } from 'node:crypto';
+import { authorizeBlockedWork, observedBlockedWorkRecovery,
   eligibility, defaultConfig, runCycle } from './system-error-recovery.mjs';
-import { pin, checkedJson } from '../state/rvm-fast-operations-20261007/operation-io.mjs';
+const goalDigest = createHash('sha256').update('{"createdAt":50,"objective":"Continue the original authorized work","tokenBudget":123456}').digest('hex');
+const identityDigest = createHash('sha256').update('{"agentRole":"owner","cwd":"C:/retained/work","id":"task","model":"gpt-6.1-sol","modelProvider":"openai","parentThreadId":null,"reasoningEffort":"high"}').digest('hex');
 
 const clone = value => structuredClone(value);
 const initialId = 'po-observed-turn';
@@ -37,13 +39,13 @@ function fixture(t, { snapshotChange, permitChange } = {}) {
   const snapshot = { thread: task(), turns: [running()], goal: blocked() };
   const permit = { schemaVersion: 1, kind: 'po-directed-blocked-work',
     authorizingThreadId: 'po-authorizing-task', targetThreadId: snapshot.thread.id,
-    initialTurnId: initialId, goalIdentity: goalIdentity(snapshot.goal),
-    goalUpdatedAt: snapshot.goal.updatedAt, identityHash: hashIdentity(snapshot.thread) };
+    initialTurnId: initialId, goalIdentity: goalDigest,
+    goalUpdatedAt: snapshot.goal.updatedAt, identityHash: identityDigest };
   snapshotChange?.(snapshot); permitChange?.(permit);
   const file = path.join(directory, 'permit.json');
   fs.writeFileSync(file, JSON.stringify(permit) + '\n');
-  const authorizationPin = pin(file);
-  assert.deepEqual(checkedJson(authorizationPin), permit);
+  const bytes = fs.readFileSync(file);
+  const authorizationPin = { file, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
   return { snapshot, permit, authorizationPin, file };
 }
 
@@ -96,8 +98,8 @@ test('PO permit admits only its exact confirmed running blocked-work snapshot', 
   const { snapshot, authorizationPin } = fixture(t);
   const entry = authorizeBlockedWork(snapshot, authorizationPin, 150000);
   assert.deepEqual(entry.blockedWorkObservation, { schemaVersion: 1, authorizationPin, initialTurnId: initialId,
-    goalIdentity: goalIdentity(snapshot.goal), goalUpdatedAt: 80,
-    identityHash: hashIdentity(snapshot.thread), turnId: initialId, turnStatus: 'inProgress', observedAt: 150000 });
+    goalIdentity: goalDigest, goalUpdatedAt: 80,
+    identityHash: identityDigest, turnId: initialId, turnStatus: 'inProgress', observedAt: 150000 });
   assert.equal(entry.latestTurnId, initialId); assert.equal(entry.latestTurnStatus, 'inProgress');
   assert.equal(entry.goalStatus, 'blocked');
 });

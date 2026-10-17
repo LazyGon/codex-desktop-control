@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CHATGPT_COLOR,
-  CHATGPT_CONTROL_PANEL_MARKER,
   chatgptControlPanelPayload,
   chatgptConversationPanelPayload,
 } from '../src/chatgpt-panels.mjs';
@@ -22,12 +20,11 @@ const CONVERSATION = {
 
 test('ChatGPT control panel lists only explicitly persisted conversations', () => {
   const empty = chatgptControlPanelPayload({ conversations: [], ready: true });
-  assert.equal(empty.embeds[0].toJSON().footer.text, CHATGPT_CONTROL_PANEL_MARKER);
+  assert.equal(empty.embeds[0].toJSON().footer.text, 'ChatGPT Remote control panel v1');
   assert.match(empty.embeds[0].toJSON().description, /自動検出はせず/);
   assert.equal(empty.components.some((row) => row.toJSON().components[0].custom_id === 'cg:open'), false);
 
   const linked = chatgptControlPanelPayload({ conversations: [CONVERSATION], ready: true });
-  assert.equal(linked.embeds[0].toJSON().color, CHATGPT_COLOR);
   const picker = linked.components.at(-1).toJSON().components[0];
   assert.equal(picker.custom_id, 'cg:open');
   assert.deepEqual(picker.options.map((option) => option.value), [CONVERSATION.conversationId]);
@@ -35,7 +32,6 @@ test('ChatGPT control panel lists only explicitly persisted conversations', () =
 
 test('ChatGPT conversation panel exposes performance and confirmed unlink UI', () => {
   const payload = chatgptConversationPanelPayload(CONVERSATION);
-  assert.equal(payload.embeds[0].toJSON().color, CHATGPT_COLOR);
   assert.equal(payload.components[0].toJSON().components[0].custom_id, `cg:performance:${CONVERSATION.conversationId}`);
   assert.equal(
     payload.components[0].toJSON().components[0].options.find((option) => option.default).value,

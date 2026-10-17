@@ -20,14 +20,6 @@ test('the three-minute inactivity limit does not impose a total startup deadline
  assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -ElapsedSeconds 179'),'pending');
  assert.equal(run("try{Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -ElapsedSeconds 180;'unexpected'}catch{'rejected'}"),'rejected');
 });
-test('handoff has no fixed overall startup or Scheduler runtime deadline',()=>{
- const script=fs.readFileSync(path.join(root,'Initialize-CodexSharedDesktop.ps1'),'utf8');
- assert.doesNotMatch(script,/runtimeDeadline|AddMinutes\(4\)|ExecutionTimeLimit \(New-TimeSpan/);
- assert.match(script,/ExecutionTimeLimit \(\[TimeSpan\]::Zero\)/);
- assert.match(script,/\$startupWatch\.Elapsed\.TotalSeconds - \$lastProgressSeconds -ge 180/);
- assert.match(script,/if \(\$stage -gt \$lastStage\)/);
- assert.match(script,/Invoke-CodexDesktopNormalShutdown.+-Execute/);
-});
 test('only forward startup stages count; reconnect errors and unrelated hosts do not',()=>{
  const stages=JSON.parse(run("@((Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Starting app-server connection hostId=local transport=websocket'),(Get-CodexDesktopStartupLogStage -Line 'error [AppServerConnection] websocket_error hostId=local'),(Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Transport start success connectionId=1 hostId=local transport=websocket'),(Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Starting app-server connection hostId=durable transport=websocket'))|ConvertTo-Json"));
  assert.deepEqual(stages,[20,0,30,0]);

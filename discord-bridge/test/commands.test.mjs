@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ApplicationCommandOptionType } from 'discord.js';
 import { commandPayload } from '../src/commands.mjs';
 
 test('guild command payload contains the full remote operation surface', () => {
@@ -35,8 +36,7 @@ test('guild command payload contains the full remote operation surface', () => {
     const subcommand = commandPayload[0].options.find((option) => option.name === name);
     const attachment = subcommand.options.find((option) => option.name === 'attachment');
     assert.ok(attachment);
-    assert.match(attachment.description, /画像・文書・アーカイブ/);
-    assert.doesNotMatch(attachment.description, /200KB|テキストファイル$/);
+    assert.equal(attachment.type, ApplicationCommandOptionType.Attachment);
   }
 });
 

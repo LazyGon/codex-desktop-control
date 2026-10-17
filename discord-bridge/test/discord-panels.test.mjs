@@ -1,12 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CONTROL_PANEL_COLOR,
-  CONTROL_PANEL_MARKER,
   controlPanelPayload,
   projectVisibilityPayload,
   recentHistoryPayload,
-  taskPanelMarker,
   taskPanelPayload,
 } from '../src/discord-panels.mjs';
 
@@ -33,8 +30,7 @@ test('control panel exposes status, usage, resources, sync, recent history, pend
       { threadId: 'thread-archived', name: 'Archived task', cwd: 'C:\\work', taskStatus: 'idle', archived: true },
     ],
   }));
-  assert.equal(payload.embeds[0].color, CONTROL_PANEL_COLOR);
-  assert.equal(payload.embeds[0].footer.text, CONTROL_PANEL_MARKER);
+  assert.equal(payload.embeds[0].footer.text, 'Codex Remote UI / control-panel');
   assert.deepEqual(payload.components[0].components.map((component) => component.custom_id), [
     'cx:ui:control:status',
     'cx:ui:control:usage',
@@ -99,8 +95,7 @@ test('task panel groups delivery, task, notification, and file actions into four
     thread,
     binding: { threadId: thread.id, watchLevel: 'normal', archived: false },
   }));
-  assert.equal(active.embeds[0].color, CONTROL_PANEL_COLOR);
-  assert.equal(active.embeds[0].footer.text, taskPanelMarker(thread.id));
+  assert.equal(active.embeds[0].footer.text, 'Codex Remote UI / task-panel / thread-1');
   assert.equal(active.components[0].components[0].custom_id, `cx:ui:task:compose:${thread.id}`);
   assert.deepEqual(active.components[0].components[0].options.map((option) => option.value), [
     'deliver', 'send', 'steer',
@@ -133,7 +128,6 @@ test('task panel groups delivery, task, notification, and file actions into four
       archived: true,
     },
   }));
-  assert.equal(archived.embeds[0].color, CONTROL_PANEL_COLOR);
   assert.equal(archived.components[0].components[0].disabled, true);
   assert.deepEqual(archived.components[1].components[0].options.map((option) => option.value), [
     'refresh', 'pending', 'archive',

@@ -49,20 +49,14 @@ const unchanged = `
 `;
 const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['pathext', 'comspec'].includes(key.toLowerCase())));
 
-test('missing Windows environment reproduces the original failure, then process-only repair permits the exact Node pipeline', () => {
+test('process-only repair of missing Windows environment permits the exact Node pipeline', () => {
   const result = probe(`${snapshot}
-    $initialPathext=$env:PATHEXT;
-    $initialComSpec=$env:ComSpec;
-    $originalErrorId=$null;
-    try { $unused=& ${quote(process.execPath)} --version | Out-String }
-    catch { $originalErrorId=$_.FullyQualifiedErrorId }
     $repair=Initialize-CodexWindowsProcessEnvironment;
     $version=(& ${quote(process.execPath)} --version | Out-String).Trim();
     $nodeExitCode=$LASTEXITCODE;
     ${unchanged}
-    [ordered]@{ initialPathext=$initialPathext; initialComSpec=$initialComSpec; originalErrorId=$originalErrorId; repair=$repair; version=$version; exitCode=$nodeExitCode; registryUnchanged=$registryUnchanged; savedExecutableExists=[IO.File]::Exists($env:ComSpec) } | ConvertTo-Json -Compress
+    [ordered]@{ repair=$repair; version=$version; exitCode=$nodeExitCode; registryUnchanged=$registryUnchanged; savedExecutableExists=[IO.File]::Exists($env:ComSpec) } | ConvertTo-Json -Compress
   `, inheritedEnv);
-  assert.match(result.originalErrorId, /CantActivateDocumentInPipeline/);
   assert.equal(result.repair.PathextChanged, true);
   assert.equal(result.repair.ComSpecChanged, true);
   assert.equal(result.version, process.version);

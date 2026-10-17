@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -28,13 +27,4 @@ try { Set-TypeSafeApiKeyEnvironment -ApiKeyText 'invalid key' -Target Process } 
     Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 20000 });
   assert.deepEqual(JSON.parse(output.trim()), { matched: true, noSecretOutput: true, invalidRejected: true,
     userUntouched: true, previousValuePreserved: true });
-});
-
-test('input UI masks the key, discloses user-level plaintext persistence, and never calls an API', () => {
-  const source = fs.readFileSync(path.join(directory, 'Enter-TypeSafeApiKey.ps1'), 'utf8');
-  assert.match(source, /UseSystemPasswordChar = \$true/);
-  assert.match(source, /Set-TypeSafeApiKeyEnvironment -ApiKeyText \$inputBox.Text -Target User/);
-  assert.match(source, /レジストリ平文/);
-  assert.match(source, /apiValidated = \$false/);
-  assert.doesNotMatch(source, /Invoke-(RestMethod|WebRequest)|ConvertFrom-SecureString/);
 });

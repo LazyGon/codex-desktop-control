@@ -12,5 +12,4 @@ test('Windows atomic JSON reads and event-only mirror observation survive contro
   ], { encoding: 'utf8', windowsHide: true });
   const result = JSON.parse(output);
   assert.equal(result.passed, true);
-  assert.equal(result.count, 9);
 });

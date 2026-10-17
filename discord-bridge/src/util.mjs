@@ -55,20 +55,6 @@ export function truncate(value, maximum, suffix = '...') {
   return `${text.slice(0, Math.max(0, maximum - suffix.length))}${suffix}`;
 }
 
-export function formatReasoningField(value, maximum = 900, maximumLines = 4) {
-  const limit = Math.max(1, Number(maximum) || 900);
-  const lines = String(value ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.replaceAll('**', '').trim())
-    .filter(Boolean)
-    .slice(-Math.max(1, Number(maximumLines) || 4));
-  while (lines.length > 1 && lines.map((line) => `- ${line}`).join('\n').length > limit) {
-    lines.shift();
-  }
-  if (lines.length === 0) return '';
-  return truncate(lines.map((line) => `- ${line}`).join('\n'), limit, '…');
-}
-
 export function splitText(value, maximum = 1900) {
   const text = String(value ?? '');
   if (!text) return [];
@@ -83,33 +69,6 @@ export function splitText(value, maximum = 1900) {
   }
   if (remaining) chunks.push(remaining);
   return chunks;
-}
-
-export function discordCodeBlock(value, language = 'text') {
-  const escaped = String(value ?? '').replaceAll('```', '``\\`');
-  return `\`\`\`${language}\n${escaped}\n\`\`\``;
-}
-
-export function fitsDiscordMessageContent(value) {
-  return String(value ?? '').length <= 2000;
-}
-
-export function splitDiscordCodeBlocks(value, language = 'text') {
-  const prefix = `\`\`\`${language}\n`;
-  const suffix = '\n```';
-  const escaped = String(value ?? '').replaceAll('```', '``\\`');
-  const chunks = splitText(escaped || '(empty)', 2000 - prefix.length - suffix.length);
-  return chunks.map((chunk) => `${prefix}${chunk}${suffix}`);
-}
-
-export function planDiscordCodeBlockDelivery(value, language = 'text', maximumMessages = 5) {
-  const text = String(value ?? '') || '(empty)';
-  const messages = splitDiscordCodeBlocks(text, language);
-  if (messages.length <= maximumMessages) return { attachmentText: null, messages };
-  return {
-    attachmentText: text,
-    messages: messages.slice(-(maximumMessages - 1)),
-  };
 }
 
 export function planDiscordTextDelivery(value, maximumMessages = 5, chunkSize = 1700) {
@@ -188,18 +147,6 @@ export function isPathWithinProject(candidatePath, projectPath) {
   const project = projectPathKey(projectPath);
   const relative = path.win32.relative(project, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.win32.isAbsolute(relative));
-}
-
-export function uniqueProjectPath(bindings) {
-  const projects = new Map();
-  for (const binding of bindings ?? []) {
-    if (!binding?.cwd) continue;
-    try {
-      const normalized = normalizeProjectPath(binding.cwd);
-      projects.set(projectPathKey(normalized), normalized);
-    } catch {}
-  }
-  return projects.size === 1 ? [...projects.values()][0] : null;
 }
 
 export function sanitizeChannelName(value, fallback = 'task') {
@@ -288,15 +235,6 @@ export function itemResultSummary(item) {
   }
   if (item?.status) return `${base} (${item.status})`;
   return base;
-}
-
-export function assistantTextFromTurn(turn, preferredPhase = null) {
-  const messages = (turn?.items ?? []).filter((item) => item.type === 'agentMessage' && item.text && !isAsyncQuestionItem(item));
-  if (preferredPhase) {
-    const preferred = messages.filter((item) => item.phase === preferredPhase);
-    return preferred.map((item) => item.text).join('\n\n');
-  }
-  return messages.map((item) => item.text).join('\n\n');
 }
 
 export function completionTextFromSession(sessionPath, turnId) {
@@ -485,36 +423,6 @@ export function reasoningSummaryFromTurn(turn) {
     .map((value) => String(value).trim())
     .filter(Boolean);
   return [...new Set(summaries)].join('\n');
-}
-
-export function recentMessagesFromThread(thread, limit = 16, characterLimit = 6000) {
-  const messages = [];
-  for (const turn of thread?.turns ?? []) {
-    for (const item of turn.items ?? []) {
-      if (item.type === 'agentMessage' && item.text) {
-        messages.push({ role: 'assistant', text: truncate(item.text, characterLimit), turnId: turn.id, phase: item.phase });
-      }
-      if (item.type === 'userMessage') {
-        const text = (item.content ?? []).map((part) => part.text ?? '').filter(Boolean).join('\n');
-        if (text) messages.push({ role: 'user', text: truncate(text, characterLimit), turnId: turn.id });
-      }
-    }
-  }
-  return messages.slice(-limit);
-}
-
-export function formatThreadSnapshot(thread, limit = 16) {
-  const header = [
-    `Task: ${thread.name ?? '(untitled)'}`,
-    `ID: ${thread.id}`,
-    `Status: ${threadStatusLabel(thread.status)}`,
-    `CWD: ${thread.cwd ?? '(none)'}`,
-    '',
-  ].join('\n');
-  const body = recentMessagesFromThread(thread, limit)
-    .map((message) => `[${message.role}${message.phase ? `/${message.phase}` : ''}]\n${message.text}`)
-    .join('\n\n');
-  return `${header}${body || '(no messages)'}`;
 }
 
 export function isSnowflake(value) {

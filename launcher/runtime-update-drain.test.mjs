@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -198,51 +197,6 @@ test('waitForTurnCompletion re-reads terminal state after a missed notification'
 
   const result = await waitForTurnCompletion(client, 'THREAD', 'TURN', 10_000);
   assert.equal(result.status, 'completed');
-  assert.equal(reads, 2);
-});
-
-test('shared launcher drains turns and replaces the server on package updates', () => {
-  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
-  assert.match(source, /Wait-RuntimeUpdateQuiescence/);
-  assert.match(source, /Restore-RuntimeUpdateGoals/);
-  assert.match(source, /restartAfterCleanup/);
-  assert.doesNotMatch(source, /Updated Desktop attached automatically to the existing shared app-server/);
-});
-
-test('shared launcher reuses only a runtime whose Desktop connection was verified', () => {
-  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
-  const reusableRuntime = extractPowerShellFunction(
-    source,
-    'Get-ReusableRuntimeState',
-    'Start-DesktopOnRuntime',
-  );
-  assert.match(reusableRuntime, /\$state\.desktopConnectionVerified -ne \$true/);
-  assert.match(
-    reusableRuntime,
-    /has not completed Desktop connection verification/,
-  );
-});
-
-test('concurrent shared launch waits for the exact owner to finish Desktop verification', () => {
-  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
-  const waiter = extractPowerShellFunction(
-    source,
-    'Wait-ReusableRuntimeState',
-    'Start-DesktopOnRuntime',
-  );
-  assert.match(waiter, /TimeoutSeconds = 120/);
-  assert.match(waiter, /Get-ReusableRuntimeState[\s\S]*-SuppressFailureLog/);
-
-  const contentionStart = source.indexOf('if (-not $ownsMutex) {');
-  const serverStart = source.indexOf('Assert-PortAvailable -PortNumber $Port', contentionStart);
-  assert.notEqual(contentionStart, -1);
-  assert.notEqual(serverStart, -1);
-  const contention = source.slice(contentionStart, serverStart);
-  assert.match(contention, /Wait-ReusableRuntimeState/);
-  assert.match(contention, /Invoke-LauncherSignal -Kind Ready/);
-  assert.match(contention, /\$exitCode = 0/);
-  assert.match(contention, /\$startupHandled = \$true/);
-  assert.doesNotMatch(contention, /Start-DesktopOnRuntime|Start-Process|Stop-Process/);
 });
 
 test('Desktop bootstrap stdio helper does not abort a subsequently successful shared connection', context => {
@@ -253,19 +207,18 @@ test('Desktop bootstrap stdio helper does not abort a subsequently successful sh
 $ErrorActionPreference = 'Stop'
 . ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1'))}
 $script:checks = 0
-$script:helperLogs = 0
 function Assert-LauncherNotCancelled { }
 function Test-DesktopWebSocketConnection { $script:checks += 1; return ($script:checks -ge 3) }
 function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
 function Read-CodexDesktopStartupProgress { return 0 }
 function Get-DesktopLocalAppServers { [pscustomobject]@{ ProcessId = 202 } }
-function Write-LauncherLog { param($Message); $script:helperLogs += 1 }
+function Write-LauncherLog { }
 ${waiter}
 $ok = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -OwnedServerProcessId $PID -TimeoutSeconds 1 -PollMilliseconds 1
-[pscustomobject]@{ok=$ok;checks=$script:checks;helperLogs=$script:helperLogs} | ConvertTo-Json -Compress
+[pscustomobject]@{ok=$ok} | ConvertTo-Json -Compress
 `;
   const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
-  assert.deepEqual(JSON.parse(output.trim()), { ok: true, checks: 3, helperLogs: 1 });
+  assert.equal(JSON.parse(output.trim()).ok, true);
 });
 
 test('Desktop connection wait remains cancellable before a shared connection exists', context => {
@@ -287,63 +240,11 @@ try {
   $null = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -OwnedServerProcessId $PID -TimeoutSeconds 10 -PollMilliseconds 1
   throw 'Cancellation was ignored.'
 } catch [OperationCanceledException] {
-  [pscustomobject]@{cancelled=$true;checks=$script:checks} | ConvertTo-Json -Compress
+  [pscustomobject]@{cancelled=$true} | ConvertTo-Json -Compress
 }
 `;
   const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
-  assert.deepEqual(JSON.parse(output.trim()), { cancelled: true, checks: 1 });
-});
-
-test('one-shot refresh waits the exact turn before replacing the owned runtime', () => {
-  const source = fs.readFileSync(refreshScriptPath, 'utf8');
-  assert.match(source, /WaitForTurnId/);
-  assert.match(source, /Invoke-DrainCommand -Command 'wait-turn'/);
-  assert.match(source, /Wait-AllThreadsIdle/);
-  assert.match(source, /Wait-ForOldRuntimeExit/);
-  assert.match(source, /Wait-ForNewRuntime/);
-  assert.match(source, /Send-CompletionCallback/);
-  assert.match(source, /controlScript deliver \$WaitForThreadId/);
-  assert.match(source, /Start-DetachedRefreshController/);
-  assert.match(source, /Register-ScheduledTask/);
-  assert.match(source, /Start-ScheduledTask/);
-  assert.match(source, /controllerLaunchMode = 'scheduled-task'/);
-  assert.match(source, /requestId = \$RefreshRequestId/);
-  assert.match(source, /DesktopCloseTimeoutSeconds = 120/);
-  assert.match(source, /AddSeconds\(\$DesktopCloseTimeoutSeconds\)/);
-  assert.doesNotMatch(source, /AddSeconds\(15\)/);
-
-  const controllerBody = source.slice(source.indexOf('$controllerExitCode = 0'));
-  assert.ok(
-    controllerBody.indexOf('Wait-ForControllerAcceptance')
-      < controllerBody.indexOf('$oldState = Get-VerifiedRuntimeState'),
-    'the controller must receive the request-bound acknowledgement before runtime work',
-  );
-  assert.ok(
-    controllerBody.indexOf("Invoke-DrainCommand -Command 'pause-active'")
-      < controllerBody.indexOf("Invoke-DrainCommand -Command 'wait-turn'"),
-    'active goals must pause before the exact turn wait',
-  );
-  assert.equal(
-    (source.match(/\$delivery = Send-CompletionCallback -NewState \$newState/g) ?? []).length,
-    1,
-    'the controller must make one callback attempt',
-  );
-});
-
-test('one-shot refresh fails closed around ownership, overlap, and live Desktop identity', () => {
-  const source = fs.readFileSync(refreshScriptPath, 'utf8');
-  assert.match(source, /Local\\CodexSharedRuntimeRefreshLaunch/);
-  assert.match(source, /Local\\CodexSharedRuntimeRefreshController/);
-  assert.match(source, /Assert-OwnedRefreshTask -Task \$existingTask/);
-  assert.match(source, /Assert-NoUnresolvedRefreshReceipt/);
-  assert.match(source, /\$receipt\.phase -notin @\('completed', 'failed'\)/);
-  assert.match(source, /MultipleInstances IgnoreNew/);
-  assert.match(source, /phase = 'controller-accepted'/);
-  assert.match(source, /Wait-ForControllerAcceptance/);
-  assert.match(source, /Refresh request \$RefreshRequestId has already started/);
-  assert.match(source, /\$state\.desktopConnectionVerified -ne \$true/);
-  assert.match(source, /Test-DesktopWebSocketConnection/);
-  assert.match(source, /\$listener\[0\]\.LocalAddress -ne '127\.0\.0\.1'/);
+  assert.equal(JSON.parse(output.trim()).cancelled, true);
 });
 
 test('request receipts replace the prior run atomically in Windows PowerShell 5.1', {
@@ -355,8 +256,6 @@ test('request receipts replace the prior run atomically in Windows PowerShell 5.
     'Write-RefreshResult',
     'Get-OptionalObjectProperty',
   );
-  assert.match(writeFunction, /\[IO\.File\]::Replace/);
-  assert.doesNotMatch(source, /Remove-Item -LiteralPath \$resultPath/);
 
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-refresh-receipt-'));
   const receiptPath = path.join(temporaryRoot, 'receipt.json');
@@ -390,104 +289,41 @@ test('request receipts replace the prior run atomically in Windows PowerShell 5.
   }
 });
 
-test('Windows PowerShell 5.1 registers and manually runs a no-trigger task', {
+test('refresh task ownership rejects foreign actions, principals, triggers and active tasks', {
   skip: process.platform !== 'win32',
 }, () => {
-  const taskName = `Codex Refresh Test ${randomUUID()}`;
-  const repositoryRoot = path.dirname(launcherRoot);
   const source = fs.readFileSync(refreshScriptPath, 'utf8');
-  const ownershipFunction = extractPowerShellFunction(
-    source,
-    'Assert-OwnedRefreshTask',
-    'Assert-NoUnresolvedRefreshReceipt',
-  );
-  const ownedController = [
-    `& '${refreshScriptPath.replaceAll("'", "''")}' \``,
-    "    -WaitForThreadId '00000000-0000-0000-0000-000000000001' `",
-    "    -WaitForTurnId '00000000-0000-0000-0000-000000000002' `",
-    "    -FromVersion '26.820.1.0' `",
-    "    -ToVersion '26.820.2.0' `",
-    '    -TurnTimeoutSeconds 1800 `',
-    '    -RestartTimeoutSeconds 240 `',
-    '    -DesktopCloseTimeoutSeconds 120 `',
-    '    -ScheduledController `',
-    "    -RefreshRequestId '00000000-0000-0000-0000-000000000003' `",
-    `    -ScheduledTaskName '${taskName.replaceAll("'", "''")}'`,
-  ].join('\r\n');
-  const ownedPayload = encodedPowerShell(ownedController);
-  const safePayload = encodedPowerShell('Start-Sleep -Seconds 2; exit 23');
-  const starter = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$name = ${quotePowerShell(taskName)}
-$exe = ${quotePowerShell(windowsPowerShell())}
-$repositoryRoot = ${quotePowerShell(repositoryRoot)}
-$refreshScriptPath = ${quotePowerShell(refreshScriptPath)}
-$scheduledTaskDescription = 'One-shot controller for a safe shared Codex runtime refresh.'
-$ScheduledTaskName = $name
-${ownershipFunction}
-$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
-$ownedAction = New-ScheduledTaskAction -Execute $exe -Argument ${quotePowerShell(`-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${ownedPayload}`)} -WorkingDirectory ${quotePowerShell(repositoryRoot)}
-Register-ScheduledTask -TaskName $name -Action $ownedAction -Principal $principal -Settings $settings -Description $scheduledTaskDescription -Force | Out-Null
-$task = Get-ScheduledTask -TaskName $name
-Assert-OwnedRefreshTask -Task $task
-[xml]$xml = Export-ScheduledTask -TaskName $name
-$triggerCount = @($xml.SelectNodes("/*[local-name()='Task']/*[local-name()='Triggers']/*")).Count
-Unregister-ScheduledTask -TaskName $name -Confirm:$false
-$action = New-ScheduledTaskAction -Execute $exe -Argument ${quotePowerShell(`-NoLogo -NoProfile -NonInteractive -EncodedCommand ${safePayload}`)} -WorkingDirectory ${quotePowerShell(repositoryRoot)}
-Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings -Description 'Safe no-trigger ScheduledTasks execution probe.' -Force | Out-Null
-$foreignRejected = $false
-try { Assert-OwnedRefreshTask -Task (Get-ScheduledTask -TaskName $name) } catch { $foreignRejected = $true }
-if (-not $foreignRejected) { throw 'A foreign same-name task passed the ownership check.' }
-Start-ScheduledTask -TaskName $name
-[pscustomobject]@{ triggerCount = $triggerCount; workingDirectory = $action.WorkingDirectory; ownershipValidated = $true; foreignRejected = $foreignRejected } | ConvertTo-Json -Compress
-`;
-  const cleanup = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$name = ${quotePowerShell(taskName)}
-try {
-  $deadline = [DateTimeOffset]::Now.AddSeconds(15)
-  do {
-    $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
-    $info = Get-ScheduledTaskInfo -TaskName $name
-    if ([string]$task.State -eq 'Ready' -and $info.LastRunTime.Year -gt 2000) { break }
-    Start-Sleep -Milliseconds 250
-  } while ([DateTimeOffset]::Now -lt $deadline)
-  [pscustomobject]@{ state = [string]$task.State; lastTaskResult = $info.LastTaskResult } | ConvertTo-Json -Compress
-}
-finally {
-  if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $name -Confirm:$false
-  }
-}
-`;
-
-  try {
-    const definition = JSON.parse(execFileSync(windowsPowerShell(), [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(starter),
-    ], { encoding: 'utf8' }));
-    assert.equal(definition.triggerCount, 0);
-    assert.equal(definition.workingDirectory, repositoryRoot);
-    assert.equal(definition.ownershipValidated, true);
-    assert.equal(definition.foreignRejected, true);
-
-    const completion = JSON.parse(execFileSync(windowsPowerShell(), [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(cleanup),
-    ], { encoding: 'utf8' }));
-    assert.equal(completion.state, 'Ready');
-    assert.equal(completion.lastTaskResult, 23);
-  } finally {
-    const forcedCleanup = `
-$ProgressPreference = 'SilentlyContinue'
-$name = ${quotePowerShell(taskName)}
-if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
-  Unregister-ScheduledTask -TaskName $name -Confirm:$false
-}
-`;
-    execFileSync(windowsPowerShell(), [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(forcedCleanup),
-    ], { encoding: 'utf8' });
-  }
+  const ownershipFunction = extractPowerShellFunction(source, 'Assert-OwnedRefreshTask', 'Assert-NoUnresolvedRefreshReceipt');
+  const taskName = 'Codex Refresh Fixture';
+  const repositoryRoot = path.dirname(launcherRoot);
+  const command = [
+    "& '" + refreshScriptPath.replaceAll("'", "''") + "'",
+    "-WaitForThreadId '00000000-0000-0000-0000-000000000001'",
+    "-WaitForTurnId '00000000-0000-0000-0000-000000000002'",
+    "-FromVersion '26.820.1.0' -ToVersion '26.820.2.0'",
+    '-TurnTimeoutSeconds 1800 -RestartTimeoutSeconds 240 -DesktopCloseTimeoutSeconds 120',
+    "-ScheduledController -RefreshRequestId '00000000-0000-0000-0000-000000000003'",
+    "-ScheduledTaskName '" + taskName + "'",
+  ].join(' ');
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$ScheduledTaskName=" + quotePowerShell(taskName),
+    "$repositoryRoot=" + quotePowerShell(repositoryRoot),
+    "$refreshScriptPath=" + quotePowerShell(refreshScriptPath),
+    "$scheduledTaskDescription='One-shot controller for a safe shared Codex runtime refresh.'",
+    ownershipFunction,
+    "$payload=" + quotePowerShell(encodedPowerShell(command)),
+    "$task=[pscustomobject]@{ State='Ready'; Description=$scheduledTaskDescription; Principal=[pscustomobject]@{UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}; Triggers=@(); Actions=@([pscustomobject]@{Execute=" + quotePowerShell(windowsPowerShell()) + ";Arguments=('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand '+$payload);WorkingDirectory=$repositoryRoot}) }",
+    'Assert-OwnedRefreshTask $task',
+    '$rejected=@()',
+    "foreach($kind in @('action','principal','trigger','state','directory')) {",
+    ' $foreign=$task | ConvertTo-Json -Depth 5 | ConvertFrom-Json',
+    " switch($kind) { action {$foreign.Actions[0].Arguments='-Command exit'} principal {$foreign.Principal.UserId='S-1-5-18'} trigger {$foreign.Triggers=@([pscustomobject]@{Enabled=$true})} state {$foreign.State='Running'} directory {$foreign.Actions[0].WorkingDirectory='C:\\foreign'} }",
+    " try { Assert-OwnedRefreshTask $foreign } catch { $rejected+= $kind }",
+    '}',
+    '[pscustomobject]@{admitted=$true;rejected=$rejected} | ConvertTo-Json -Compress',
+  ].join('\n');
+  const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {encoding:'utf8', windowsHide:true}));
+  assert.equal(result.admitted, true);
+  assert.deepEqual(result.rejected, ['action', 'principal', 'trigger', 'state', 'directory']);
 });

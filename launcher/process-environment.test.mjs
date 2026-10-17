@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 
 const launcherRoot = path.dirname(fileURLToPath(import.meta.url));
 const helper = path.join(launcherRoot, 'CodexProcessEnvironment.ps1');
-const startScript = path.join(launcherRoot, 'Start-CodexShared.ps1');
 
 function psLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -71,14 +70,4 @@ test('shared launcher leaves PATH unchanged when the CLI redirect is not install
 
   assert.equal(payload.Enabled, false);
   assert.equal(payload.Path, originalPath);
-});
-
-test('shared launcher enables the redirect before starting app-server', () => {
-  const source = fs.readFileSync(startScript, 'utf8');
-  const enableIndex = source.indexOf(
-    '$cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses',
-  );
-  const startIndex = source.indexOf('$serverProcess = Start-Process @serverStartParameters');
-  assert.ok(enableIndex >= 0, 'The launcher must enable the redirect in its process PATH.');
-  assert.ok(startIndex > enableIndex, 'The redirect must be enabled before app-server starts.');
 });

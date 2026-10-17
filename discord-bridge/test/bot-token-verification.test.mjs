@@ -56,18 +56,22 @@ test('real DPAPI save round-trips with restricted ACL from a WinForms callback',
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer); $secure.Dispose() };
         $acl=Microsoft.PowerShell.Security\\Get-Acl -LiteralPath '${destination}';
         $script:protected=$acl.AreAccessRulesProtected;
-        $script:rules=$acl.Access.Count;
+        $script:rules=@($acl.Access | ForEach-Object {
+          @{ sid=$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;
+             type=[string]$_.AccessControlType; rights=[string]$_.FileSystemRights; inherited=$_.IsInherited }
+        });
+        $script:userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
         Write-DiscordProtectedBotToken -TokenText 'fake-token-test-only' -TokenPath '${destination}';
       } catch { $script:failed=$_.Exception.GetType().FullName; $script:failedMessage=$_.Exception.Message + ' / ' + $_.ScriptStackTrace } finally { $form.Close() }
     });
     $form.Add_Shown({$button.PerformClick()}); $form.ShowDialog() | Out-Null;
-    @{roundTrip=$script:roundTrip; protected=$script:protected; rules=$script:rules; failed=$script:failed; failedMessage=$script:failedMessage} | ConvertTo-Json -Compress;
-  `.replace("$ErrorActionPreference='Stop';", "$ErrorActionPreference='Stop'; $script:roundTrip=$false; $script:protected=$false; $script:rules=0; $script:failed=$null; $script:failedMessage=$null;");
+    @{roundTrip=$script:roundTrip; protected=$script:protected; rules=$script:rules; userSid=$script:userSid; failed=$script:failed; failedMessage=$script:failedMessage} | ConvertTo-Json -Depth 5 -Compress;
+  `.replace("$ErrorActionPreference='Stop';", "$ErrorActionPreference='Stop'; $script:roundTrip=$false; $script:protected=$false; $script:rules=@(); $script:userSid=$null; $script:failed=$null; $script:failedMessage=$null;");
   const output = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const result = JSON.parse(output);
   assert.equal(result.failed, null, result.failedMessage);
   assert.equal(result.roundTrip, true);
   assert.equal(result.protected, true);
-  assert.equal(result.rules, 1);
+  assert.deepEqual(result.rules, [{ sid: result.userSid, type: 'Allow', rights: 'FullControl', inherited: false }]);
   assert.equal(output.includes('fake-token-test-only'), false);
 });

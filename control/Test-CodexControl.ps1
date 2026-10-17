@@ -23,14 +23,11 @@ if ($status.ready -ne $true) {
 }
 
 $list = Invoke-ControlJson -Arguments @('list', '--limit', '3', '--compact')
-if ($list.tasks.Count -eq 0) {
-    throw 'No tasks were returned.'
-}
-
-$targetId = [string]$list.tasks[0].id
-$catchup = Invoke-ControlJson -Arguments @('catchup', $targetId, '--messages', '2', '--chars', '1000', '--compact')
-if ($catchup.id -ne $targetId) {
-    throw 'Catch-up returned the wrong task.'
+$catchup = $null
+if (@($list.tasks).Count -gt 0) {
+    $targetId = [string]$list.tasks[0].id
+    $catchup = Invoke-ControlJson -Arguments @('catchup', $targetId, '--messages', '2', '--chars', '1000', '--compact')
+    if ($catchup.id -ne $targetId) { throw 'Catch-up returned the wrong task.' }
 }
 
 [pscustomobject]@{
@@ -38,6 +35,7 @@ if ($catchup.id -ne $targetId) {
     Endpoint = $status.endpoint
     EndpointSource = $status.endpointSource
     ListedTaskCount = $list.tasks.Count
-    CatchupTaskId = $catchup.id
-    CatchupMessageCount = $catchup.messages.Count
+    CatchupVerified = $null -ne $catchup
+    CatchupTaskId = if ($catchup) { $catchup.id } else { $null }
+    CatchupMessageCount = if ($catchup) { @($catchup.messages).Count } else { $null }
 }

@@ -4,17 +4,9 @@ import {
   contentCardComponents,
   fileBrowserPayload,
   linkedFilePickerPayload,
-  linkedFilesComponents,
 } from '../src/discord-file-ui.mjs';
 
 const json = (value) => JSON.parse(JSON.stringify(value));
-
-test('assistant cards expose one stable linked-file button only when links exist', () => {
-  assert.deepEqual(linkedFilesComponents(0), []);
-  const rows = json(linkedFilesComponents(3));
-  assert.equal(rows[0].components[0].custom_id, 'cx:files:linked');
-  assert.equal(rows[0].components[0].label, 'Linked files (3)');
-});
 
 test('content cards always expose copy text and keep linked-file access when available', () => {
   const withoutLinks = json(contentCardComponents());
