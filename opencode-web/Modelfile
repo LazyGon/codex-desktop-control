@@ -1,0 +1,4 @@
+FROM qwen3.5:4b
+# Ollama's OpenCode integration specifies a context of at least 64k.
+# A separate alias leaves the original model's parameters unchanged.
+PARAMETER num_ctx 65536
