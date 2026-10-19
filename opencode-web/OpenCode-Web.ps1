@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Initialize', 'Start', 'Status', 'Register', 'ShowLogin', 'Shortcuts')]
+    [ValidateSet('Initialize', 'Start', 'Status', 'Register', 'ShowLogin', 'Shortcuts', 'Ollama', 'RegisterOllama')]
     [string]$Mode = 'Status',
     [string]$InstanceRoot = 'D:\AI\OpenCode',
     [switch]$WaitForExit,
@@ -9,6 +9,10 @@ $ErrorActionPreference = 'Stop'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $taskName = 'OpenCode Web (Ollama)'
 $description = 'OpenCode Web: local Ollama, loopback only, current user Limited.'
+if ($Mode -in @('Ollama', 'RegisterOllama')) {
+    $taskName = 'Ollama (OpenCode)'
+    $description = 'OpenCode local Ollama: loopback only, current user Limited, no model preload.'
+}
 $binary = Join-Path $InstanceRoot 'runtime\node_modules\opencode-windows-x64\bin\opencode.exe'
 $workspace = Join-Path $InstanceRoot 'projects\mobile-apps'
 $config = Join-Path $InstanceRoot 'config\opencode.json'
@@ -127,27 +131,74 @@ if ($Mode -eq 'Shortcuts') {
     $web.TargetPath = $url.AbsoluteUri
     $web.Save()
     $link = $shell.CreateShortcut($loginPath)
-    $link.TargetPath = $powershell
-    $link.Arguments = '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Mode ShowLogin -InstanceRoot "{1}"' -f $PSCommandPath, $InstanceRoot
+    $link.TargetPath = $pythonw
+    $link.Arguments = '"{0}" --powershell "{1}" --instance-root "{2}" --mode ShowLogin' -f (Join-Path $PSScriptRoot 'launcher.py'), $powershell, $InstanceRoot
     $link.WorkingDirectory = $PSScriptRoot
     $link.Save()
     @{ shortcutsCreated = $true } | ConvertTo-Json
     exit 0
 }
 
-if ($Mode -eq 'Register') {
+if ($Mode -in @('Register', 'RegisterOllama')) {
     if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) { throw 'Windowless Python runtime is missing.' }
     $existing = Get-OwnedTask
     if ($existing) { throw 'Scheduled task already exists; preserve existing settings.' }
     $action = New-ScheduledTaskAction -Execute $pythonw -WorkingDirectory $PSScriptRoot -Argument (
         '"{0}" --powershell "{1}" --instance-root "{2}"' -f
         (Join-Path $PSScriptRoot 'launcher.py'), $powershell, $InstanceRoot)
+    if ($Mode -eq 'RegisterOllama') { $action.Arguments += ' --mode Ollama' }
     $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
     $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     $null = Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Trigger $trigger `
         -Settings $settings -Description $description
+    if ($Mode -eq 'RegisterOllama') { @{ taskName = $taskName; registered = $true } | ConvertTo-Json; exit 0 }
+}
+
+if ($Mode -eq 'Ollama') {
+    $ollama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
+    $modelRoot = Join-Path $env:USERPROFILE '.ollama\models'
+    if (-not (Test-Path -LiteralPath $ollama -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $modelRoot 'manifests\registry.ollama.ai\library\qwen3.5\4b') -PathType Leaf)) {
+        throw 'Installed Ollama or the existing default-store Qwen model is missing. No automatic download.'
+    }
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 11434 -ErrorAction SilentlyContinue)
+    if ($listeners.Count) {
+        if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1' -or
+            (Get-Process -Id $listeners[0].OwningProcess).Path -ne $ollama) {
+            throw 'Existing Ollama endpoint ownership is not verified; no replacement.'
+        }
+        $version = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version'
+        $receiptPath = Join-Path $InstanceRoot 'state\ollama-server.json'
+        $owned = $false
+        if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+            $saved = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            $owner = Get-Process -Id $listeners[0].OwningProcess
+            $owned = $saved.pid -eq $owner.Id -and $saved.binary -eq $owner.Path -and
+                ([DateTime]$saved.startedAt).ToUniversalTime().Ticks -eq $owner.StartTime.ToUniversalTime().Ticks
+        }
+        @{ status = if ($owned) { 'owned-ollama-already-running' } else { 'external-ollama-already-running' };
+            pid = $listeners[0].OwningProcess; version = $version.version } | ConvertTo-Json
+        exit 0
+    }
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $ollama
+    $start.Arguments = 'serve'
+    $start.WorkingDirectory = $InstanceRoot
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.EnvironmentVariables['ComSpec'] = [Environment]::GetEnvironmentVariable('ComSpec', 'Machine')
+    $start.EnvironmentVariables['PATHEXT'] = [Environment]::GetEnvironmentVariable('PATHEXT', 'Machine')
+    $start.EnvironmentVariables['OLLAMA_HOST'] = '127.0.0.1:11434'
+    $start.EnvironmentVariables['OLLAMA_MODELS'] = $modelRoot
+    $start.EnvironmentVariables['OLLAMA_DEBUG'] = 'false'
+    $server = [Diagnostics.Process]::Start($start)
+    @{ status = 'started-not-yet-verified'; pid = $server.Id; binary = $ollama;
+        startedAt = $server.StartTime.ToUniversalTime().ToString('o'); modelRoot = $modelRoot } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstanceRoot 'state\ollama-server.json') -Encoding UTF8
+    $server.WaitForExit()
+    exit $server.ExitCode
 }
 
 if ($Mode -eq 'Start') {

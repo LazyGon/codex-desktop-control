@@ -9,6 +9,9 @@ $headers = @{ Authorization = 'Basic ' + [Convert]::ToBase64String(
 $endpoint = 'http://127.0.0.1:4096'
 $health = Invoke-RestMethod -Uri "$endpoint/global/health" -Headers $headers
 if (-not $health.healthy) { throw 'OpenCode health check failed.' }
+$ollama = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version'
+$installed = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags'
+if ('qwen3.5-opencode:4b' -notin @($installed.models.name)) { throw 'OpenCode model alias is missing.' }
 $config = Invoke-RestMethod -Uri "$endpoint/config" -Headers $headers
 $providers = Invoke-RestMethod -Uri "$endpoint/provider" -Headers $headers
 $paths = Invoke-RestMethod -Uri "$endpoint/path" -Headers $headers
@@ -32,6 +35,7 @@ foreach ($asset in $assets) {
 $report = [ordered]@{
     healthy = $health.healthy
     version = $health.version
+    ollamaVersion = $ollama.version
     model = $config.model
     enabledProviders = @($config.enabled_providers)
     connectedProviders = @($providers.connected)

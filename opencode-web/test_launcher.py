@@ -42,6 +42,28 @@ class LauncherTests(unittest.TestCase):
                 launcher.main()
             run.assert_not_called()
 
+    def test_login_is_windowless_but_not_hidden_with_startup_showwindow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (pathlib.Path(directory) / 'state').mkdir()
+            with patch.object(sys, 'argv', ['launcher.py', '--powershell', 'powershell.exe', '--instance-root', directory, '--mode', 'ShowLogin']), \
+                    patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                self.assertEqual(launcher.main(), 0)
+                command = run.call_args.args[0]
+                self.assertIn('ShowLogin', command)
+                self.assertNotIn('-WaitForExit', command)
+                self.assertNotIn('-WindowStyle', command)
+                self.assertTrue((pathlib.Path(directory) / 'state' / 'login-launcher.log').is_file())
+
+    def test_ollama_has_separate_log_and_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (pathlib.Path(directory) / 'state').mkdir()
+            with patch.object(sys, 'argv', ['launcher.py', '--powershell', 'powershell.exe', '--instance-root', directory, '--mode', 'Ollama']), \
+                    patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                self.assertEqual(launcher.main(), 0)
+                run.assert_called_once()
+                self.assertIn('Ollama', run.call_args.args[0])
+                self.assertTrue((pathlib.Path(directory) / 'state' / 'ollama-launcher.log').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
