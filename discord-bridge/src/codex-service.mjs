@@ -189,7 +189,8 @@ export class CodexService extends EventEmitter {
     const seenCursors = new Set();
     let cursor = null;
     do {
-      const params = { limit: 100, archived, sortKey: 'recency_at', sortDirection: 'desc' };
+      // Complete discovery needs every task, not server-side recency ranking.
+      const params = { limit: 100, archived, sortKey: 'updated_at', sortDirection: 'desc' };
       if (projectId) params.projectId = projectId;
       if (search) params.searchTerm = search;
       if (cursor) params.cursor = cursor;

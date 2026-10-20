@@ -1724,9 +1724,9 @@ export class DiscordController {
   }
 
   #hasMessageExecutionPermission(message) {
+    if (message.author?.bot) return false;
     if (this.#isAuthorizedUser(message.author?.id)) return true;
     const permissions = message.memberPermissions
-      ?? message.member?.permissionsIn?.(message.channel)
       ?? message.channel?.permissionsFor?.(message.member ?? message.author);
     return this.#hasDiscordExecutionPermission(permissions);
   }
@@ -4265,13 +4265,15 @@ export class DiscordController {
   #startTaskSyncPolling() {
     if (this.stopping || this.taskSyncTimer) return;
     let initialPanelLayoutRefreshPending = true;
+    let pollPending = false;
     const run = () => {
-      if (this.stopping || !this.codex.connected) return;
+      if (this.stopping || !this.codex.connected || pollPending) return;
       if (this.codex.subscriptionRestoreInProgress) {
         this.taskSyncAfterSubscriptionRestore = true;
         this.#log('task-sync-deferred-for-subscription-restore', { reason: 'poll' });
         return;
       }
+      pollPending = true;
       this.codex.restoreChangedSubscriptions().then(() => (
         this.#queueDeliveryOutboxDrain('task-sync-poll')
       )).then(() => {
@@ -4290,7 +4292,7 @@ export class DiscordController {
       }).catch((error) => {
         this.#log('task-sync-error', { error: error.stack ?? error.message });
         this.#postAlert(`全タスク同期に失敗しました。\n${error.message}`, 'error').catch(() => {});
-      });
+      }).finally(() => { pollPending = false; });
     };
     this.taskSyncTimer = setInterval(run, this.config.taskSyncIntervalMs);
     this.taskSyncTimer.unref?.();
@@ -5941,7 +5943,7 @@ export class DiscordController {
     };
   }
 
-  async #setSubagentDiscordStatus(binding, status) {
+  async #setSubagentDiscordStatus(binding, status, { archive = true } = {}) {
     if (!binding?.isSubagent) return;
     const channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
     if (!channel?.isThread?.()) return;
@@ -5950,17 +5952,17 @@ export class DiscordController {
     const desiredName = subagentDiscordThreadName(thread);
     if (channel.name !== desiredName) await channel.setName(desiredName, 'Refresh Codex subagent status');
     await this.#ensureSubagentHeader(binding, thread, channel);
-    const discordArchived = status !== 'active';
+    const discordArchived = archive && status !== 'active';
     if (discordArchived) await channel.setArchived(true, 'Codex subagent is idle');
     this.stateStore.setSubagentThread(binding.threadId, { taskStatus: status, discordArchived });
   }
 
-  async #updateTaskStatus(binding, status) {
+  async #updateTaskStatus(binding, status, options) {
     const type = typeof status === 'string' ? status : status?.type ?? 'unknown';
     this.stateStore.setBinding(binding.threadId, { taskStatus: type });
     try {
       if (binding.isSubagent) {
-        await this.#setSubagentDiscordStatus(binding, type);
+        await this.#setSubagentDiscordStatus(binding, type, options);
         return;
       }
       const current = this.stateStore.binding(binding.threadId);
@@ -8175,7 +8177,12 @@ export class DiscordController {
     const operation = this.#turnCompletedOnce(binding, params);
     this.turnCompletionPromises.set(key, operation);
     try {
-      return await operation;
+      const result = await operation;
+      if (binding.isSubagent) {
+        const current = this.stateStore.binding(binding.threadId);
+        await this.#setSubagentDiscordStatus(binding, current?.taskStatus ?? 'idle');
+      }
+      return result;
     } finally {
       if (this.turnCompletionPromises.get(key) === operation) {
         this.turnCompletionPromises.delete(key);
@@ -8190,7 +8197,7 @@ export class DiscordController {
       && current.statusTurnId && current.statusTurnId !== turn.id;
     if (!newerTurnActive) {
       this.stateStore.setBinding(binding.threadId, { statusTurnId: turn.id });
-      await this.#updateTaskStatus(binding, turn.status === 'failed' ? 'systemError' : 'idle');
+      await this.#updateTaskStatus(binding, turn.status === 'failed' ? 'systemError' : 'idle', { archive: false });
     }
     const completedRecord = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     if (completedRecord.status !== 'inProgress'

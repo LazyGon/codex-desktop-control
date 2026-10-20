@@ -603,6 +603,26 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.match(logText, /turn\/completed/);
 });
 
+test('complete discovery pages metadata without requiring server history ranking', async () => {
+  const service = new CodexService({ config: {}, stateStore: {}, logDir: os.tmpdir() });
+  service.client = {
+    connected: true,
+    call: async (method, params) => {
+      if (params.sortKey === 'recency_at') throw new Error('History ranking unavailable');
+      assert.equal(method, 'thread/list');
+      assert.equal(params.archived, true);
+      assert.equal(params.projectId, 'project-contract');
+      assert.equal(params.searchTerm, 'needle');
+      return params.cursor === 'older'
+        ? { data: [{ id: 'older-task', updatedAt: 1 }], nextCursor: null }
+        : { data: [{ id: 'new-task', updatedAt: 2 }], nextCursor: 'older' };
+    },
+  };
+  assert.deepEqual(await service.listAllThreads({
+    archived: true, projectId: 'project-contract', search: 'needle',
+  }), [{ id: 'new-task', updatedAt: 2 }, { id: 'older-task', updatedAt: 1 }]);
+});
+
 test('CodexService fallback starts the shared launcher without interactive dialogs', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-service-launcher-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));

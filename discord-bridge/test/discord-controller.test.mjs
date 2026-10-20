@@ -1587,6 +1587,7 @@ test('an unknown live subagent notification creates an isolated Discord thread m
   codex.readRecentThread = codex.readThread;
   codex.readThreadWindow = codex.readThread;
   codex.readAutomaticTranscript = codex.readThread;
+  codex.threadMetadata = codex.readThread;
   codex.allTurnDescriptors = async () => childThread.turns;
 
   const messages = new Map();
@@ -1619,6 +1620,7 @@ test('an unknown live subagent notification creates an isolated Discord thread m
       fetch: async (value) => (typeof value === 'string' ? messages.get(value) ?? null : collection()),
     },
     send: async (payload) => {
+      assert.equal(discordThread.archived, false, 'Completion must be writable before archive.');
       const message = {
         id: `message-${nextMessageId++}`,
         author: { id: 'bot-user', bot: true },
@@ -1627,6 +1629,7 @@ test('an unknown live subagent notification creates an isolated Discord thread m
         components: payload.components ?? [],
         attachments: new Map(),
         edit: async (next) => {
+          assert.equal(discordThread.archived, false, 'Completion edits must precede archive.');
           message.content = next.content ?? message.content;
           if (next.embeds) message.embeds = next.embeds.map((embed) => embed.toJSON?.() ?? embed);
           message.components = next.components ?? message.components;
@@ -1680,6 +1683,7 @@ test('an unknown live subagent notification creates an isolated Discord thread m
     config: { liveUpdateIntervalMs: 1, elapsedUpdateIntervalMs: 60_000 },
     logDir: directory,
   });
+  context.after(() => controller.stop());
   controller.attach();
   codex.emit('notification', {
     method: 'thread/status/changed',
@@ -1718,6 +1722,22 @@ test('an unknown live subagent notification creates an isolated Discord thread m
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.ok([...messages.values()].some((message) => message.embeds[0]?.title === 'Codex running'));
+  codex.emit('notification', {
+    method: 'turn/completed',
+    params: { threadId: childThread.id, turn: {
+      id: 'child-turn', status: 'completed',
+      items: [{ type: 'agentMessage', id: 'final-child', phase: 'final_answer', text: 'Child finished.' }],
+    } },
+  });
+  for (let attempt = 0; attempt < 100 && !discordThread.archived; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok([...messages.values()].some((message) => message.content.includes('Child finished.')
+    || message.embeds.some((embed) => embed.description?.includes('Child finished.'))),
+  fs.readdirSync(directory).filter((name) => name.startsWith('discord-') && name.endsWith('.jsonl'))
+    .map((name) => fs.readFileSync(path.join(directory, name), 'utf8')).join('\n'));
+  assert.equal(stateStore.subagentThread(childThread.id).lastCompletedTurnId, 'child-turn');
+  assert.equal(discordThread.archived, true);
   await controller.stop();
 });
 
