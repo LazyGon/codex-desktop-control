@@ -26,7 +26,9 @@ function Test-BridgeProcessIdentity {
             $runtimeStartedAt = [DateTimeOffset]$Runtime.startedAt
         }
         elseif (-not [DateTimeOffset]::TryParse([string]$Runtime.startedAt, [ref]$runtimeStartedAt)) { return $false }
-        return [Math]::Abs(($Process.StartTime.ToUniversalTime() - $runtimeStartedAt.UtcDateTime).TotalSeconds) -le 60
+        # Initialization can take arbitrarily long. A reused PID starts after
+        # the old runtime record; a genuine process starts before its record.
+        return $Process.StartTime.ToUniversalTime() -le $runtimeStartedAt.UtcDateTime
     }
     catch { return $false }
 }
