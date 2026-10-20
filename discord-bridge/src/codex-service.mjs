@@ -178,7 +178,7 @@ export class CodexService extends EventEmitter {
 
   async listThreads({ limit = this.config.taskListLimit, search = null, archived = false } = {}) {
     this.#requireClient();
-    const params = { limit, archived, sortKey: 'recency_at', sortDirection: 'desc' };
+    const params = { limit, archived, sortKey: 'recency_at', sortDirection: 'desc', useStateDbOnly: true };
     if (search) params.searchTerm = search;
     return this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
@@ -189,8 +189,8 @@ export class CodexService extends EventEmitter {
     const seenCursors = new Set();
     let cursor = null;
     do {
-      // Complete discovery needs every task, not server-side recency ranking.
-      const params = { limit: 100, archived, sortKey: 'updated_at', sortDirection: 'desc' };
+      // Ordinary discovery reads canonical metadata, not rollout repair scans.
+      const params = { limit: 100, archived, sortKey: 'updated_at', sortDirection: 'desc', useStateDbOnly: true };
       if (projectId) params.projectId = projectId;
       if (search) params.searchTerm = search;
       if (cursor) params.cursor = cursor;

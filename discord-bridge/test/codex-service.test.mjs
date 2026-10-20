@@ -603,12 +603,13 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.match(logText, /turn\/completed/);
 });
 
-test('complete discovery pages metadata without requiring server history ranking', async () => {
+test('complete discovery pages canonical metadata without rollout repair or history ranking', async () => {
   const service = new CodexService({ config: {}, stateStore: {}, logDir: os.tmpdir() });
   service.client = {
     connected: true,
     call: async (method, params) => {
       if (params.sortKey === 'recency_at') throw new Error('History ranking unavailable');
+      if (!params.useStateDbOnly) throw new Error('Rollout repair unavailable');
       assert.equal(method, 'thread/list');
       assert.equal(params.archived, true);
       assert.equal(params.projectId, 'project-contract');
