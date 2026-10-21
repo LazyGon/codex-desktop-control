@@ -237,6 +237,7 @@ async function listAllThreads(client, archived, projectId = null) {
       archived,
       sortKey: 'recency_at',
       sortDirection: 'desc',
+      useStateDbOnly: true,
     };
     if (projectId) params.projectId = projectId;
     if (cursor) params.cursor = cursor;
@@ -345,9 +346,17 @@ async function run(options = parseArguments(process.argv.slice(2))) {
   const globalStatePath = path.resolve(options.globalStatePath);
   const bridgeStatePath = path.resolve(options.bridgeStatePath);
   if (!fs.existsSync(globalStatePath)) throw new Error(`Desktop state is missing: ${globalStatePath}`);
-  if (!fs.existsSync(bridgeStatePath)) throw new Error(`Bridge state is missing: ${bridgeStatePath}`);
-
-  const { projectRoots, boundThreads } = loadBridgeProjects(bridgeStatePath);
+  // Discord mirrors are supplemental metadata, not a dependency of Desktop.
+  // Preserve an unreadable mirror unchanged and use Desktop/native projects.
+  let bridgeProjects = { projectRoots: [], boundThreads: [] };
+  let bridgeStateWarning = null;
+  try {
+    bridgeProjects = loadBridgeProjects(bridgeStatePath);
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && error.code !== 'ENOENT') throw error;
+    bridgeStateWarning = error.code === 'ENOENT' ? 'missing' : 'invalid-json';
+  }
+  const { projectRoots, boundThreads } = bridgeProjects;
   const client = new AppServerClient(options.endpoint);
   let activeThreads;
   let archivedThreads;
@@ -394,6 +403,7 @@ async function run(options = parseArguments(process.argv.slice(2))) {
     archivedThreads: archivedThreads.length,
     appServerProjects: projects.length,
     bridgeProjects: projectRoots.length,
+    bridgeStateWarning,
     backupPath,
     recoveredFrom,
     stats,
