@@ -1,3 +1,5 @@
+import { summarizeActivityCommand } from './activity-command.mjs';
+
 // The budget is display rows, not reasoning sections or tool-call count.
 export const LIVE_ACTIVITY_ROWS = 5;
 export const LIVE_ACTIVITY_COLUMNS = 48;
@@ -135,7 +137,7 @@ export function liveActivityItemText(item, completed = false) {
       return summary ? `検討 ${summary}` : '';
     }
     case 'commandExecution':
-      return `${marker} ${item.command ?? ''}${done && item.exitCode != null ? `\nexit ${item.exitCode}` : ''}`;
+      return `${marker} ${summarizeActivityCommand(item.command)}${done && item.exitCode != null ? `\nexit ${item.exitCode}` : ''}`;
     case 'fileChange':
       return `${marker} ファイル変更 ${(item.changes ?? []).map(change => change.path).filter(Boolean).join('\n')}`;
     case 'mcpToolCall':
