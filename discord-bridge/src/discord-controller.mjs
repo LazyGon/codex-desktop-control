@@ -2222,14 +2222,14 @@ export class DiscordController {
     if (this.config.fileShareEnabled === false) throw new Error('ローカルファイル共有は設定で無効です。');
   }
 
-  async #allowedFileRoots(binding, { includeSiblingProjects = false } = {}) {
+  async #allowedFileRoots(binding, { includeSiblingProjects = false, includeSessionRoots = true } = {}) {
     const projectRoots = typeof this.stateStore.projectCategories === 'function'
       ? this.stateStore.projectCategories().map((project) => project.path)
       : [];
-    const sessionWorkspaceRoots = await readSessionWorkspaceRoots(
+    const sessionWorkspaceRoots = includeSessionRoots ? await readSessionWorkspaceRoots(
       binding?.sessionPath,
       binding?.threadId,
-    );
+    ) : [];
     const codexHome = this.config.desktopGlobalStatePath
       ? path.win32.dirname(this.config.desktopGlobalStatePath)
       : null;
@@ -2278,6 +2278,16 @@ export class DiscordController {
     return roots;
   }
 
+  async #resolveInlineImage(binding, target) {
+    // Both paths use the same realpath/protected-path validation. Consult the
+    // historical workspace grants only if the current known roots cannot serve it.
+    const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true, includeSessionRoots: false });
+    try { return await resolveShareFile(target, roots); }
+    catch {
+      return resolveShareFile(target, await this.#allowedFileRoots(binding, { includeSiblingProjects: true }));
+    }
+  }
+
   async #inlineImageCardAttachments(binding, references, existingMessage, reservedNames = []) {
     if (this.config.fileShareEnabled === false) {
       return { attachments: [], files: [], names: [] };
@@ -2288,7 +2298,6 @@ export class DiscordController {
       return { attachments: [], files: [], names: [] };
     }
 
-    const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
     const maximumBytes = this.config.fileShareChunkBytes ?? 7_500_000;
     const existingAttachments = [...(existingMessage?.attachments.values() ?? [])];
     const usedNames = new Set(reservedNames.map((name) => name.toLocaleLowerCase('en-US')));
@@ -2299,7 +2308,7 @@ export class DiscordController {
     for (const reference of candidates) {
       if (names.length >= availableSlots) break;
       try {
-        const file = await resolveShareFile(reference.target, roots);
+        const file = await this.#resolveInlineImage(binding, reference.target);
         if (file.size > maximumBytes) {
           this.#log('inline-image-skipped', {
             threadId: binding.threadId,
@@ -2375,8 +2384,7 @@ export class DiscordController {
       && names.length < MAX_DISCORD_MESSAGE_ATTACHMENTS) {
       try {
         if (!isDiscordInlineImageTarget(item.path)) throw new Error('Discordで表示できる画像形式ではありません。');
-        const roots = await this.#allowedFileRoots(binding, { includeSiblingProjects: true });
-        const resolved = await resolveShareFile(item.path, roots);
+        const resolved = await this.#resolveInlineImage(binding, item.path);
         if (resolved.size > maximumBytes) {
           throw new Error(`画像がDiscord添付上限を超えています (${resolved.size} > ${maximumBytes})`);
         }
@@ -7195,7 +7203,7 @@ export class DiscordController {
         ? historicalAssistantItems(activeTurn)
         : requiredByTurn.get(activeTurn.id) ?? [];
       const activeUserItems = this.#turnUserItems(activeTurn);
-      const activeRecordedOrder = needsSessionCardOrder(activeUserItems, activeDetailItems)
+      const activeRecordedOrder = !activeOnly && needsSessionCardOrder(activeUserItems, activeDetailItems)
         ? await readSessionTurnCardOrder(thread.path, activeTurn.id, activeUserItems)
         : [];
       const activeSessionItems = orderedSessionCardItems(
