@@ -1398,6 +1398,45 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     stateStore.turnRecord('thread-1', 'turn-3').assistantEntries['stream-after-restart'],
     undefined,
   );
+  const emitSteerTurn = async (method, details) => {
+    codex.emit('notification', { method,
+      params: { threadId: 'thread-1', turnId: 'turn-steer', ...details } });
+    await waitForNotifications();
+  };
+  await emitSteerTurn('turn/started', { turn: { id: 'turn-steer', status: 'inProgress' } });
+  await emitSteerTurn('item/started', {
+    item: { id: 'stream-steer', type: 'agentMessage', phase: 'commentary', text: '' },
+  });
+  await emitSteerTurn('item/agentMessage/delta', { itemId: 'stream-steer', delta: 'Before steer.' });
+  await emitSteerTurn('item/started', {
+    item: { id: 'pending-steer', type: 'agentMessage', phase: 'commentary', text: 'Queued commentary.' },
+  });
+  await emitSteerTurn('item/started', {
+    item: { id: 'reasoning-steer', type: 'reasoning', summary: ['Preserved progress'] },
+  });
+  await emitSteerTurn('item/started', {
+    item: { id: 'user-steer', type: 'userMessage', content: [{ type: 'text', text: 'Adjust the work.' }] },
+  });
+  const liveSteerCards = () => [...messages.values()].filter((message) => (
+    message.embeds[0]?.title === 'Codex running'
+    && message.embeds[0].fields?.some(field => field.name === 'Turn' && field.value === '`turn-steer`')
+  ));
+  assert.deepEqual(liveSteerCards().map(message => message.embeds[0].description), ['Before steer.']);
+  assert.ok(liveSteerCards()[0].embeds[0].fields.some(field => field.value.includes('Preserved progress')));
+  await emitSteerTurn('item/agentMessage/delta', { itemId: 'stream-steer', delta: ' After steer.' });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(liveSteerCards().map(message => message.embeds[0].description), ['Before steer. After steer.']);
+  await emitSteerTurn('item/completed', {
+    item: { id: 'stream-steer', type: 'agentMessage', phase: 'commentary', text: 'Before steer. After steer.' },
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(liveSteerCards().map(message => message.embeds[0].description), ['Queued commentary.']);
+  const finishedSteerCommentary = [...messages.values()].filter(message => (
+    message.embeds[0]?.title === 'Codex message'
+    && message.embeds[0].fields?.some(field => field.name === 'Turn' && field.value === '`turn-steer`')
+  ));
+  assert.deepEqual(finishedSteerCommentary.map(message => message.embeds[0].description),
+    ['Before steer. After steer.']);
   await controller.stop();
 });
 

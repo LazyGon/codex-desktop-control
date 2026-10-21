@@ -8073,7 +8073,7 @@ export class DiscordController {
       view.currentMessageCompleted = true;
       await this.#queueTurnViewMutation(view, () => this.#renderTurn(binding, view));
       await this.#promotePendingAgentMessages(binding, view);
-    } else if (userMessageChanged) await this.#moveLiveTurnCardToLatest(binding, view);
+    } else if (userMessageChanged) await this.#repostLiveTurnCardToLatest(binding, view, { freezeCompleted: true });
     else if (binding.watchLevel !== 'quiet') this.#scheduleTurnRender(binding, view);
   }
 
@@ -8508,52 +8508,7 @@ export class DiscordController {
     this.stateStore.setTurnRecord(binding.threadId, view.turnId, patch);
   }
 
-  async #moveLiveTurnCardToLatest(binding, view) {
-    return this.#queueLiveCardMove(
-      binding,
-      view,
-      () => this.#queueTurnViewMutation(
-        view,
-        () => this.#moveLiveTurnCardToLatestOnce(binding, view),
-      ),
-    );
-  }
-
-  async #moveLiveTurnCardToLatestOnce(binding, view) {
-    if (!this.#isCurrentLiveTurnView(view)) return null;
-    if (view.timer) {
-      clearTimeout(view.timer);
-      view.timer = null;
-    }
-    const channel = await this.client.channels.fetch(binding.channelId);
-    const messages = await this.#fetchChannelHistory(channel, 100);
-    if (view.currentPhase === 'commentary') {
-      await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
-    } else if (view.messageId) {
-      const message = await channel.messages.fetch(view.messageId).catch(() => null);
-      if (message?.author.id === this.client.user.id) await message.delete().catch(() => {});
-    }
-    await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
-    view.messageId = null;
-    view.message = null;
-    view.currentMessageId = null;
-    view.currentPhase = null;
-    view.deltaMessageId = null;
-    view.acceptDeltaAlias = false;
-    view.currentMessageCompleted = false;
-    view.pendingAgentMessages.clear();
-    view.text = '';
-    view.reasoning = '';
-    view.reasoningItemId = null;
-    view.reasoningPartIndex = null;
-    this.stateStore.setTurnRecord(binding.threadId, view.turnId, {
-      cardMessageId: null,
-      liveMessageId: null,
-    });
-    await this.#renderTurn(binding, view);
-  }
-
-  async #repostLiveTurnCardToLatest(binding, view) {
+  async #repostLiveTurnCardToLatest(binding, view, { freezeCompleted = false } = {}) {
     return this.#queueLiveCardMove(binding, view, async () => {
       await this.#queueTurnViewMutation(view, async () => {
         if (!this.#isCurrentLiveTurnView(view)) return;
@@ -8563,6 +8518,18 @@ export class DiscordController {
         }
         const channel = await this.client.channels.fetch(binding.channelId);
         const messages = await this.#fetchChannelHistory(channel, 100);
+        if (freezeCompleted && view.currentPhase === 'commentary' && view.currentMessageCompleted) {
+          await this.#freezeLiveAssistantMessage(binding, view, channel, messages);
+          view.currentMessageId = null;
+          view.currentPhase = null;
+          view.deltaMessageId = null;
+          view.acceptDeltaAlias = false;
+          view.currentMessageCompleted = false;
+          view.text = '';
+          view.reasoning = '';
+          view.reasoningItemId = null;
+          view.reasoningPartIndex = null;
+        }
         await this.#deleteDuplicateLiveTurnCards(binding, view.turnId, messages);
         view.messageId = null;
         view.message = null;
@@ -9849,7 +9816,7 @@ export class DiscordController {
         if (!binding) return;
         const view = this.#view(record.threadId, record.turnId, binding.channelId);
         view.status = 'inProgress';
-        await this.#moveLiveTurnCardToLatest(binding, view);
+        await this.#repostLiveTurnCardToLatest(binding, view, { freezeCompleted: true });
       })().catch((error) => {
         record.liveCardMovePromise = null;
         throw error;
