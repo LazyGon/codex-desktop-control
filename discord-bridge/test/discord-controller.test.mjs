@@ -3410,6 +3410,7 @@ test('Discord-permitted non-operator messages in bound task channels are deliver
   for (let attempt = 0; attempt < 100 && controller.subscriptionSyncPromises.size; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  await controller.imageReplay.restores.get(binding.threadId);
   const runningAfterRestore = sent.at(-1);
   assert.equal(runningAfterRestore.embeds[0]?.title, 'Codex running');
   assert.ok(sent.indexOf(runningAfterRestore) > sent.indexOf(trailingCard));

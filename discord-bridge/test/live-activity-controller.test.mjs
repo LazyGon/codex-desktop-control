@@ -31,6 +31,9 @@ async function fixture(context) {
           if (channel.beforeEdit) await channel.beforeEdit(next);
           if (next.embeds) message.embeds = next.embeds.map(embed => embed.toJSON?.() ?? embed);
           if (next.components) message.components = next.components;
+          for (const file of next.files ?? []) message.attachments.set(file.name, {
+            id:file.name,name:file.name,size:file.attachment.length,
+          });
           message.content = next.content ?? message.content;
           return message;
         },
@@ -64,8 +67,44 @@ async function fixture(context) {
   const activity = () => messages.get(view().messageId).embeds[0].fields
     .find(field => field.name === '進行状況').value;
   await notify('turn/started', { turn: { id: 'turn', status: 'inProgress', items: [] } });
-  return { channel, notify, view, flush, activity, stateStore, messages };
+  return { channel, notify, view, flush, activity, stateStore, messages, controller, codex };
 }
+
+test('reconnect image catch-up does not block fresh progress and does not upload a published image again', {timeout:5000}, async context => {
+  const f=await fixture(context);
+  const gate=Promise.withResolvers(),entered=Promise.withResolvers();
+  context.after(()=>gate.resolve());
+  let uploads=0;
+  const send=f.channel.send;
+  f.channel.send=async payload=>{
+    if(payload.embeds?.[0]?.data?.title==='Codex image') {
+      uploads++;
+      if(payload.embeds[0].data.fields.some(field=>field.name==='Item' && field.value==='`image-result`')) {
+        entered.resolve();await gate.promise;
+      }
+    }
+    return send(payload);
+  };
+  const thread={id:'task',status:{type:'active'},turns:[{id:'turn',status:'inProgress',items:[{
+    id:'image-result',type:'mcpToolCall',status:'completed',result:{content:[{
+      type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    }]},
+  }]}]};
+  const restore=()=>f.codex.emit('subscriptionRestored',{binding:f.stateStore.binding('task'),thread,runtime:{},missedCompletion:null});
+  restore();await entered.promise;
+  await f.notify('item/reasoning/summaryTextDelta',{itemId:'fresh',summaryIndex:0,delta:'Progress during image upload'});
+  await f.flush();
+  assert.match(f.activity(),/Progress during image upload/);
+  await f.notify('item/completed',{item:{...thread.turns[0].items[0],id:'new-live-image'}});
+  gate.resolve();await f.controller.imageReplay.restores.get('task');
+  assert.equal(uploads,2);
+  assert.deepEqual(Object.keys(f.stateStore.turnRecord('task','turn').imageEntries).sort(),['image-result','new-live-image']);
+  restore();
+  await f.controller.subscriptionSyncPromises.get('task');
+  await f.controller.imageReplay.restores.get('task');
+  assert.equal(uploads,2);
+  assert.equal([...f.messages.values()].filter(m=>m.embeds.some(e=>e.title==='Codex image')).length,2);
+});
 
 test('an oversized final card completes with its entire text attached and preserves history', { timeout: 5000 }, async context => {
   const f = await fixture(context);

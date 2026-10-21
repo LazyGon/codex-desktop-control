@@ -104,6 +104,7 @@ import {
 import { LatestUpdateQueue } from './latest-update-queue.mjs';
 import { TaskChannelCreateJournal } from './task-channel-create-journal.mjs';
 import { deliverCardWithSizeFallback } from './card-size-fallback.mjs';
+import { ImageReplayQueue, isPublishedImageCopy } from './published-image.mjs';
 import { codexRetryStatusText } from './communication-error.mjs';
 import {
   accountUsageEmbed,
@@ -800,6 +801,7 @@ export class DiscordController {
     this.recentHistoryRestoreJob = null;
     this.recentHistoryRestorePromise = null;
     this.notificationQueues = new Map();
+    this.imageReplay = new ImageReplayQueue();
     this.notificationBuffers = new Map();
     this.subscriptionSyncPromises = new Map();
     this.discordMessageQueues = new Map();
@@ -905,6 +907,8 @@ export class DiscordController {
       ['discord-recovery', this.discordRecoveryPromise],
       ['transcript-tail', this.transcriptSyncTail],
       ['recent-history', this.recentHistoryRestorePromise],
+      ...[...this.imageReplay.restores].map(([key, promise]) => [`image-restore:${key}`, promise]),
+      ...[...this.imageReplay.items].map(([key, promise]) => [`image:${key}`, promise]),
       ...[...this.notificationQueues].map(([key, promise]) => [`notification:${key}`, promise]),
       ...[...this.subscriptionSyncPromises].map(([key, promise]) => [`subscription:${key}`, promise]),
       ...[...this.discordMessageQueues].map(([key, promise]) => [`discord-message:${key}`, promise]),
@@ -6356,7 +6360,14 @@ export class DiscordController {
     return message;
   }
 
-  async #ensureCodexImageCard(binding, turn, item, channel, messages) {
+  async #ensureCodexImageCard(binding, turn, item, channel, messages, options = {}) {
+    if (!item?.id) return { message: null, created: false };
+    const key = `${binding.threadId}:${turn.id}:${item.id}`;
+    return this.imageReplay.forItem(key,
+      () => this.#ensureCodexImageCardOnce(binding, turn, item, channel, messages, options));
+  }
+
+  async #ensureCodexImageCardOnce(binding, turn, item, channel, messages, { reusePublished = false } = {}) {
     if (!item?.id || !hasCodexImageContent(item)) return { message: null, created: false };
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     const imageEntries = { ...(record.imageEntries ?? {}) };
@@ -6367,6 +6378,9 @@ export class DiscordController {
         && this.#embedTurnId(candidate) === turn.id
         && this.#embedCodexImageItemId(candidate) === item.id) ?? null;
     }
+    if (reusePublished && isPublishedImageCopy(message, recorded, {
+      botId: this.client.user.id, threadId: binding.threadId, turnId: turn.id, itemId: item.id,
+    })) return { message, created: false };
     const duplicateIds = [...messages.values()]
       .filter((candidate) => candidate.author.id === this.client.user.id
         && this.#embedTurnId(candidate) === turn.id
@@ -6420,29 +6434,53 @@ export class DiscordController {
       messages.delete(staleId);
     }
 
-    imageEntries[item.id] = {
+    const latestImageEntries = { ...(this.stateStore.turnRecord(binding.threadId, turn.id)?.imageEntries ?? {}) };
+    latestImageEntries[item.id] = {
       messageId: message.id,
       attachments: imageAttachments.metadata,
       completedAt: recorded?.completedAt ?? new Date().toISOString(),
     };
     this.stateStore.setTurnRecord(binding.threadId, turn.id, {
-      imageEntries,
-      imageMessageIds: [...new Set(Object.values(imageEntries)
+      imageEntries: latestImageEntries,
+      imageMessageIds: [...new Set(Object.values(latestImageEntries)
         .map((entry) => entry.messageId)
         .filter(Boolean))],
     });
     return { message, created };
   }
 
-  async #reconcileCodexImageItems(binding, turn, channel, messages, { onlyRecorded = false } = {}) {
+  async #reconcileCodexImageItems(binding, turn, channel, messages, { onlyRecorded = false, reusePublished = true } = {}) {
     const record = this.stateStore.turnRecord(binding.threadId, turn.id) ?? {};
     const recordedIds = new Set(Object.keys(record.imageEntries ?? {}));
     const results = [];
     for (const item of turn.items ?? []) {
+      if (this.stopping) return results;
       if (!hasCodexImageContent(item) || (onlyRecorded && !recordedIds.has(item.id))) continue;
-      results.push(await this.#ensureCodexImageCard(binding, turn, item, channel, messages));
+      results.push(await this.#ensureCodexImageCard(binding, turn, item, channel, messages, { reusePublished }));
     }
     return results;
+  }
+
+  #restoreImagesAfterReconnect(binding, thread, channel) {
+    this.imageReplay.restore(binding.threadId, async () => {
+      if (this.stopping) return;
+      const startedAt = Date.now();
+      this.#log('reconnect-image-restore-start', { threadId: binding.threadId });
+      channel ??= await this.client.channels.fetch(binding.channelId);
+      const messages = await this.#fetchChannelHistory(channel, 100);
+      for (const turn of thread.turns ?? []) {
+        if (this.stopping) return;
+        await this.#reconcileCodexImageItems(binding, turn, channel, messages, { reusePublished: true });
+      }
+      const current = this.stateStore.binding(binding.threadId);
+      const activeId = current?.statusTurnId
+        ?? [...(thread.turns ?? [])].reverse().find(turn => turn.status === 'inProgress')?.id;
+      const view = activeId ? this.turnViews.get(`${binding.threadId}:${activeId}`) : null;
+      if (this.#isCurrentLiveTurnView(view)) await this.#repostLiveTurnCardToLatest(current, view);
+      this.#log('reconnect-image-restore-completed', { threadId: binding.threadId, elapsedMs: Date.now() - startedAt });
+    }).catch(error => this.#log('reconnect-image-restore-failed', {
+      threadId: binding.threadId, error: error.stack ?? error.message,
+    }));
   }
 
   async #reconcileStableAssistantMessages(binding, turn, channel, messages) {
@@ -6944,7 +6982,11 @@ export class DiscordController {
     this.transcriptSyncTail = promise.catch(() => {});
     this.transcriptSyncPromises.set(threadId, promise);
     try {
-      return await promise;
+      const result = await promise;
+      if (options.activeOnly && !this.stopping) {
+        this.#restoreImagesAfterReconnect(this.stateStore.binding(threadId), result.thread, options.channel);
+      }
+      return result;
     } finally {
       this.transcriptSyncPromises.delete(threadId);
     }
@@ -6995,7 +7037,7 @@ export class DiscordController {
     if (forked && typeof this.stateStore.retainBindingTurnRecords === 'function') {
       this.stateStore.retainBindingTurnRecords(threadId, ownTurnIds);
     }
-    const messages = await this.#fetchChannelHistory(channel);
+    const messages = await this.#fetchChannelHistory(channel, activeOnly ? 100 : 1000);
     const sessionOrderRepairTurnIds = recentSinceMs === null
       ? Object.entries(binding.turnMessages ?? {})
         .filter(([, record]) => record?.sessionOrderRepairRequestedAt)
@@ -7140,7 +7182,7 @@ export class DiscordController {
       // reconnect converges without backfilling old commentary. Image result
       // blocks in that same latest turn are safe to restore by stable item ID.
       await this.#ensureTurnUserMessages(binding, latestCompleted, channel, messages);
-      await this.#reconcileCodexImageItems(binding, latestCompleted, channel, messages);
+      // Image catch-up runs after the live transcript barrier has been released.
     }
 
     if (activeTurn) {
@@ -7168,7 +7210,7 @@ export class DiscordController {
           await this.#ensureAssistantMessageCard(binding, activeTurn, item, channel, messages);
         }
       }
-      await this.#reconcileCodexImageItems(binding, activeTurn, channel, messages);
+      if (!activeOnly) await this.#reconcileCodexImageItems(binding, activeTurn, channel, messages);
       const existingView = this.turnViews.get(`${threadId}:${activeTurn.id}`);
       if (!existingView) {
         const oldRecord = this.stateStore.turnRecord(threadId, activeTurn.id);
