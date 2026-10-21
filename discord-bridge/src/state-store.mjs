@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { readStateSnapshot, writeStateSnapshot } from './state-file-recovery.mjs';
 import {
-  atomicWriteJson,
   deepClone,
   projectIdFromKey,
 } from './util.mjs';
@@ -42,24 +42,13 @@ function patchChanges(current, patch) {
 export class StateStore {
   constructor(dataDir, guildId) {
     this.filePath = path.join(dataDir, 'state.json');
-    let persisted;
-    try {
-      persisted = JSON.parse(fs.readFileSync(this.filePath, 'utf8').replace(/^\uFEFF/, ''));
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw new Error('Discord state could not be read; refusing to reset visibility or recreate mirrors.', { cause: error });
-      }
+    const { value: persisted, recovered } = readStateSnapshot(this.filePath, guildId);
+    if (persisted === undefined) {
       if (fs.existsSync(path.join(dataDir, 'runtime.json'))) {
         throw new Error('Discord state is missing from an existing installation; restore state before starting the bridge.');
       }
     }
-    if (persisted !== undefined && (!persisted || persisted.guildId !== guildId)) {
-      throw new Error('Discord state guild does not match the configured guild; refusing to reset state.');
-    }
     this.value = persisted ?? initialState(guildId);
-    if (!Number.isInteger(this.value.schemaVersion) || this.value.schemaVersion < 1 || this.value.schemaVersion > 8) {
-      throw new Error('Unsupported Discord state schema; refusing to reset state.');
-    }
     if (this.value.schemaVersion === 1) {
       this.value.infrastructure.controlCategoryId ??= this.value.infrastructure.categoryId ?? null;
       delete this.value.infrastructure.categoryId;
@@ -140,7 +129,7 @@ export class StateStore {
       conversation.activeMessageId ??= null;
     }
     delete this.value.autoCatchupProjects;
-    this.#write();
+    this.#write(!recovered);
   }
 
   snapshot() {
@@ -614,11 +603,11 @@ export class StateStore {
     });
   }
 
-  #write() {
+  #write(retainPrimary = true) {
     // Preserve the synchronous atomic save boundary while avoiding indentation
     // overhead on this large, frequently rewritten machine-readable snapshot.
     // Flush the replacement contents before publishing the snapshot. A rename
     // alone does not flush cached writes when Windows crashes.
-    atomicWriteJson(this.filePath, this.value, { space: 0, flush: true });
+    writeStateSnapshot(this.filePath, this.value, retainPrimary);
   }
 }

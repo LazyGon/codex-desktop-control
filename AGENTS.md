@@ -56,6 +56,19 @@ locked state remains unproven. Any additional test requires fresh restart
 authorization. See the operation's `sign-in-verification.json` and
 `state/windows-maintenance-20261011/maintenance-status-latest.json`.
 
+## Crash recovery copies
+
+- Before crash repair, inspect `%LOCALAPPDATA%/CodexRecovery/current.json`, its
+  verification record, and live canonical state. Preserve damaged files and newer
+  UNKNOWN/accepted operation journals; never replay historical jobs or overwrite
+  newer journals with a whole old snapshot.
+- Bridge startup can recover malformed/missing state from its same-guild supported
+  `.bak`/`.bak.older` generations. Do not empty its state to recreate mirrors.
+  Larger database restoration requires normal shutdown of the actual writers;
+  never overwrite live SQLite files or change owner/task settings to restore them.
+- Read `docs/crash-recovery.md` when selecting a snapshot or restoring data, for
+  scope, generation semantics and the separate larger-recovery boundary.
+
 ## Commit and push completed changes
 
 - The Owner gives standing authorization to commit and push verified repository
