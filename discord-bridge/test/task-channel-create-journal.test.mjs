@@ -48,12 +48,22 @@ test('an explicit closed-actor and authoritative-absence recovery retains unknow
   assert.throws(()=>journal.reconcileAbsent(scope.threadId,{actorExited:true,matchingChannelCount:0}),/RECONCILIATION_REQUIRED/);
   const proof={actorExited:true,matchingChannelCount:0,authorizationRef:'owner-request',channelReadEvidenceSha256:'a'.repeat(64),closedActorEvidenceSha256:'b'.repeat(64)};
   journal.reconcileAbsent(scope.threadId,proof);
-  const channel=await journal.create(scope,async()=>({id:'recovered-channel'}));
+  // The old category can be full or gone when an authorized recovery runs.
+  const channel=await journal.create({...scope,categoryId:'987654322'},async()=>({id:'recovered-channel'}));
   assert.equal(channel.id,'recovered-channel');
   const history=fs.readdirSync(directory).filter(file=>file.endsWith('.event.json')).map(file=>JSON.parse(fs.readFileSync(path.join(directory,file),'utf8')));
   assert.ok(history.some(record=>record.phase==='unknown'));
   assert.ok(history.some(record=>record.phase==='reconciledAbsent'));
   assert.equal(journal.read(scope.threadId).previousAttemptId,history.find(record=>record.phase==='unknown').attemptId);
+  assert.equal(journal.read(scope.threadId).categoryId,'987654322');
+});
+
+test('preflight preserves unresolved writes and rejects a foreign guild', context => {
+  const {journal,scope}=fixture(context);
+  journal.importUnknown(scope,{oldBridgePid:25036});
+  assert.throws(()=>journal.assertCreateAllowed(scope.threadId,scope.guildId),/CHANNEL_CREATE_RESULT_UNRESOLVED/);
+  assert.equal(journal.read(scope.threadId).phase,'unknown');
+  assert.throws(()=>journal.assertCreateAllowed(scope.threadId,'999'),/UNRESOLVED/);
 });
 
 test('scope conflicts, retained crash locks and invalid records fail closed', async context => {

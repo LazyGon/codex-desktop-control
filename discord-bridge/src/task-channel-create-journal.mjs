@@ -61,6 +61,14 @@ export class TaskChannelCreateJournal {
     return this.#persist({ ...current, phase: 'reconciledAbsent', recoveryProof: proof });
   }
 
+  assertCreateAllowed(threadId, guildId) {
+    const prior = this.read(threadId);
+    if (prior && (prior.guildId !== guildId || prior.phase !== 'reconciledAbsent')) {
+      throw new Error('CHANNEL_CREATE_RESULT_UNRESOLVED');
+    }
+    return prior;
+  }
+
   async create(scope, operation) {
     this.#scope(scope);
     const inFlight = this.pending.get(scope.threadId);
@@ -82,9 +90,7 @@ export class TaskChannelCreateJournal {
     try { lock = fs.openSync(lockPath, 'wx'); }
     catch { throw new Error('CHANNEL_CREATE_LOCKED'); }
     try {
-      const prior = this.read(scope.threadId);
-      if (prior && (prior.guildId !== scope.guildId || prior.categoryId !== scope.categoryId
-        || prior.phase !== 'reconciledAbsent')) throw new Error('CHANNEL_CREATE_RESULT_UNRESOLVED');
+      const prior = this.assertCreateAllowed(scope.threadId, scope.guildId);
       let record = this.#persist({ schemaVersion: 1, ...scope, attemptId: randomUUID(),
         previousAttemptId: prior?.attemptId ?? null, phase: 'dispatching',
         startedAt: new Date().toISOString(), processId: process.pid });

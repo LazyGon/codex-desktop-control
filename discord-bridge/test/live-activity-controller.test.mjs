@@ -16,6 +16,7 @@ async function fixture(context) {
     snapshotInitialized: true, transcriptVersion: 11, completionReportsEnabled: false,
   });
   const client = new EventEmitter(), codex = new EventEmitter(), messages = new Map();
+  codex.threadMetadata = async () => ({thread:{id:'task'}});
   client.user = { id: 'bot', bot: true };
   let nextId = 1;
   const channel = {
@@ -63,8 +64,31 @@ async function fixture(context) {
   const activity = () => messages.get(view().messageId).embeds[0].fields
     .find(field => field.name === '進行状況').value;
   await notify('turn/started', { turn: { id: 'turn', status: 'inProgress', items: [] } });
-  return { channel, notify, view, flush, activity };
+  return { channel, notify, view, flush, activity, stateStore, messages };
 }
+
+test('an oversized final card completes with its entire text attached and preserves history', { timeout: 5000 }, async context => {
+  const f = await fixture(context);
+  const originalSend = f.channel.send;
+  const text = Array(300).fill('日本語の最終報告').join('\n');
+  let attachment;
+  f.channel.send = async payload => {
+    const embed = payload.embeds?.[0]?.toJSON?.() ?? payload.embeds?.[0];
+    if (embed?.title === 'Codex turn completed' && !embed.description.startsWith('📎')) {
+      throw Object.assign(new Error('size rejected'), {status:400,code:40005});
+    }
+    if (embed?.title === 'Codex turn completed') attachment = payload.files[0].attachment;
+    return originalSend(payload);
+  };
+  await f.notify('turn/completed', {turn:{id:'turn',status:'completed',items:[
+    {id:'final',type:'agentMessage',phase:'final',text},
+  ]}});
+  const record = f.stateStore.turnRecord('task','turn');
+  assert.equal(record.status,'completed');
+  assert.equal(record.finalAttachmentOnly,true);
+  assert.equal(Buffer.from(attachment).toString('utf8'),text);
+  assert.equal(f.messages.get(record.finalMessageIds[0]).embeds[0].description,'📎 codex-turn-turn-final.txt');
+});
 
 test('live public deltas and commands update the same five-row field before completion', { timeout: 5000 }, async context => {
   const f = await fixture(context);

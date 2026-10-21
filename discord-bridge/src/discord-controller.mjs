@@ -103,6 +103,7 @@ import {
 } from './split-archive.mjs';
 import { LatestUpdateQueue } from './latest-update-queue.mjs';
 import { TaskChannelCreateJournal } from './task-channel-create-journal.mjs';
+import { deliverCardWithSizeFallback } from './card-size-fallback.mjs';
 import { codexRetryStatusText } from './communication-error.mjs';
 import {
   accountUsageEmbed,
@@ -5535,6 +5536,8 @@ export class DiscordController {
     }
 
     if (this.stopping) return { channel, created: false, moved: false };
+    // A fenced task write must not create an overflow category on every sync.
+    if (!channel) this.channelCreateJournal.assertCreateAllowed(thread.id, this.config.guildId);
     onProgress('targetCategory');
     const target = await this.#targetCategory(thread, archived, channel?.parentId, context);
     if (this.stopping) return { channel, created: false, moved: false };
@@ -6709,13 +6712,14 @@ export class DiscordController {
     const embed = new EmbedBuilder()
       .setTitle(`Codex turn ${turn.status === 'completed' ? 'completed' : turn.status}`)
       .setColor(turn.status === 'completed' ? COLORS.completed : COLORS.error)
-      .setDescription(truncate(value, 3900))
+      .setDescription(record.finalAttachmentOnly ? `📎 codex-turn-${turn.id}-final.txt` : truncate(value, 3900))
       .addFields(
         { name: 'Task', value: `\`${binding.threadId}\`` },
         { name: 'Turn', value: `\`${turn.id}\`` },
       );
     const fullTextName = `codex-turn-${turn.id}-final.txt`;
-    const matchingAttachment = value.length > 3900
+    const needsAttachment = value.length > 3900 || record.finalAttachmentOnly;
+    const matchingAttachment = needsAttachment
       ? [...(message?.attachments.values() ?? [])]
         .find((attachment) => attachment.name === fullTextName)
       : null;
@@ -6723,7 +6727,7 @@ export class DiscordController {
       binding,
       localFiles,
       message,
-      value.length > 3900 ? [fullTextName] : [],
+      needsAttachment ? [fullTextName] : [],
     );
     const options = {
       content: '',
@@ -6735,7 +6739,7 @@ export class DiscordController {
       ],
       allowedMentions: { parse: [] },
     };
-    const attachmentText = value.length > 3900 ? value : null;
+    const attachmentText = needsAttachment ? value : null;
     const files = [
       ...(attachmentText && !matchingAttachment ? [this.#textAttachment(attachmentText, fullTextName)] : []),
       ...inlineImages.files,
@@ -6748,11 +6752,24 @@ export class DiscordController {
     const duplicateCardIds = [...messages.values()]
       .filter((candidate) => this.#isAssistantTurnCard(candidate, turn.id))
       .map((candidate) => candidate.id);
-    if (message?.author.id === this.client.user.id) {
-      if (!this.#cardMessageMatches(message, options, expectedAttachmentNames)) {
-        message = await message.edit(options);
-      }
-    } else message = await channel.send(options);
+    let attachmentOnly = Boolean(record.finalAttachmentOnly);
+    if (!message || message.author.id !== this.client.user.id
+      || !this.#cardMessageMatches(message, options, expectedAttachmentNames)) {
+      const existing = message?.author.id === this.client.user.id ? message : null;
+      const delivered = await deliverCardWithSizeFallback(
+        (payload) => existing ? existing.edit(payload) : channel.send(payload),
+        options,
+        () => {
+          embed.setDescription(`📎 ${fullTextName}`);
+          return { ...options, embeds: [embed], files: [
+            ...(!matchingAttachment ? [this.#textAttachment(value, fullTextName)] : []),
+            ...inlineImages.files,
+          ] };
+        },
+      );
+      message = delivered.message;
+      attachmentOnly ||= delivered.attachmentOnly;
+    }
     messages.set(message.id, message);
 
     const staleIds = new Set([
@@ -6778,6 +6795,7 @@ export class DiscordController {
       finalMessageIds: [message.id],
       finalText: value,
       finalLocalFiles: localFiles,
+      finalAttachmentOnly: attachmentOnly,
       status: turn.status,
       finalizedAt: new Date().toISOString(),
     });
