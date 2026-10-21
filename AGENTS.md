@@ -32,6 +32,18 @@
 - Stop the Discord bridge through its graceful stop request before considering
   process termination.
 
+## Apply updates and restart Bridge
+
+- After every requested remote update integration, restart the Discord Bridge as
+  part of the same task unless the Owner explicitly says not to. A successful
+  pull/rebase alone is not completion, even when no new commits were available.
+- Verify the live Bridge and scheduled-task ownership, request graceful shutdown,
+  confirm shutdown, and start the existing `Codex Discord Remote` scheduled task.
+  Verify the new Bridge process, Discord readiness and shared App Server connection
+  before reporting completion. Do not blindly retry an uncertain stop/start.
+- This standing authorization covers only Bridge restart, not Desktop, the shared
+  App Server, Windows, Ollama or unrelated tasks. Preserve their current state.
+
 ## Shared local administrator terminal
 
 Use the user-authorized `Codex Admin Terminal` for administrative commands,
