@@ -7,6 +7,26 @@ import {
 
 const contentRows = value => value.split('\n').slice(1, -1);
 
+test('wrapping moves whole words and command arguments onto the next row', () => {
+  assert.deepEqual(wrapActivityRows('one elephant', 10), ['one ', 'elephant']);
+  assert.deepEqual(wrapActivityRows('check --verbose', 12), ['check ', '--verbose']);
+  assert.deepEqual(wrapActivityRows('read src/main.mjs', 14), ['read ', 'src/main.mjs']);
+  assert.deepEqual(wrapActivityRows('日本語 elephant', 12), ['日本語 ', 'elephant']);
+  assert.deepEqual(wrapActivityRows('▶️ check elephant', 14, { continuationPrefix: '  ↳ ' }),
+    ['▶️ check ', '  ↳ elephant']);
+  assert.deepEqual(wrapActivityRows('read\nelephant', 12, { continuationPrefix: '  ↳ ' }),
+    ['read', '  ↳ elephant']);
+});
+
+test('only words exceeding a full row are split, including continuation prefixes', () => {
+  assert.deepEqual(wrapActivityRows('run abcdefghijkl', 8), ['run ', 'abcdefgh', 'ijkl']);
+  assert.deepEqual(wrapActivityRows('run abcdefghijkl', 12, { continuationPrefix: '  ↳ ' }),
+    ['run ', '  ↳ abcdefgh', '  ↳ ijkl']);
+  assert.deepEqual(wrapActivityRows('abcdefghijkl', 12, { continuationPrefix: '  ↳ ' }),
+    ['abcdefghijkl']);
+  assert.deepEqual(wrapActivityRows('go cafe\u0301', 6), ['go ', 'cafe\u0301']);
+});
+
 test('the activity frame has five rows from empty to full, not five entries', () => {
   for (const entries of [[], ['one'], ['one', 'two'], ['one', 'two', 'three', 'four', 'five', 'six']]) {
     assert.equal(contentRows(liveActivityWindow(entries)).length, 5);

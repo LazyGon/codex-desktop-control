@@ -31,18 +31,41 @@ export function wrapActivityRows(text, columns = LIVE_ACTIVITY_COLUMNS, { contin
   for (const source of safe.split(/\r?\n/).filter(line => line.trim())) {
     let row = rows.length ? continuationPrefix : '';
     let cells = rows.length ? continuationCells : 0;
+    const tokens = [];
+    let word = [];
     for (const { segment } of segmenter.segment(source)) {
       // Discord embed fields are capped at 1024 UTF-16 code units. Bound each
       // row too, including pathological combining sequences, without splitting
       // an emoji, surrogate pair, or combining grapheme.
       const display = segment.length > 190 ? '�' : segment;
-      const width = activityCellWidth(display);
-      if (cells + width > columns || row.length + display.length > 190) {
-        if (row) rows.push(row);
-        row = continuationPrefix; cells = continuationCells;
+      // Keep Latin words and command tokens (flags, identifiers, paths) whole.
+      // Japanese text and emoji keep their existing grapheme-level wrapping.
+      if (/^[\x21-\x7e\p{Script=Latin}\p{Mark}]+$/u.test(display)) word.push(display);
+      else {
+        if (word.length) tokens.push(word);
+        word = [];
+        tokens.push([display]);
       }
-      row += display;
-      cells += width;
+    }
+    if (word.length) tokens.push(word);
+    const nextRow = () => {
+      if (row) rows.push(row);
+      row = continuationPrefix;
+      cells = continuationCells;
+    };
+    for (const token of tokens) {
+      const tokenWidth = token.reduce((width, part) => width + activityCellWidth(part), 0);
+      const tokenLength = token.reduce((length, part) => length + part.length, 0);
+      const prefix = rows.length ? continuationPrefix : '';
+      if (row.length > prefix.length
+        && (cells + tokenWidth > columns || row.length + tokenLength > 190)) nextRow();
+      // Only a token exceeding a complete row needs grapheme-level splitting.
+      for (const display of token) {
+        const width = activityCellWidth(display);
+        if (cells + width > columns || row.length + display.length > 190) nextRow();
+        row += display;
+        cells += width;
+      }
     }
     if (row) rows.push(row);
   }
