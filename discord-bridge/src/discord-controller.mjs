@@ -7182,6 +7182,9 @@ export class DiscordController {
     const protectedIds = new Set();
     const latestBinding = this.stateStore.binding(threadId) ?? binding;
     for (const record of Object.values(latestBinding.turnMessages ?? {})) {
+      // Crash recovery can retain authoritative Discord IDs without guessing
+      // whether an old card was a user, assistant, image or final message.
+      for (const id of record?.recoveredMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.userMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.assistantMessageIds ?? []) protectedIds.add(id);
       for (const id of record?.imageMessageIds ?? []) protectedIds.add(id);
