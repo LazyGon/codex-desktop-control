@@ -6978,8 +6978,10 @@ export class DiscordController {
         throw error;
       }
     };
-    const promise = this.transcriptSyncTail.then(run, run);
-    this.transcriptSyncTail = promise.catch(() => {});
+    // Full history/backfill is serialized for Discord rate limits. A task's
+    // bounded live restore must not wait behind another task's history queue.
+    const promise = options.activeOnly ? run() : this.transcriptSyncTail.then(run, run);
+    if (!options.activeOnly) this.transcriptSyncTail = promise.catch(() => {});
     this.transcriptSyncPromises.set(threadId, promise);
     try {
       const result = await promise;

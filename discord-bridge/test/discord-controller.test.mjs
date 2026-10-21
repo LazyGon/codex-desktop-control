@@ -1025,7 +1025,10 @@ test('live turn mutations remove duplicate cards and finish an in-flight render 
     [...messages.values()].filter((message) => message.embeds[0]?.title === 'Codex running').length,
     1,
   );
-  assert.equal(controller.subscriptionSyncPromises.size, 1);
+  // The live restore must finish even while an unrelated full-history queue
+  // remains blocked; per-task notification ordering is checked below.
+  await controller.subscriptionSyncPromises.get('thread-1');
+  assert.equal([...messages.values()].filter(message => message.embeds[0]?.title === 'Codex running').length, 1);
   releaseTranscriptTail();
   for (let attempt = 0; attempt < 200 && controller.subscriptionSyncPromises.size; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
