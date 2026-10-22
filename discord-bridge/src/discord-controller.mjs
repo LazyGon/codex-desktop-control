@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { mirroredDescendants } from './subagent-discovery.mjs';
 import { AsyncUserInputController } from './async-user-input.mjs';
 import {
   liveActivityItemText,
@@ -262,26 +263,6 @@ export function isActiveSubagentThread(thread) {
   return thread?.status?.type === 'active';
 }
 
-export function subagentIdsFromThread(thread) {
-  const ids = [];
-  for (const turn of thread?.turns ?? []) {
-    for (const item of turn.items ?? []) {
-      if (item.type === 'subAgentActivity' && item.agentThreadId) ids.push(item.agentThreadId);
-      if (item.type === 'collabAgentToolCall') ids.push(...(item.receiverThreadIds ?? []));
-    }
-  }
-  return [...new Set(ids.filter(Boolean))];
-}
-
-export function subagentScanPlan(binding) {
-  const hasCompletePriorScan = binding?.subagentScanVersion === 1
-    && Array.isArray(binding.subagentThreadIds);
-  return {
-    mode: hasCompletePriorScan ? 'recent' : 'full',
-    recentTurnLimit: hasCompletePriorScan ? 10 : null,
-    knownThreadIds: hasCompletePriorScan ? [...new Set(binding.subagentThreadIds.filter(Boolean))] : [],
-  };
-}
 
 export function transcriptReadWindowOptions({ activeOnly = false, forkCleanupOnly = false, recentSinceMs = null } = {}) {
   return recentSinceMs === null
@@ -289,34 +270,6 @@ export function transcriptReadWindowOptions({ activeOnly = false, forkCleanupOnl
     : { maxTurns: null, sinceMs: recentSinceMs };
 }
 
-export async function scanParentSubagentIds(codex, threadId, scanPlan) {
-  const ids = new Set(scanPlan.knownThreadIds);
-  if (scanPlan.mode === 'recent') {
-    const result = await codex.recentTurns(threadId, {
-      limit: scanPlan.recentTurnLimit,
-      itemsView: 'full',
-    });
-    for (const id of subagentIdsFromThread({ turns: result.data ?? [] })) ids.add(id);
-    return [...ids];
-  }
-
-  const seenCursors = new Set();
-  let cursor = null;
-  do {
-    const result = await codex.recentTurns(threadId, {
-      limit: 2,
-      itemsView: 'full',
-      ...(cursor ? { cursor } : {}),
-    });
-    for (const id of subagentIdsFromThread({ turns: result.data ?? [] })) ids.add(id);
-    cursor = result.nextCursor ?? null;
-    if (cursor && seenCursors.has(cursor)) {
-      throw new Error(`thread/turns/list repeated cursor while scanning subagents: ${cursor}`);
-    }
-    if (cursor) seenCursors.add(cursor);
-  } while (cursor);
-  return [...ids];
-}
 
 export function subagentOwnTurns(thread) {
   if (!isSubagentCodexThread(thread)) return thread?.turns ?? [];
@@ -5666,31 +5619,18 @@ export class DiscordController {
     };
     for (const binding of this.stateStore.subagentThreads()) addChildId(binding.threadId);
 
-    for (const parent of parentThreads) {
-      const binding = stateBindingSummary(this.stateStore, parent.id);
-      if (!binding) continue;
-      const sourceUpdatedAt = parent.updatedAt ?? parent.recencyAt ?? null;
-      if (binding.subagentScanVersion === 1
-        && binding.subagentScanUpdatedAt === sourceUpdatedAt
-        && Array.isArray(binding.subagentThreadIds)) {
-        for (const childId of binding.subagentThreadIds) addChildId(childId);
-        continue;
+    try {
+      const children = mirroredDescendants(await this.codex.listSubagentThreads(),
+        parentThreads.filter(parent => stateBindingSummary(this.stateStore, parent.id)).map(parent => parent.id));
+      for (const child of children) {
+        if (!this.stateStore.subagentThread(child.id)) this.#rememberUnsyncedSubagent(child);
+        if (isActiveSubagentThread(child)) {
+          this.stateStore.setSubagentThread(child.id, { taskStatus: 'active' });
+          childIds.add(child.id);
+        } else addChildId(child.id);
       }
-      try {
-        const scanPlan = subagentScanPlan(binding);
-        const discoveredIds = await scanParentSubagentIds(this.codex, parent.id, scanPlan);
-        for (const childId of discoveredIds) addChildId(childId);
-        this.stateStore.setBinding(parent.id, {
-          subagentScanVersion: 1,
-          subagentScanUpdatedAt: sourceUpdatedAt,
-          subagentThreadIds: discoveredIds,
-        });
-      } catch (error) {
-        this.#log('subagent-parent-scan-failed', {
-          threadId: parent.id,
-          error: error.stack ?? error.message,
-        });
-      }
+    } catch (error) {
+      this.#log('subagent-discovery-failed', { error: error.stack ?? error.message });
     }
 
     const result = { created: 0, existing: 0, failed: 0 };

@@ -28,16 +28,13 @@ import {
   projectVisibilityCatalog,
   refreshManagedArchiveCategoryNames,
   runAfterTranscriptBarrier,
-  scanParentSubagentIds,
   sessionOrderRepairMessageIds,
   shouldUseHiddenBindingFallback,
   shouldCleanupOnlyExistingFork,
   shouldPeriodicallySyncSubagent,
   subagentDiscordThreadName,
-  subagentIdsFromThread,
   subagentMetadata,
   subagentOwnTurns,
-  subagentScanPlan,
   transcriptReadWindowOptions,
   taskMirrorOrder,
 } from '../src/discord-controller.mjs';
@@ -1502,14 +1499,6 @@ test('subagent descriptors preserve stable parent identity and flatten a readabl
   assert.equal(subagentDiscordThreadName(child), '🟢 Pasteur · local-gap-audit · 44ceb422');
   assert.equal(subagentDiscordThreadName({ ...child, status: { type: 'systemError' } }), '🔴 Pasteur · local-gap-audit · 44ceb422');
   assert.equal(subagentDiscordThreadName({ ...child, status: { type: 'failed' } }), '🔴 Pasteur · local-gap-audit · 44ceb422');
-  assert.deepEqual(subagentIdsFromThread({
-    turns: [{
-      items: [
-        { type: 'subAgentActivity', agentThreadId: child.id },
-        { type: 'collabAgentToolCall', receiverThreadIds: [child.id, 'nested-child'] },
-      ],
-    }],
-  }), [child.id, 'nested-child']);
   assert.deepEqual(subagentOwnTurns({
     ...child,
     turns: [
@@ -1532,21 +1521,6 @@ test('periodic subagent sync excludes completed and unloaded bindings', () => {
   assert.equal(shouldPeriodicallySyncSubagent({ taskStatus: 'unknown', discordArchived: true }), false);
 });
 
-test('subagent rescans preserve known children and bound later scans to recent turns', () => {
-  assert.deepEqual(subagentScanPlan({}), {
-    mode: 'full',
-    recentTurnLimit: null,
-    knownThreadIds: [],
-  });
-  assert.deepEqual(subagentScanPlan({
-    subagentScanVersion: 1,
-    subagentThreadIds: ['child-old', 'child-old', null],
-  }), {
-    mode: 'recent',
-    recentTurnLimit: 10,
-    knownThreadIds: ['child-old'],
-  });
-});
 
 test('automatic transcript reads cap history without shortening explicit restoration', () => {
   assert.deepEqual(transcriptReadWindowOptions(), { maxTurns: 5 });
@@ -1557,37 +1531,6 @@ test('automatic transcript reads cap history without shortening explicit restora
   });
 });
 
-test('first subagent scan pages full turns without hydrating one unbounded thread', async () => {
-  const calls = [];
-  const codex = {
-    async recentTurns(threadId, options) {
-      calls.push({ threadId, options });
-      return options.cursor
-        ? {
-          data: [{ items: [{ type: 'collabAgentToolCall', receiverThreadIds: ['child-two', 'child-one'] }] }],
-          nextCursor: null,
-        }
-        : {
-          data: [{ items: [{ type: 'subAgentActivity', agentThreadId: 'child-one' }] }],
-          nextCursor: 'older-page',
-        };
-    },
-    async readThread() { throw new Error('unbounded hydration is forbidden'); },
-  };
-  assert.deepEqual(await scanParentSubagentIds(codex, 'parent', subagentScanPlan({})), [
-    'child-one', 'child-two',
-  ]);
-  assert.deepEqual(calls, [
-    { threadId: 'parent', options: { limit: 2, itemsView: 'full' } },
-    { threadId: 'parent', options: { limit: 2, itemsView: 'full', cursor: 'older-page' } },
-  ]);
-  await assert.rejects(
-    scanParentSubagentIds({
-      recentTurns: async () => ({ data: [], nextCursor: 'repeated-page' }),
-    }, 'parent', subagentScanPlan({})),
-    /repeated cursor/,
-  );
-});
 
 test('an unknown live subagent notification creates an isolated Discord thread mirror', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subagent-thread-'));

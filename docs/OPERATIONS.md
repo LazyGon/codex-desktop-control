@@ -243,10 +243,12 @@ and exact-attempt-bound. On reconnect, the bridge checks bounded turn metadata
 for every visible task, then resumes only active tasks or tasks with a missed
 completion before outbox and task-list work. Unchanged idle tasks remain lazy
 and the existing task-sync poll detects later activity before reconciliation.
-Task inventories are fetched serially; the first complete subagent scan reads
-full turns in small pages instead of hydrating an unbounded parent history.
-Known child IDs are retained and only the newest ten full turns are inspected
-for additions. The bridge then reconciles task history against both persisted
+Task inventories are fetched serially. Subagent discovery uses paginated
+canonical database-only metadata for active and archived children, following
+parent links from mirrored tasks without reading parent turn bodies. Existing
+child bindings are retained even when absent from the current metadata list;
+completed and unloaded children are not periodically hydrated. The bridge then
+reconciles task history against both persisted
 message IDs and visible identity fields. Long user and final-answer text
 remains one card, with the full text attached when necessary.
 

@@ -183,7 +183,7 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
-  async listAllThreads({ archived = false, projectId = null, search = null } = {}) {
+  async listAllThreads({ archived = false, projectId = null, search = null, sourceKinds = null } = {}) {
     this.#requireClient();
     const threads = [];
     const seenCursors = new Set();
@@ -193,6 +193,7 @@ export class CodexService extends EventEmitter {
       const params = { limit: 100, archived, sortKey: 'updated_at', sortDirection: 'desc', useStateDbOnly: true };
       if (projectId) params.projectId = projectId;
       if (search) params.searchTerm = search;
+      if (sourceKinds) params.sourceKinds = sourceKinds;
       if (cursor) params.cursor = cursor;
       const result = await this.client.call('thread/list', params, APP_SERVER_OPERATION_TIMEOUT_MS);
       threads.push(...(result.data ?? []));
@@ -200,6 +201,14 @@ export class CodexService extends EventEmitter {
       if (cursor && seenCursors.has(cursor)) throw new Error(`thread/list repeated cursor: ${cursor}`);
       if (cursor) seenCursors.add(cursor);
     } while (cursor);
+    return threads;
+  }
+
+  async listSubagentThreads() {
+    const threads = [];
+    for (const archived of [false, true]) {
+      threads.push(...await this.listAllThreads({ archived, sourceKinds: ['subAgent'] }));
+    }
     return threads;
   }
 
