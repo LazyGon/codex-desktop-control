@@ -74,6 +74,14 @@ async function waitUntilReady(websocketUrl, {
   isProcessAlive,
   serverProcessId,
 }) {
+  if (timeoutMilliseconds === null) {
+    if (!isProcessAlive(serverProcessId)) {
+      throw new Error(`Shared app-server process is not running: ${serverProcessId}`);
+    }
+    const response = await fetchImplementation(readyUrl(websocketUrl));
+    if (response.status !== 200) throw new Error(`Shared app-server readiness returned HTTP ${response.status}.`);
+    return;
+  }
   const deadline = Date.now() + timeoutMilliseconds;
   let lastError = null;
 

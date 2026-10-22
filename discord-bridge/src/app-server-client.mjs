@@ -24,7 +24,7 @@ export class AppServerClient extends EventEmitter {
     this.socket.addEventListener('close', (event) => this.#handleClose(event));
     this.socket.addEventListener('error', (event) => this.emit('socketError', event));
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(
+      const timeout = this.requestTimeoutMs === null ? null : setTimeout(
         () => reject(new Error(`WebSocket open timed out: ${this.url}`)),
         this.requestTimeoutMs,
       );
@@ -52,7 +52,9 @@ export class AppServerClient extends EventEmitter {
     this.nextId += 1;
     this.socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      // null explicitly selects no agent-created deadline. Connection close still
+      // settles pending requests; a failed/uncertain mutation is never replayed.
+      const timeout = timeoutMs === null ? null : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out after ${timeoutMs} ms.`));
       }, timeoutMs);

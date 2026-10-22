@@ -1,6 +1,6 @@
 param(
     [ValidateSet('run', 'dry-run', 'status', 'stop', 'enable')][string]$Mode = 'run',
-    [string]$NodePath = 'C:/Users/lazyg/Documents/Codex/2026-09-28/rvm-recovery/toolchain-cache/node-v24.21.0/node-v24.21.0-win-x64/node.exe'
+    [string]$NodePath = (Join-Path $env:USERPROFILE '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe')
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

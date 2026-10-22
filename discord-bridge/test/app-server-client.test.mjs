@@ -50,3 +50,26 @@ test('AppServerClient handles responses, notifications, and server requests', as
   client.respond(received.id, { decision: 'accept' });
   assert.deepEqual(await serverResponse, { jsonrpc: '2.0', id: 'server-1', result: { decision: 'accept' } });
 });
+
+test('explicit null disables the RPC deadline while disconnect still settles the request', async context => {
+  const server = new WebSocketServer({ port: 0 });
+  await new Promise(resolve => server.once('listening', resolve));
+  const client = new AppServerClient(`ws://127.0.0.1:${server.address().port}`, { requestTimeoutMs: null });
+  let received;
+  const called = new Promise(resolve => { received = resolve; });
+  server.on('connection', socket => socket.on('message', data => {
+    const message = JSON.parse(data.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ id: message.id, result: {} }));
+    if (message.method === 'held') received();
+  }));
+  context.after(() => { client.close(); server.close(); });
+  await client.connect();
+  const pending = client.call('held');
+  const rejected = assert.rejects(pending, /closed/);
+  await called;
+  assert.equal(client.requestTimeoutMs, null);
+  assert.equal([...client.pending.values()][0].timeout, null);
+  client.close();
+  await rejected;
+  assert.equal(client.pending.size, 0);
+});

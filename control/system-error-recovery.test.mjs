@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { defaultConfig, eligibility, episodeKey, rateAvailable, runCycle, snapshot,
-  goalIdentity, backoffMs, status, setEnabled, runOnce } from './system-error-recovery.mjs';
+  goalIdentity, backoffMs, status, setEnabled, runOnce, validateConfig } from './system-error-recovery.mjs';
 import { saveJson } from './shared-task-operations.mjs';
 
 const clone = x => structuredClone(x);
@@ -67,6 +67,27 @@ test('actual capacity fixture is retryable only when latest terminal and ordinar
   assert.equal(eligibility({ ...thread('t'), parentThreadId: 'parent', canAcceptDirectInput: false,
     source: { subAgent: { thread_spawn: { parent_thread_id: 'parent' } } } }, [failed('f')], null), 'native-child-owner-route');
   assert.equal(eligibility(thread('t'), [failed('f')], null, ['t']), 'excluded');
+});
+test('default recovery has no unsupported numerical count or time ceilings', async () => {
+  const c = mocked({ ids: Array.from({ length: 40 }, (_, i) => 'unlimited-' + i) });
+  const call = c.call.bind(c), deadlines = [];
+  c.call = (method, params, deadline) => { deadlines.push(deadline); return call(method, params); };
+  let clock = 150000;
+  const result = await runCycle(c, defaultConfig, { threads: {} }, memoryStore(), () => clock += 60000);
+  assert.equal(result.checked, c.records.size);
+  assert.equal(result.resumed, c.records.size);
+  assert.ok(deadlines.every(value => value === null));
+  assert.equal(result.scanDeferred, 0);
+  assert.ok(backoffMs(6) > 600000);
+  assert.throws(() => backoffMs(100), /capacity/);
+  const omitted = validateConfig({ schemaVersion: 1, enabled: true, excludedThreadIds: [] });
+  for (const key of ['maxStartsPerCycle', 'maxThreadsPerCycle', 'maxParentNoticesPerCycle', 'cycleBudgetMs', 'requestTimeoutMs']) {
+    assert.equal(defaultConfig[key], null);
+    assert.equal(omitted[key], null);
+    assert.throws(() => validateConfig({ ...defaultConfig, [key]: 0 }), /Invalid/);
+  }
+  // Optional explicitly chosen limits are not silently clamped to old agent defaults.
+  assert.equal(validateConfig({ ...defaultConfig, maxStartsPerCycle: 11 }).maxStartsPerCycle, 11);
 });
 test('intentional/protected goal states and initial blocked do not resume', () => {
   for (const s of ['paused', 'complete', 'completed', 'budgetLimited', 'usageLimited']) {

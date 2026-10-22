@@ -61,6 +61,19 @@ test('shared CLI validates state, executable identity, process, and readiness', 
   assert.deepEqual(requestedUrls, ['http://127.0.0.1:8798/readyz']);
 });
 
+test('explicit deadline-free validation preserves identity and reports readiness failure without retry', async context => {
+  const { statePath } = fixture(context);
+  let count = 0;
+  const runtime = await validateSharedRuntime({ statePath, timeoutMilliseconds: null, isProcessAlive: () => true,
+    fetchImplementation: async (url, options) => { count++; assert.equal(options, undefined); return { status: 200 }; } });
+  assert.equal(runtime.serverProcessId, 1234);
+  assert.equal(count, 1);
+  await assert.rejects(validateSharedRuntime({ statePath, timeoutMilliseconds: null, isProcessAlive: () => false,
+    fetchImplementation: async () => { throw new Error('must not fetch'); } }), /not running/);
+  await assert.rejects(validateSharedRuntime({ statePath, timeoutMilliseconds: null, isProcessAlive: () => true,
+    fetchImplementation: async () => ({ status: 503 }) }), /HTTP 503/);
+});
+
 test('shared CLI rejects a stale executable hash and unverified Desktop', async context => {
   const stale = fixture(context, { serverSha256: '0'.repeat(64) });
   await assert.rejects(

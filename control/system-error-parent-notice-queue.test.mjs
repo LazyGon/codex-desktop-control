@@ -73,11 +73,13 @@ test('ordinary direct-input parent recovery deferred after acceptance is deliver
   assert.equal(eligibility(child.thread, child.turns, child.goal), 'eligible');
   const st = storage(), state = { threads: {} }; let clock = 210000;
   const c = mocked(rows, ['ordinary'], id => { if (id === 'ordinary') clock += 50000; });
-  const one = await runCycle(c, defaultConfig, state, st, () => clock);
+  // This fixture explicitly exercises an opted-in deadline, not a default cap.
+  const config = { ...defaultConfig, cycleBudgetMs: 45000 };
+  const one = await runCycle(c, config, state, st, () => clock);
   assert.equal(one.resumed, 1); assert.equal(one.results[0].parentNotice.action, 'notice-cycle-deferred');
   const key = parentNoticeKey('ordinary', 'failure-ordinary', 'recovery');
   assert.equal(st.notices.get(key).phase, 'pending-read');
-  await runCycle(c, defaultConfig, state, st, () => clock);
+  await runCycle(c, config, state, st, () => clock);
   assert.equal(st.notices.get(key).phase, 'accepted');
   assert.equal(c.calls.filter(x => x.method === 'turn/start' && x.params.threadId === 'ordinary').length, 1);
   assert.equal(c.calls.filter(x => x.method === 'turn/steer' && x.params.threadId === 'parent').length, 1);

@@ -177,6 +177,15 @@ decisions; the verification owner retains ordinary Product proof.
 
 ## System-error recovery (2026-10-13)
 
+- OMEN deployment (2026-10-22) uses the Owner-supplied, hash-pinned package via
+  `control/Install-OmenSystemErrorRecovery.ps1`; see
+  `docs/omen-system-error-recovery.md`. Keep the original package immutable and
+  use fresh OMEN-local state under `%LOCALAPPDATA%/CodexSystemErrorRecovery`.
+  Never copy another PC's config, task IDs, permits or journals. The derived
+  package removes unsupported count/time ceilings: null/omitted optional caps
+  mean unlimited, explicit evidence-backed limits remain supported, and the
+  scheduler has no execution deadline. RPC page sizes are batch shapes, not
+  inventory limits. UNKNOWN and exclusive episode fences remain mandatory.
 - `control/system-error-recovery.mjs` uses the verified canonical shared AppServer.
   The current-user Limited `Codex System Error Recovery` scheduled task invokes
   `control/system-error-recovery-launcher.py` through the existing windowless

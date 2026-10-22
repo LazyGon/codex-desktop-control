@@ -8,7 +8,8 @@ import { uuidV7TimestampMs, turnTimestampMs } from '../discord-bridge/src/recent
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultDirectory = path.join(root, 'state/global-system-error-recovery-20261013');
 export const defaultConfig = Object.freeze({ schemaVersion: 1, enabled: true, excludedThreadIds: [],
-  maxStartsPerCycle: 2, maxThreadsPerCycle: 32, cycleBudgetMs: 45_000, requestTimeoutMs: 5_000 });
+  maxStartsPerCycle: null, maxThreadsPerCycle: null, maxParentNoticesPerCycle: null,
+  cycleBudgetMs: null, requestTimeoutMs: null });
 const transient = new Set(['serverOverloaded', 'internalServerError', 'httpConnectionFailed',
   'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts']);
 const protectedGoals = new Set(['paused', 'complete', 'completed', 'budgetLimited', 'usageLimited']);
@@ -144,7 +145,13 @@ export function episodeKey(threadId, turn) {
   // Error explanations may be decorated later; a single failed turn remains one episode.
   return hash({ domain: 'control-system-error-recovery/v1', threadId, turnId: turn.id });
 }
-export function backoffMs(count) { return Math.min(600_000, 60_000 * 2 ** Math.min(4, Math.max(0, count - 1))); }
+// Base cadence is the supplied one-minute scheduler contract. No retry-count or
+// arbitrary maximum-delay ceiling is introduced; the same episode remains fenced.
+export function backoffMs(count) {
+  const delay = 60_000 * 2 ** Math.max(0, count - 1);
+  if (!Number.isSafeInteger(delay)) throw new Error('Backoff exceeds exact JavaScript millisecond capacity');
+  return delay;
+}
 function exclusive(file, value) {
   const fd = fs.openSync(file, 'wx');
   try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fsyncSync(fd); }
@@ -158,7 +165,7 @@ export function hashIdentity(thread) {
   return hash(Object.fromEntries(['id', 'cwd', 'model', 'modelProvider', 'reasoningEffort', 'parentThreadId', 'agentRole']
     .map(k => [k, thread[k] ?? null])));
 }
-export async function snapshot(client, id, timeout = 5_000) {
+export async function snapshot(client, id, timeout = null) {
   const [read, listed] = await Promise.all([
     client.call('thread/read', { threadId: id, includeTurns: false }, timeout),
     client.call('thread/turns/list', { threadId: id, limit: 2, sortDirection: 'desc', itemsView: 'notLoaded' }, timeout),
@@ -297,12 +304,15 @@ function rotateNotices(rows, after) {
 export function validateConfig(c) {
   if (c?.schemaVersion !== 1 || typeof c.enabled !== 'boolean' || !Array.isArray(c.excludedThreadIds)
       || c.excludedThreadIds.some(x => typeof x !== 'string')) throw new Error('Invalid config');
-  for (const [k, lo, hi] of [['maxStartsPerCycle', 1, 10], ['maxThreadsPerCycle', 1, 100],
-    ['cycleBudgetMs', 1_000, 60_000], ['requestTimeoutMs', 500, 15_000]]) {
-    if (!Number.isInteger(c[k]) || c[k] < lo || c[k] > hi) throw new Error('Invalid ' + k);
+  for (const k of ['maxStartsPerCycle', 'maxThreadsPerCycle', 'maxParentNoticesPerCycle',
+    'cycleBudgetMs', 'requestTimeoutMs']) {
+    // Explicit owner/evidence-backed limits remain available. Missing/null means
+    // no ceiling, not zero, and defaults cannot manufacture numerical authority.
+    if (c[k] !== null && c[k] !== undefined && (!Number.isSafeInteger(c[k]) || c[k] < 1)) {
+      throw new Error('Invalid ' + k);
+    }
+    if (c[k] === undefined) c[k] = null;
   }
-  if (c.maxParentNoticesPerCycle !== undefined && (!Number.isInteger(c.maxParentNoticesPerCycle)
-      || c.maxParentNoticesPerCycle < 1 || c.maxParentNoticesPerCycle > 10)) throw new Error('Invalid maxParentNoticesPerCycle');
   return c;
 }
 function observation(thread, turns, goal, time, old = {}) {
@@ -372,16 +382,18 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
   // Reconstruct from the recovery journal even after a crash before finally/enqueue.
   for (const recovery of store.recoveryRecords?.() ?? []) queueRecoveryNotice(store, recovery, now, dryRun);
   report.parentNotices = []; report.noticeStarts = 0; report.parentNoticeAttempts = 0;
-  const noticeLimit = config.maxParentNoticesPerCycle ?? 2;
+  const noticeLimit = config.maxParentNoticesPerCycle ?? Infinity;
+  const startLimit = config.maxStartsPerCycle ?? Infinity;
+  const cycleBudget = config.cycleBudgetMs ?? Infinity;
   const notice = async (child, failedTurnId, kind) => {
     if (kind === 'recovery') {
       const recovery = store.getRecovery?.(child.thread.id, failedTurnId);
       if (recovery) queueRecoveryNotice(store, recovery, now, dryRun);
     }
     if (report.parentNoticeAttempts >= noticeLimit
-        || now() - started >= config.cycleBudgetMs) return { action: 'notice-cycle-deferred' };
+        || now() - started >= cycleBudget) return { action: 'notice-cycle-deferred' };
     const result = await notifyParent(client, child, failedTurnId, kind, store, config, now, dryRun,
-      report.resumed + report.noticeStarts < config.maxStartsPerCycle);
+      report.resumed + report.noticeStarts < startLimit);
     if (result.startedParentTurn) report.noticeStarts++;
     if (!['notice-already-claimed', 'no-genuine-parent', 'no-confirmed-recovery', 'excluded-child', 'notice-store-unavailable'].includes(result.action)) report.parentNoticeAttempts++;
     report.parentNotices.push({ childId: child.thread.id, failedTurnId, ...result }); return result;
@@ -390,7 +402,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
     const pendingRows = rotateNotices(store.pendingNotices?.() ?? [], state.noticeQueue.pendingAfterKey);
     let examined = 0;
     for (const pending of pendingRows) {
-      if (examined >= limit || report.parentNoticeAttempts >= noticeLimit || now() - started >= config.cycleBudgetMs) break;
+      if (examined >= limit || report.parentNoticeAttempts >= noticeLimit || now() - started >= cycleBudget) break;
       examined++;
       state.noticeQueue.pendingAfterKey = pending.key;
       if (!dryRun) store.saveState(state);
@@ -403,10 +415,10 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
   state.noticeQueue.singletonPendingTurn = !state.noticeQueue.singletonPendingTurn;
   await drainPending(initialPendingLimit);
   state.scan ??= { pendingIds: [], listCursor: null, loadedCursor: null };
-  if (state.scan.pendingIds.length < 100) {
+  {
     const [rows, loaded] = await Promise.all([
       client.call('thread/list', { archived: false, limit: 10, sortKey: 'updated_at', sortDirection: 'desc',
-        ...(state.scan.listCursor ? { cursor: state.scan.listCursor } : {}) }, Math.max(30_000, config.requestTimeoutMs)),
+        ...(state.scan.listCursor ? { cursor: state.scan.listCursor } : {}) }, config.requestTimeoutMs),
       client.call('thread/loaded/list', { limit: 100,
         ...(state.scan.loadedCursor ? { cursor: state.scan.loadedCursor } : {}) }, config.requestTimeoutMs),
     ]);
@@ -418,10 +430,10 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
     state.scan.pendingIds = [...new Set([...state.scan.pendingIds, ...rows.data.map(r => r.id),
       ...loaded.data.map(r => typeof r === 'string' ? r : r.id)])].filter(Boolean);
   }
-  const ids = state.scan.pendingIds.slice(0, config.maxThreadsPerCycle);
+  const ids = state.scan.pendingIds.slice(0, config.maxThreadsPerCycle ?? undefined);
   if (!dryRun) store.saveState(state);
   for (let offset = 0; offset < ids.length; offset += 4) {
-    if (now() - started >= config.cycleBudgetMs) break;
+    if (now() - started >= cycleBudget) break;
     const group = await Promise.allSettled(ids.slice(offset, offset + 4).map(id => snapshot(client, id, config.requestTimeoutMs)));
     for (let index = 0; index < group.length; index++) {
       const id = ids[offset + index], read = group[index];
@@ -458,8 +470,8 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
       result.errorKind = errorKind(turn.error); result.turnId = turn.id;
       if (store.exists(key) || store.existingEpisode?.(id, turn.id)) { result.action = 'episode-already-recorded'; continue; }
       if (entry.nextEligibleAt > now()) { result.action = 'backoff'; continue; }
-      if (report.resumed + report.noticeStarts >= config.maxStartsPerCycle) { result.action = 'cycle-limit'; continue; }
-      if (now() - started >= config.cycleBudgetMs) { result.action = 'budget-deferred'; continue; }
+      if (report.resumed + report.noticeStarts >= startLimit) { result.action = 'cycle-limit'; continue; }
+      if (now() - started >= cycleBudget) { result.action = 'budget-deferred'; continue; }
       const rate = await client.call('account/rateLimits/read', {}, config.requestTimeoutMs);
       if (!rateAvailable(rate)) { result.action = 'rate-unavailable'; continue; }
       if (dryRun) { result.action = 'would-resume'; continue; }
@@ -470,6 +482,8 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
           || goalIdentity(s.goal) !== goalIdentity(fresh.goal) || s.goal?.updatedAt !== fresh.goal?.updatedAt) {
         result.action = 'preflight-changed'; continue;
       }
+      const nextEligibleAt = now() + backoffMs((entry.count ?? 0) + 1);
+      if (!Number.isSafeInteger(nextEligibleAt)) { result.action = 'backoff-time-unrepresentable'; continue; }
       // Create-exclusive BEFORE thread/resume, goal/set or turn/start.
       const attempt = { schemaVersion: 1, key, threadId: id, failedTurnId: turn.id,
         errorKind: errorKind(turn.error), phase: 'prepared', createdAt: new Date(now()).toISOString(),
@@ -484,7 +498,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
           reasoningEffort: fresh.thread.reasoningEffort } };
       store.create(key, attempt);
       state.threads[id] = { ...entry, count: (entry.count ?? 0) + 1, key,
-        nextEligibleAt: now() + backoffMs((entry.count ?? 0) + 1) };
+        nextEligibleAt };
       store.saveState(state);
       try {
         if (store.allowed && !store.allowed(id)) {

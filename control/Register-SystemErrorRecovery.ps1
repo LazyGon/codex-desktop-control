@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Install', 'Status', 'Stop', 'Enable')][string]$Mode = 'Status',
-    [string]$NodePath = 'C:/Users/lazyg/Documents/Codex/2026-09-28/rvm-recovery/toolchain-cache/node-v24.21.0/node-v24.21.0-win-x64/node.exe'
+    [string]$NodePath = (Join-Path $env:USERPROFILE '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe')
 )
 $ErrorActionPreference = 'Stop'
 $taskName = 'Codex System Error Recovery'
@@ -32,7 +32,7 @@ if ($Mode -eq 'Install') {
     $minute = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
     $logon = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
     $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+    $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     if ($existing) {
         # Preserve existing triggers, principal, settings and enabled/disabled state.
