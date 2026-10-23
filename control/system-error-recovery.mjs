@@ -731,6 +731,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       : command === 'enable' ? setEnabled(directory, true)
         : ['run', 'dry-run'].includes(command) ? await runOnce(directory, command === 'dry-run')
           : (() => { throw new Error('Expected run, dry-run, status, stop or enable'); })();
-  console.log(JSON.stringify(report));
-  if (report.action === 'cycle-failed-no-blind-resend') process.exitCode = 1;
+  // This is a one-shot scheduler worker. Its completed cycle must not retain
+  // the scheduler's IgnoreNew slot while runtime handles finish closing.
+  await new Promise((resolve, reject) => {
+    process.stdout.write(JSON.stringify(report) + '\n', error => error ? reject(error) : resolve());
+  });
+  process.exit(report.action === 'cycle-failed-no-blind-resend' ? 1 : 0);
 }

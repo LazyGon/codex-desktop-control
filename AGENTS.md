@@ -193,6 +193,9 @@ decisions; the verification owner retains ordinary Product proof.
   `CREATE_NO_WINDOW`; PowerShell `-WindowStyle Hidden` alone did not prevent
   Windows Terminal from briefly appearing and taking focus on this PC. No
   separate server is created.
+- The one-shot recovery CLI flushes its result and exits after its cycle and
+  journal work finish. Residual runtime handles must not retain the scheduler's
+  `IgnoreNew` slot. This is completion handling, not a deadline for pending RPCs.
 - Only the latest confirmed typed terminal transient failure qualifies. Active,
   completed, interrupted, paused/budget-limited goals, excluded task IDs, native
   child tasks and unconfirmed direct-input owners are skipped. Workflow HOLD,
