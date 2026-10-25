@@ -122,7 +122,9 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   This affects captions only, never execution input or stored command history.
   Generic `node_repl/js` rows are omitted;
   this known tool's public `title` caption is displayed when provided, never its
-  code or other arguments. Empty
+  code or other arguments. `cua_repl/js` is labelled `画面操作` with its public
+  action title when provided; `cua_repl/js_reset` is `画面操作の初期化`.
+  Neither exposes code or other arguments. Empty
   rows are padded from the beginning, not added as content arrives. Raw private
   reasoning deltas/content and tool arguments are not included. The explicit
   wrap width is 48 monospace cells (CJK/emoji count as two); unusually narrow

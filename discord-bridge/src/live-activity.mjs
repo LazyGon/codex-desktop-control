@@ -115,12 +115,12 @@ export function publicReasoningText(summary) {
     .join('\n');
 }
 
-function nodeReplActivityTitle(item) {
+function publicToolActivityTitle(item) {
   let args = item.arguments;
   if (typeof args === 'string') {
     try { args = JSON.parse(args); } catch { return ''; }
   }
-  // This known tool's title argument is the public action caption. Do not
+  // These known tools' title argument is the public action caption. Do not
   // display its JavaScript code, other arguments, results, or private reasoning.
   return typeof args?.title === 'string' ? args.title.trim() : '';
 }
@@ -146,8 +146,18 @@ export function liveActivityItemText(item, completed = false) {
       const isNodeRepl = ['node_repl', 'mcp__node_repl'].includes(scope)
         || /^mcp__node_repl__/u.test(item.tool ?? '');
       if (isNodeRepl) {
-        const title = nodeReplActivityTitle(item);
+        const title = publicToolActivityTitle(item);
         return title ? `${marker} ${title}` : '';
+      }
+      const isCuaRepl = ['cua_repl', 'mcp__cua_repl'].includes(scope)
+        || /^mcp__cua_repl__/u.test(item.tool ?? '');
+      if (isCuaRepl) {
+        const tool = (item.tool ?? '').replace(/^mcp__cua_repl__/u, '');
+        if (tool === 'js') {
+          const title = publicToolActivityTitle(item);
+          return `${marker} 画面操作${title ? ` ${title}` : ''}`;
+        }
+        if (tool === 'js_reset') return `${marker} 画面操作の初期化`;
       }
       return `${marker} ツール ${[scope, item.tool].filter(Boolean).join('/')}`;
     }

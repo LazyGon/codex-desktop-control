@@ -98,6 +98,39 @@ test('generic node_repl rows are omitted while their public action titles are us
   assert.equal(output.includes('PRIVATE'), false);
 });
 
+test('computer-use calls show the action name and public title, never code or other arguments', () => {
+  for (const item of [
+    { type: 'mcpToolCall', server: 'cua_repl', tool: 'js', arguments: { code: 'PRIVATE' } },
+    { type: 'mcpToolCall', server: 'mcp__cua_repl', tool: 'js', arguments: '{invalid' },
+    { type: 'dynamicToolCall', namespace: 'cua_repl', tool: 'js' },
+    { type: 'dynamicToolCall', tool: 'mcp__cua_repl__js' },
+  ]) {
+    assert.equal(liveActivityItemText(item), '▶️ 画面操作');
+    assert.equal(liveActivityItemText(item, true), '✅ 画面操作');
+    assert.equal(liveActivityItemText({ ...item, status: 'failed' }, true), '❌ 画面操作');
+    assert.equal(liveActivityItemText({ ...item, status: 'declined' }), '❌ 拒否 画面操作');
+  }
+  const labelled = { type: 'mcpToolCall', server: 'cua_repl', tool: 'js',
+    arguments: { title: '  ログイン画面を確認  ', code: 'PRIVATE', timeout_ms: 30000 } };
+  const original = structuredClone(labelled);
+  assert.equal(liveActivityItemText(labelled), '▶️ 画面操作 ログイン画面を確認');
+  assert.equal(liveActivityItemText({ ...labelled, arguments: JSON.stringify(labelled.arguments) }, true),
+    '✅ 画面操作 ログイン画面を確認');
+  assert.deepEqual(labelled, original);
+  assert.equal(liveActivityItemText({ type: 'dynamicToolCall', namespace: 'cua_repl', tool: 'js_reset' }),
+    '▶️ 画面操作の初期化');
+  assert.equal(liveActivityItemText({ type: 'mcpToolCall', tool: 'mcp__cua_repl__js_reset' }, true),
+    '✅ 画面操作の初期化');
+  assert.equal(liveActivityItemText({ type: 'mcpToolCall', server: 'other', tool: 'js' }),
+    '▶️ ツール other/js');
+  const view = {};
+  restoreLiveActivity(view, [{ ...labelled, id: 'screen-action' }]);
+  const output = liveActivityWindow(view.activityEntries);
+  assert.match(output, /画面操作 ログイン画面を確認/);
+  assert.equal(output.includes('cua_repl'), false);
+  assert.equal(output.includes('PRIVATE'), false);
+});
+
 test('wrapping counts CJK and emoji cells without splitting graphemes or command syntax', () => {
   assert.equal(activityCellWidth('日'), 2);
   assert.equal(activityCellWidth('👨‍👩‍👧‍👦'), 2);
