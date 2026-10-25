@@ -114,6 +114,12 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   leading status icons are `▶️` (running), `✅` (completed), and `❌`
   (failed; declined requests also say `拒否`). Work types use short text labels
   such as `検討`, `子タスク`, `検索`, and `ファイル変更`, not secondary emojis.
+  Command captions omit plain `pwsh`/`powershell -Command` (also `-c`) and
+  `cmd /c` startup wrappers, including nested wrappers, and shorten executable
+  and script installation paths. Actual options, targets, environment changes,
+  working-directory changes and script bodies remain visible; wrappers with
+  settings such as `-ExecutionPolicy` or unknown options remain visible too.
+  This affects captions only, never execution input or stored command history.
   Generic `node_repl/js` rows are omitted;
   this known tool's public `title` caption is displayed when provided, never its
   code or other arguments. Empty

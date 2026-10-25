@@ -1,4 +1,4 @@
-function tokensFor(command) {
+function tokensFor(command, commandArgument = false) {
   const tokens = [];
   let index = 0;
   while (index < command.length) {
@@ -21,13 +21,18 @@ function tokensFor(command) {
         let closed = false;
         while (index < command.length) {
           const next = command[index++];
-          if (next === '`' || next === '\n' || next === '\r') return null;
+          if ((next === '`' && (!commandArgument || quote === '"'))
+            || (!commandArgument && (next === '\n' || next === '\r'))) return null;
           if (next === quote) {
-            if (command[index] === quote) { value += quote; index += 1; continue; }
+            if (!commandArgument && command[index] === quote) { value += quote; index += 1; continue; }
             closed = true;
             break;
           }
-          if (next === '\\' && command[index] === '"') return null;
+          if (next === '\\' && quote === '"' && /["\\$`]/u.test(command[index] ?? '')) {
+            if (!commandArgument) return null;
+            value += command[index++];
+            continue;
+          }
           value += next;
         }
         if (!closed) return null;
@@ -56,6 +61,26 @@ function targetPath(token) {
   return /\s/u.test(display) ? JSON.stringify(display) : display;
 }
 
+function startupCommand(command) {
+  const prefix = command.match(/^\s*(?:&\s+)?("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'&|;]+)([\s\S]*)$/u);
+  if (!prefix) return null;
+  const executable = prefix[1].replace(/^(['"])(.*)\1$/u, '$2');
+  if (/[$%*?`]/u.test(executable)) return null;
+  const kind = leaf(executable).toLowerCase().replace(/\.exe$/u, '');
+  const argumentsPattern = kind === 'cmd'
+    ? /^(?:[ \t]+\/(?:d|s))*[ \t]+\/c[ \t]+([\s\S]+)$/iu
+    : ['pwsh', 'powershell'].includes(kind)
+      ? /^(?:[ \t]+-(?:nologo|noprofile|noninteractive))*[ \t]+-(?:command|c)[ \t]+([\s\S]+)$/iu
+      : null;
+  const payload = argumentsPattern?.exec(prefix[2])?.[1];
+  if (!payload) return null;
+  // Command history joins argv using shell quoting. Decode only one complete
+  // command argument; a following outer pipeline/chain must keep its scope.
+  const words = tokensFor(payload, true);
+  if (words?.length !== 1 || words[0].operator || !words[0].value || words[0].value === '-') return null;
+  return words[0].value;
+}
+
 function formatSimple(tokens) {
   const invocation = tokens[0]?.raw === '&';
   const executableIndex = invocation ? 1 : 0;
@@ -65,16 +90,8 @@ function formatSimple(tokens) {
   const name = leaf(executable.value);
   const kind = name.toLowerCase().replace(/\.exe$/u, '');
   const args = tokens.slice(executableIndex + 1);
-  if (['powershell', 'pwsh', 'cmd'].includes(kind)) {
-    const commandFlag = kind === 'cmd' ? '/c' : '-command';
-    const position = args.findIndex(token => token.value.toLowerCase() === commandFlag);
-    const harmless = kind === 'cmd' ? ['/d', '/s'] : ['-nologo', '-noprofile', '-noninteractive'];
-    if (position >= 0 && args.length === position + 2
-      && args.slice(0, position).every(token => harmless.includes(token.value.toLowerCase()))) {
-      const inner = summarize(args[position + 1].value);
-      if (inner !== null) return `${name} ${commandFlag} ${inner}`;
-    }
-  }
+  const inner = startupCommand(tokens.map(token => token.raw).join(' '));
+  if (inner !== null) return `(${summarize(inner) ?? inner})`;
   const rendered = [absolutePath(executable.value)
     ? (/\s/u.test(name) ? JSON.stringify(name) : name) : executable.raw];
   let scriptPending = ['node', 'python', 'python3', 'pythonw', 'pwsh', 'powershell'].includes(kind);
@@ -92,6 +109,8 @@ function formatSimple(tokens) {
 }
 
 function summarize(command) {
+  const inner = startupCommand(command);
+  if (inner !== null) return summarize(inner) ?? inner;
   // Newlines outside quotes can be shell command boundaries too.
   if (/[\r\n]/u.test(command)) return null;
   const tokens = tokensFor(command);
