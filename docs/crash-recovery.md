@@ -14,6 +14,12 @@ and data, and the crash-recovery evidence. It excludes unrelated product
 repositories, large RVM working state, `node_modules`, and Windows installation
 files. Restore dependencies from their normal supported installation if needed.
 
+When the local registry contains `cachePruning`, read its forward cleanup receipt
+before restoring. Superseded, unused launcher cache versions may have been removed
+while the snapshot-selected runtime, profile, databases and pinned essentials were
+retained. The original verification's file/byte counts describe the pre-cleanup
+snapshot, not its current inventory; the original verification is kept unchanged.
+
 ## Bridge state recovery
 
 `StateStore` retains the previous two successfully read/written generations as
