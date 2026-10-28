@@ -270,7 +270,9 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   App Server mutation. The first start records a recovery cutover without
   importing older Discord history; later reconnects and restarts scan forward
   from each task channel's persisted cursor, so post-cutover messages received
-  while the Bridge was unavailable are queued in order. A message
+  while the Bridge was unavailable are queued in order. Both resumed Gateway
+  sessions and newly established sessions trigger this catch-up; App Server
+  subscription restoration defers it until the delivery route is ready. A message
   that has not reached mutation is delivered after reconnect, while an
   acceptance-uncertain attempt is reconciled by exact request ID and is never
   automatically resent merely because bounded history did not find it. Stale

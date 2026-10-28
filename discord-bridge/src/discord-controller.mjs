@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { mirroredDescendants } from './subagent-discovery.mjs';
 import { AsyncUserInputController } from './async-user-input.mjs';
+import { recoverDiscordMessages } from './discord-message-recovery.mjs';
 import {
   liveActivityItemText,
   liveActivityWindow,
@@ -789,16 +790,19 @@ export class DiscordController {
   attach() {
     this.client.on('interactionCreate', (interaction) => this.#handleInteraction(interaction));
     this.client.on('messageCreate', (message) => this.#queueDiscordMessage(message));
-    this.client.on('shardResume', () => {
-      this.#queueDiscordRecovery('discord-shard-resume')
-        .then(() => this.#queueDeliveryOutboxDrain('discord-shard-resume'))
-        .catch((error) => {
-          this.#log('discord-recovery-error', {
-            reason: 'discord-shard-resume',
-            error: error.stack ?? error.message,
+    for (const [event, reason] of [
+      ['shardReady', 'discord-shard-ready'],
+      ['shardResume', 'discord-shard-resume'],
+    ]) {
+      this.client.on(event, () => {
+        if (!this.codex.connected || this.codex.subscriptionRestoreInProgress) return;
+        this.#queueDiscordRecovery(reason)
+          .then(() => this.#queueDeliveryOutboxDrain(reason))
+          .catch((error) => {
+            this.#log('discord-recovery-error', { reason, error: error.stack ?? error.message });
           });
-        });
-    });
+      });
+    }
     this.client.on('channelUpdate', (oldChannel, newChannel) => this.#handleChannelUpdate(oldChannel, newChannel).catch((error) => {
       this.#log('channel-ui-handler-error', {
         channelId: newChannel.id,
@@ -9317,47 +9321,18 @@ export class DiscordController {
   async #recoverDiscordMessages(reason) {
     const bindings = (typeof this.stateStore.bindings === 'function' ? this.stateStore.bindings() : [])
       .filter((binding) => binding.channelId && !binding.archived && !this.#isBindingHidden(binding));
-    const outcome = { reason, channels: 0, scanned: 0, recovered: 0, ignored: 0 };
-    for (const binding of bindings) {
-      if (this.stopping) break;
-      const channel = await this.client.channels.fetch(binding.channelId).catch((error) => {
-        if ([10003, 10008].includes(error.code)) return null;
-        throw error;
-      });
-      if (!channel?.messages?.fetch) continue;
-      outcome.channels += 1;
-      let cursor = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
-      for (let page = 0; page < 100; page += 1) {
-        const fetched = await channel.messages.fetch({ after: cursor, limit: 100 });
-        const messages = [...fetched.values()]
-          .filter((message) => /^\d+$/.test(String(message.id ?? '')) && BigInt(message.id) > BigInt(cursor))
-          .sort((left, right) => BigInt(left.id) < BigInt(right.id) ? -1 : 1);
-        if (messages.length === 0) break;
-        for (const message of messages) {
-          outcome.scanned += 1;
-          const hasInput = Boolean(String(message.content ?? '').trim())
-            || (message.attachments?.size ?? 0) > 0;
-          const shouldRecover = this.config.plainMessageInputEnabled
-            && !message.author?.bot
-            && !message.webhookId
-            && hasInput
-            && this.#hasMessageExecutionPermission(message);
-          if (shouldRecover) {
-            await this.#queueDiscordMessage(message);
-            const advanced = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
-            if (BigInt(advanced) < BigInt(message.id)) {
-              throw new Error(`Recovered Discord message did not advance its cursor: ${message.id}`);
-            }
-            outcome.recovered += 1;
-          } else {
-            this.deliveryOutbox.advanceChannelRecoveryCursor(binding.channelId, message.id);
-            outcome.ignored += 1;
-          }
-          cursor = this.deliveryOutbox.channelRecoveryCursor(binding.channelId);
-        }
-        if (messages.length < 100) break;
-      }
-    }
+    const outcome = await recoverDiscordMessages({
+      bindings,
+      fetchChannel: (channelId) => this.client.channels.fetch(channelId),
+      outbox: this.deliveryOutbox,
+      shouldRecover: (message) => this.config.plainMessageInputEnabled
+        && !message.author?.bot && !message.webhookId
+        && (Boolean(String(message.content ?? '').trim()) || (message.attachments?.size ?? 0) > 0)
+        && this.#hasMessageExecutionPermission(message),
+      enqueueMessage: (message) => this.#queueDiscordMessage(message),
+      isStopping: () => this.stopping,
+      reason,
+    });
     this.#log('discord-recovery-complete', outcome);
     return outcome;
   }
