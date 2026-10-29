@@ -73,6 +73,42 @@ export function appServerProjectKey(projectId) {
   return `app-server:${projectId.trim()}`;
 }
 
+function migratedProjectIds(state, source, projects) {
+  const result = new Map();
+  if (!source) return result;
+  const localRoot = projectPathKeyIfValid(path.win32.dirname(source));
+  if (!localRoot) return result;
+  const candidates = new Map();
+  const nativeOwners = new Map();
+  for (const [host, mappings] of Object.entries(
+    objectValue(state['app-server-project-id-by-legacy-project-id-by-host']),
+  )) {
+    if (!host.startsWith('local:')
+      || projectPathKeyIfValid(host.slice('local:'.length)) !== localRoot) continue;
+    for (const [legacyId, nativeId] of Object.entries(objectValue(mappings))) {
+      if (!projects.has(legacyId) || typeof nativeId !== 'string' || !nativeId.trim()) continue;
+      const targets = candidates.get(legacyId) ?? new Set();
+      targets.add(nativeId.trim());
+      candidates.set(legacyId, targets);
+      const owners = nativeOwners.get(nativeId.trim()) ?? new Set();
+      owners.add(legacyId);
+      nativeOwners.set(nativeId.trim(), owners);
+    }
+  }
+  for (const [legacyId, targets] of candidates) {
+    if (targets.size !== 1) continue;
+    const [nativeId] = targets;
+    if (nativeOwners.get(nativeId)?.size === 1) result.set(legacyId, nativeId);
+  }
+  return result;
+}
+
+function migratedLocalRecord(project, snapshot) {
+  const nativeId = snapshot?.migratedProjectIds?.get(project.projectId);
+  const native = nativeId ? snapshot?.appServerProjects?.get(nativeId) : null;
+  return native ? { ...project, name: native.name, rootPaths: native.rootPaths } : project;
+}
+
 export function desktopProjectSnapshot(value, source = null) {
   const state = objectValue(value);
   const projects = new Map();
@@ -97,6 +133,7 @@ export function desktopProjectSnapshot(value, source = null) {
     projectRoots,
     roots,
     assignments: new Map(Object.entries(objectValue(state['thread-project-assignments']))),
+    migratedProjectIds: migratedProjectIds(state, source, projects),
   };
 }
 
@@ -174,9 +211,18 @@ export function desktopProjectRootForThread(thread, snapshot) {
 }
 
 export function projectForThread(thread, snapshot) {
-  return appServerProjectForThread(thread, snapshot)
-    ?? desktopProjectAssignmentForThread(thread, snapshot)
+  const native = appServerProjectForThread(thread, snapshot);
+  if (native) {
+    const legacyId = [...(snapshot?.migratedProjectIds ?? [])]
+      .find(([, nativeId]) => nativeId === native.projectId)?.[0];
+    if (legacyId && snapshot.projects.has(legacyId)) {
+      return { ...native, projectId: legacyId, resolution: 'app-server-migrated-local-project' };
+    }
+    return native;
+  }
+  const local = desktopProjectAssignmentForThread(thread, snapshot)
     ?? desktopProjectRootForThread(thread, snapshot);
+  return local ? migratedLocalRecord(local, snapshot) : null;
 }
 
 export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'Codex - ', categorySuffix = '',
@@ -200,7 +246,8 @@ export function projectDescriptorForThread(thread, snapshot, categoryPrefix = 'C
 export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex - ', categorySuffix = '',
   useEllipsis = Boolean(categorySuffix)) {
   const descriptors = [];
-  for (const project of snapshot?.projects?.values?.() ?? []) {
+  for (const local of snapshot?.projects?.values?.() ?? []) {
+    const project = migratedLocalRecord(local, snapshot);
     descriptors.push({
       id: project.projectId,
       key: project.projectId,
@@ -209,6 +256,9 @@ export function projectDescriptorsFromSnapshot(snapshot, categoryPrefix = 'Codex
     });
   }
   for (const project of snapshot?.appServerProjects?.values?.() ?? []) {
+    if ([...(snapshot?.migratedProjectIds ?? [])]
+      .some(([legacyId, nativeId]) => nativeId === project.projectId
+        && snapshot.projects.has(legacyId))) continue;
     descriptors.push({
       id: project.projectId,
       key: appServerProjectKey(project.projectId),

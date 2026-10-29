@@ -369,12 +369,17 @@ No project registration is required. The bridge follows every page of
 `project/list`, the global active and archived `thread/list` views, and the
 active and archived `thread/list(projectId)` views for every App Server native
 Project. The project-scoped inventory is merged by task ID because native
-Project tasks are not guaranteed to appear in the global list. An explicit
-Desktop `thread-project-assignments.projectId` remains authoritative; for an
-unassigned task, App Server `thread.projectId` takes precedence over Desktop
+Project tasks are not guaranteed to appear in the global list. A valid App Server
+`thread.projectId` takes precedence over Desktop assignment and root containment.
+Without native membership, an explicit Desktop assignment takes precedence over
 root containment. Native keys use an `app-server:` namespace so same-name or
 same-ID local and native Projects cannot collapse into one Discord category
 identity. Both identity namespaces appear in `プロジェクト表示` and can be hidden independently.
+The Desktop's recorded migration mapping is an explicit identity link: when the
+current local Codex home maps one existing local Project to one native Project,
+both use the existing local Project category key. Native names and roots provide
+the current descriptor. Same-name projects without that mapping, foreign-host
+mappings, and ambiguous mappings remain separate.
 User-owned top-level tasks are synced;
 ephemeral tasks remain inside their parent representation. A Codex subagent is
 mirrored as a Discord thread under its top-level parent task channel. Its agent

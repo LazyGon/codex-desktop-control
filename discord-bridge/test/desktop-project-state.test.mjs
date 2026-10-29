@@ -203,3 +203,78 @@ test('same-name Desktop and App Server projects keep separate durable category i
     true,
   ).name, 'Codex [Alias] Task - same-name');
 });
+
+test('recorded local project migration keeps parent and native tasks in the existing category', () => {
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': {
+      'local-work': { name: 'before-rename', rootPaths: ['C:\\old-work'] },
+    },
+    'thread-project-assignments': {
+      parent: { projectKind: 'local', projectId: 'local-work' },
+    },
+    'app-server-project-id-by-legacy-project-id-by-host': {
+      'local:C:\\Users\\example\\.codex': { 'local-work': 'native-work' },
+    },
+  }, 'C:\\Users\\example\\.codex\\.codex-global-state.json'), [{
+    id: 'native-work', name: 'current-work', roots: [{ path: 'C:\\current-work' }],
+  }]);
+  const parent = projectDescriptorForThread({ id: 'parent', cwd: 'C:\\old-work' }, snapshot);
+  const child = projectDescriptorForThread({
+    id: 'child', projectId: 'native-work', cwd: 'C:\\scratch\\documentation',
+  }, snapshot);
+  assert.deepEqual(parent, {
+    id: 'local-work', key: 'local-work', path: 'C:\\current-work', name: 'Codex - current-work',
+  });
+  assert.deepEqual(child, parent);
+  assert.deepEqual(projectDescriptorsFromSnapshot(snapshot), [parent]);
+});
+
+test('foreign-host or dangling migration records do not merge native categories', () => {
+  for (const migration of [
+    { 'local:C:\\Users\\other\\.codex': { 'local-work': 'native-work' } },
+    { 'local:C:\\Users\\example\\.codex': { missing: 'native-work' } },
+  ]) {
+    const snapshot = withAppServerProjects(desktopProjectSnapshot({
+      'local-projects': { 'local-work': { name: 'work', rootPaths: ['C:\\work'] } },
+      'app-server-project-id-by-legacy-project-id-by-host': migration,
+    }, 'C:\\Users\\example\\.codex\\.codex-global-state.json'), [{
+      id: 'native-work', name: 'work', roots: [{ path: 'C:\\work' }],
+    }]);
+    const descriptor = projectDescriptorForThread({ id: 'child', projectId: 'native-work' }, snapshot);
+    assert.equal(descriptor.key, 'app-server:native-work');
+    assert.equal(projectDescriptorsFromSnapshot(snapshot).length, 2);
+  }
+});
+
+test('ambiguous migration ownership keeps distinct native category identity', () => {
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': {
+      'local-a': { name: 'work', rootPaths: ['C:\\a'] },
+      'local-b': { name: 'work', rootPaths: ['C:\\b'] },
+    },
+    'app-server-project-id-by-legacy-project-id-by-host': {
+      'local:C:\\Users\\example\\.codex': { 'local-a': 'native', 'local-b': 'native' },
+    },
+  }, 'C:\\Users\\example\\.codex\\.codex-global-state.json'), [{
+    id: 'native', name: 'work', roots: [{ path: 'C:\\native' }],
+  }]);
+  assert.equal(projectDescriptorForThread({ id: 'child', projectId: 'native' }, snapshot).key,
+    'app-server:native');
+});
+
+test('conflicting local-home aliases cannot choose the last native migration target', () => {
+  const snapshot = withAppServerProjects(desktopProjectSnapshot({
+    'local-projects': { 'local-work': { name: 'work', rootPaths: ['C:\\work'] } },
+    'app-server-project-id-by-legacy-project-id-by-host': {
+      'local:C:\\Users\\example\\.codex': { 'local-work': 'native-a' },
+      'local:c:\\users\\EXAMPLE\\.codex': { 'local-work': 'native-b' },
+    },
+  }, 'C:\\Users\\example\\.codex\\.codex-global-state.json'), [
+    { id: 'native-a', name: 'a', roots: [{ path: 'C:\\a' }] },
+    { id: 'native-b', name: 'b', roots: [{ path: 'C:\\b' }] },
+  ]);
+  for (const id of ['native-a', 'native-b']) {
+    assert.equal(projectDescriptorForThread({ id, projectId: id }, snapshot).key,
+      `app-server:${id}`);
+  }
+});
