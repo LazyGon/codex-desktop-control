@@ -319,3 +319,35 @@ test('durable stop/status and disabled execution need no server connection', asy
     assert.equal(fs.readdirSync(dir).some(x => x.endsWith('.tmp')), false);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
+
+const creditPolicyFixture = () => ({ enabled:true, authorizationId:'00000000-0000-4000-8000-000000000001',
+  accountHash:'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  creditId:'selected-free-reset', balanceThreshold:10000, paidRecoveryThreadIds:['task'] });
+const creditRateFixture = balance => ({ accountId:'abc', ordinaryUsageAllowed:false,
+  rateLimits:{ limitId:'codex',rateLimitReachedType:'rate_limit_reached',spendControlReached:false,
+    primary:{usedPercent:100,resetsAt:2000000000},credits:{hasCredits:true,unlimited:false,balance} } });
+
+test('paid-credit recovery is opt-in and limited to the authorized task above the reserve floor', async () => {
+  const c=mocked({ids:['task','other'],rates:creditRateFixture('10001')});
+  const result=await runCycle(c,{...defaultConfig,creditResetPolicy:creditPolicyFixture()},{threads:{}},memoryStore(),()=>150000);
+  assert.equal(result.results.find(r=>r.id==='task').action,'accepted');
+  assert.equal(result.results.find(r=>r.id==='other').action,'rate-unavailable');
+  assert.deepEqual(c.calls.filter(x=>x.method==='turn/start').map(x=>x.params.threadId),['task']);
+});
+test('a confirmed paid balance alone cannot enable paid recovery or spend below its reserve', async () => {
+  for(const config of [defaultConfig,{...defaultConfig,creditResetPolicy:creditPolicyFixture()}]) {
+    const c=mocked({rates:creditRateFixture('10000')});
+    const result=await runCycle(c,config,{threads:{}},memoryStore(),()=>150000);
+    assert.equal(result.results[0].action,'rate-unavailable');
+    assert.equal(c.calls.some(x=>['thread/resume','turn/start'].includes(x.method)),false);
+  }
+  assert.equal(rateAvailable(creditRateFixture('100000')),false);
+});
+test('paid recovery carries its observed rate to the live authorization checks before mutation', async () => {
+  const rates=creditRateFixture('10001'),c=mocked({rates}),store=memoryStore();
+  const observed=[];
+  store.allowed=(id,rate)=>{observed.push({id,rate});return false;};
+  await runCycle(c,{...defaultConfig,creditResetPolicy:creditPolicyFixture()},{threads:{}},store,()=>150000);
+  assert.deepEqual(observed,[{id:'task',rate:rates}]);
+  assert.equal(c.calls.some(x=>['thread/resume','turn/start'].includes(x.method)),false);
+});

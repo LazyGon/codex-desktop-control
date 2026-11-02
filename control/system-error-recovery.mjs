@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { connectCanonical, readJson, saveJson, deliveryFor } from './shared-task-operations.mjs';
+import { manageCreditReset, paidRecoveryAvailable, validateCreditPolicy } from './credit-reset-policy.mjs';
+import { creditResetStore } from './credit-reset-store.mjs';
 import { uuidV7TimestampMs, turnTimestampMs } from '../discord-bridge/src/recent-history.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -135,7 +137,8 @@ export function eligibility(thread, turns, goal, excluded = [], previous = null)
   if (!thread.id || !thread.cwd || !thread.model || !thread.modelProvider) return 'missing-identity';
   return 'eligible';
 }
-export function rateAvailable(result) {
+export function rateAvailable(result, creditPolicy = null, threadId = null) {
+  if (paidRecoveryAvailable(result, creditPolicy, threadId)) return true;
   if (result?.ordinaryUsageAllowed !== true) return false;
   const all = [result.rateLimits, ...Object.values(result?.rateLimitsByLimitId ?? {})].filter(Boolean);
   return all.length > 0 && !all.some(limit => limit.spendControlReached === true
@@ -230,10 +233,12 @@ export async function notifyParent(client, child, failedTurnId, kind, store, con
   catch { record.phase = 'pending-read'; save(); return { action: record.phase, key }; }
   const mode = parentNoticeEligibility(parent, config);
   if (!['steer', 'start'].includes(mode)) { record.phase = 'pending-parent'; record.reason = mode; save(); return { action: record.phase, reason: mode, key }; }
+  let usageRate = null;
   if (mode === 'start') {
     if (!allowStart) { record.phase = 'pending-limit'; save(); return { action: record.phase, key }; }
     try {
-      if (!rateAvailable(await client.call('account/rateLimits/read', {}, config.requestTimeoutMs))) {
+      usageRate = await client.call('account/rateLimits/read', {}, config.requestTimeoutMs);
+      if (!rateAvailable(usageRate, config.creditResetPolicy, relation.parentId)) {
         record.phase = 'pending-rate'; save(); return { action: record.phase, key };
       }
     } catch { record.phase = 'pending-read'; save(); return { action: record.phase, key }; }
@@ -253,7 +258,7 @@ export async function notifyParent(client, child, failedTurnId, kind, store, con
     record.phase = 'pending-parent'; record.reason = 'parent-cut-changed'; save(); return { action: record.phase, key };
   }
   if (dryRun) return { action: 'would-notify-parent', key, mode, parentId: relation.parentId };
-  if (store.allowed && (!store.allowed(child.thread.id) || !store.allowed(relation.parentId))) return { action: 'config-stopped', key };
+  if (store.allowed && (!store.allowed(child.thread.id) || !store.allowed(relation.parentId, usageRate))) return { action: 'config-stopped', key };
   record.phase = 'prepared'; record.parentIdentitySha256 = hashIdentity(freshParent.thread);
   record.parentGoalIdentity = goalIdentity(freshParent.goal); save();
   try {
@@ -271,7 +276,7 @@ export async function notifyParent(client, child, failedTurnId, kind, store, con
       }
       freshParent = after;
     }
-    if (store.allowed && (!store.allowed(child.thread.id) || !store.allowed(relation.parentId))) {
+    if (store.allowed && (!store.allowed(child.thread.id) || !store.allowed(relation.parentId, usageRate))) {
       record.phase = 'config-stopped'; save(); return { action: record.phase, key };
     }
     const recovery = kind === 'recovery' ? store.getRecovery?.(child.thread.id, failedTurnId) : null;
@@ -302,6 +307,7 @@ function rotateNotices(rows, after) {
   return index < 0 ? sorted : [...sorted.slice(index), ...sorted.slice(0, index)];
 }
 export function validateConfig(c) {
+  if (c?.creditResetPolicy !== undefined) validateCreditPolicy(c.creditResetPolicy);
   if (c?.schemaVersion !== 1 || typeof c.enabled !== 'boolean' || !Array.isArray(c.excludedThreadIds)
       || c.excludedThreadIds.some(x => typeof x !== 'string')) throw new Error('Invalid config');
   for (const k of ['maxStartsPerCycle', 'maxThreadsPerCycle', 'maxParentNoticesPerCycle',
@@ -473,9 +479,9 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
       if (report.resumed + report.noticeStarts >= startLimit) { result.action = 'cycle-limit'; continue; }
       if (now() - started >= cycleBudget) { result.action = 'budget-deferred'; continue; }
       const rate = await client.call('account/rateLimits/read', {}, config.requestTimeoutMs);
-      if (!rateAvailable(rate)) { result.action = 'rate-unavailable'; continue; }
+      if (!rateAvailable(rate, config.creditResetPolicy, id)) { result.action = 'rate-unavailable'; continue; }
       if (dryRun) { result.action = 'would-resume'; continue; }
-      if (store.allowed && !store.allowed(id)) { result.action = 'config-stopped'; continue; }
+      if (store.allowed && !store.allowed(id, rate)) { result.action = 'config-stopped'; continue; }
       let fresh = await snapshot(client, id, config.requestTimeoutMs);
       if (eligibility(fresh.thread, fresh.turns, fresh.goal, config.excludedThreadIds, recoveryPrior) !== 'eligible'
           || episodeKey(id, fresh.turns[0]) !== key || !sameIdentity(s.thread, fresh.thread)
@@ -501,7 +507,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
         nextEligibleAt };
       store.saveState(state);
       try {
-        if (store.allowed && !store.allowed(id)) {
+        if (store.allowed && !store.allowed(id, rate)) {
           attempt.phase = 'config-stopped'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
         attempt.phase = 'session-dispatching'; store.update(key, attempt);
@@ -516,7 +522,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
           attempt.phase = 'changed-after-session'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
         if (fresh.goal?.status === 'blocked' && !attempt.blockedWorkRecovery) {
-          if (store.allowed && !store.allowed(id)) {
+          if (store.allowed && !store.allowed(id, rate)) {
             attempt.phase = 'config-stopped'; store.update(key, attempt); result.action = attempt.phase; continue;
           }
           attempt.phase = 'goal-dispatching'; store.update(key, attempt);
@@ -559,7 +565,7 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
           attempt.phase = 'changed-before-start'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
         attempt.phase = 'turn-dispatching'; store.update(key, attempt);
-        if (store.allowed && !store.allowed(id)) {
+        if (store.allowed && !store.allowed(id, rate)) {
           attempt.phase = 'config-stopped'; store.update(key, attempt); result.action = attempt.phase; continue;
         }
         if (attempt.blockedWorkRecovery && !blockedWorkMatches(fresh.thread, fresh.goal, attempt.blockedWorkRecovery)) {
@@ -689,9 +695,10 @@ export async function runOnce(directory = defaultDirectory, dryRun = false) {
       updateNotice: (key, value) => { saveJson(path.join(directory, 'parent-notices', key + '.json'), value); notices.set(key, value); },
       pendingNotices: () => [...notices.values()].filter(x => ['pending-parent', 'pending-read', 'pending-rate', 'pending-limit'].includes(x.phase)),
       saveState: value => saveJson(stateFile, value),
-      allowed: id => {
+      allowed: (id, usageRate = null) => {
         const current = validateConfig(readJson(path.join(directory, 'config.json')));
-        return current.enabled && !current.excludedThreadIds.includes(id);
+        return current.enabled && !current.excludedThreadIds.includes(id)
+          && (!usageRate || rateAvailable(usageRate, current.creditResetPolicy, id));
       },
     };
     stage = 'connect'; client = await connectCanonical({ requestTimeoutMs: config.requestTimeoutMs });
@@ -700,8 +707,19 @@ export async function runOnce(directory = defaultDirectory, dryRun = false) {
       try { return await call(method, params, timeout); }
       catch (error) { error.recoveryMethod = method; throw error; }
     };
+    let creditPolicyReport;
+    if (config.creditResetPolicy?.enabled) {
+      stage = 'credit-reset-policy';
+      try { creditPolicyReport = await manageCreditReset(client, config.creditResetPolicy, creditResetStore(directory),
+        () => { const current = validateConfig(readJson(path.join(directory, 'config.json')));
+          return current.enabled ? current.creditResetPolicy : null; }, Date.now, dryRun); }
+      catch { creditPolicyReport = { action: 'credit-policy-unavailable-no-redemption' }; }
+      if (['redeemed','already-redeemed','completed-one-reset','unknown-no-resend','credit-policy-unavailable-no-redemption']
+          .includes(creditPolicyReport.action)) config.creditResetPolicy = { ...config.creditResetPolicy, enabled: false };
+    }
     stage = 'cycle';
     const report = await runCycle(client, config, state, store, Date.now, dryRun);
+    if (creditPolicyReport) report.creditPolicy = creditPolicyReport;
     saveJson(path.join(directory, dryRun ? 'dry-run.json' : 'last-cycle.json'), report);
     return report;
   } catch (error) {

@@ -292,3 +292,7 @@ decisions; the verification owner retains ordinary Product proof.
   native source/subagent metadata or denied direct input selects the parent-owned
   route. Confirmed ordinary direct-input tasks with a genuine parent keep ordinary
   same-thread recovery and subsequently notify that parent.
+
+## Conditional earned-reset use
+
+Only explicit owner authorization may enable `creditResetPolicy`. It binds one account and one selected earned reset to a credit-balance threshold; UNKNOWN claims are never replayed. Read `docs/credit-reset-policy.md` when configuring or diagnosing it. Purchased-credit recovery requires explicit `paidRecoveryThreadIds` and preserves all original task/goal protections. Do not enable the same account policy on multiple PCs or copy its local authorization/journals.
