@@ -274,6 +274,27 @@ function Wait-ForControllerAcceptance {
 
 }
 
+function New-RefreshControllerCommand {
+    param([Parameter(Mandatory)][string]$RequestId)
+
+    $escapedScriptPath = $refreshScriptPath.Replace("'", "''")
+    $escapedPackagePath = $PackagePath.Replace("'", "''")
+    @(
+        "& '$escapedScriptPath'",
+        "-WaitForThreadId '$WaitForThreadId'",
+        "-WaitForTurnId '$WaitForTurnId'",
+        "-FromVersion '$FromVersion'",
+        "-ToVersion '$ToVersion'",
+        "-TurnTimeoutSeconds $TurnTimeoutSeconds",
+        "-RestartTimeoutSeconds $RestartTimeoutSeconds",
+        "-DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds",
+        "-PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256'",
+        '-ScheduledController',
+        "-RefreshRequestId '$RequestId'",
+        "-ScheduledTaskName '$ScheduledTaskName'"
+    ) -join ' '
+}
+
 function Start-DetachedRefreshController {
     $launchMutex = Enter-ExclusiveMutex `
         -Name $launchMutexName `
@@ -299,22 +320,7 @@ function Start-DetachedRefreshController {
         }
 
         $requestId = [Guid]::NewGuid().ToString()
-        $escapedScriptPath = $PSCommandPath.Replace("'", "''")
-        $escapedPackagePath = $PackagePath.Replace("'", "''")
-        $controllerCommand = @"
-& '$escapedScriptPath' `
-    -WaitForThreadId '$WaitForThreadId' `
-    -WaitForTurnId '$WaitForTurnId' `
-    -FromVersion '$FromVersion' `
-    -ToVersion '$ToVersion' `
-    -TurnTimeoutSeconds $TurnTimeoutSeconds `
-    -RestartTimeoutSeconds $RestartTimeoutSeconds `
-    -DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds `
-    -PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256' `
-    -ScheduledController `
-    -RefreshRequestId '$requestId' `
-    -ScheduledTaskName '$ScheduledTaskName'
-"@
+        $controllerCommand = New-RefreshControllerCommand -RequestId $requestId
         $encodedCommand = [Convert]::ToBase64String(
             [Text.Encoding]::Unicode.GetBytes($controllerCommand)
         )

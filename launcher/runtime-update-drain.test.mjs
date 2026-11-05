@@ -380,3 +380,32 @@ test('update installation follows normal shutdown and excludes forced process te
   assert.doesNotMatch(source, /ReasoningVM MVP-833/);
   assert.match(source, /uncertain-no-resend/);
 });
+
+test('encoded scheduled controller is one invocation with all arguments in Windows PowerShell', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const builder = extractPowerShellFunction(source, 'New-RefreshControllerCommand', 'Start-DetachedRefreshController');
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$refreshScriptPath='C:\\update folder\\Refresh.ps1'",
+    "$PackagePath=\"C:\\Owner's folder\\ChatGPT.msix\"",
+    "$PackageSha256='" + 'a'.repeat(64) + "'",
+    "$WaitForThreadId='00000000-0000-0000-0000-000000000001'",
+    "$WaitForTurnId='00000000-0000-0000-0000-000000000002'",
+    "$FromVersion='26.1007.2314.0'; $ToVersion='26.1029.7803.0'",
+    "$TurnTimeoutSeconds=0; $RestartTimeoutSeconds=0; $DesktopCloseTimeoutSeconds=0",
+    "$ScheduledTaskName='Codex Shared Runtime Refresh'",
+    builder,
+    "$command=New-RefreshControllerCommand -RequestId '00000000-0000-0000-0000-000000000003'",
+    '$tokens=$null; $errors=$null',
+    '$ast=[Management.Automation.Language.Parser]::ParseInput($command,[ref]$tokens,[ref]$errors)',
+    '[pscustomobject]@{statements=$ast.EndBlock.Statements.Count;errors=$errors.Count;parameters=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandParameterAst]},$true) | ForEach-Object ParameterName)} | ConvertTo-Json -Compress',
+  ].join('\n');
+  const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true}));
+  assert.equal(result.statements, 1);
+  assert.equal(result.errors, 0);
+  assert.deepEqual(result.parameters, ['WaitForThreadId','WaitForTurnId','FromVersion','ToVersion',
+    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256',
+    'ScheduledController','RefreshRequestId','ScheduledTaskName']);
+});
