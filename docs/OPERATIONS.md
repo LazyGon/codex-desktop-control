@@ -103,6 +103,9 @@ default to no deadline; process exit and explicit cancellation still fail closed
 RPC page sizes and polling intervals are not operation ceilings.
 These parameters never authorize forced termination, a Windows reboot, credit
 reset consumption or paid recovery.
+Desktop shutdown uses the existing identity-bound Restart Manager helper with
+force flags disabled, rather than closing only the window (which may leave the
+application in the tray). An application veto is recorded, not retried or forced.
 
 ## Discover and catch up a phone-created task
 

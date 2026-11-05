@@ -369,7 +369,8 @@ test('update installation follows normal shutdown and excludes forced process te
   const source = fs.readFileSync(refreshScriptPath, 'utf8');
   const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Start-BridgeHidden');
   assert.doesNotMatch(close, /Stop-Process/);
-  assert.match(close, /CloseMainWindow/);
+  assert.match(close, /Invoke-CodexDesktopNormalShutdown/);
+  assert.doesNotMatch(close, /CloseMainWindow/);
   assert.match(source, /\[int\]\$TurnTimeoutSeconds = 0/);
   assert.match(source, /\[int\]\$RestartTimeoutSeconds = 0/);
   assert.match(source, /\[int\]\$DesktopCloseTimeoutSeconds = 0/);
@@ -379,6 +380,28 @@ test('update installation follows normal shutdown and excludes forced process te
   assert.match(source.slice(0, install), /\$signature.Status -ne 'Valid'/);
   assert.doesNotMatch(source, /ReasoningVM MVP-833/);
   assert.match(source, /uncertain-no-resend/);
+});
+
+test('refresh requests normal application shutdown once and respects a veto', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Start-BridgeHidden');
+  for (const returnCode of [0, 350]) {
+    const script = [
+      "$ErrorActionPreference='Stop'; $DesktopCloseTimeoutSeconds=0; $script:calls=0",
+      'function Write-RefreshLog { param($Message) }',
+      'function Get-DesktopRootProcesses { param($DesktopExecutable) if($script:calls -eq 0){[pscustomobject]@{ProcessId=43}} }',
+      "function Get-Process { param($Id) [pscustomobject]@{Id=$Id;StartTime=[datetime]'2026-11-06T00:30:00Z'} }",
+      `function Invoke-CodexDesktopNormalShutdown { param($ProcessId,$ExpectedExecutable,$ExpectedStartTimeUtc,[switch]$Execute) $script:calls++; [pscustomobject]@{ShutdownRequested=[bool]$Execute;ReturnCode=${returnCode};AffectedProcessIds=@($ProcessId)} }`,
+      close,
+      "$outcome='normal'; try{Request-DesktopClose -DesktopExecutable 'fixture'}catch{$outcome='veto'}",
+      '[pscustomobject]@{calls=$script:calls;outcome=$outcome} | ConvertTo-Json -Compress',
+    ].join('\n');
+    const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true}));
+    assert.equal(result.calls, 1);
+    assert.equal(result.outcome, returnCode === 0 ? 'normal' : 'veto');
+  }
 });
 
 test('encoded scheduled controller is one invocation with all arguments in Windows PowerShell', {

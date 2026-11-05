@@ -50,6 +50,7 @@ $logPath = Join-Path $launcherRoot 'logs\runtime-refresh-last.log'
 $drainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
 $launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
+$desktopShutdownScript = Join-Path $launcherRoot 'CodexDesktopShutdown.ps1'
 $controlScript = Join-Path $repositoryRoot 'control\codex-control.mjs'
 $bridgeStopScript = Join-Path $repositoryRoot 'discord-bridge\Stop-DiscordBridge.ps1'
 $bridgeStartScript = Join-Path $repositoryRoot 'discord-bridge\Start-DiscordBridge.ps1'
@@ -66,6 +67,7 @@ if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
     throw "Codex runtime cache helper was not found: $runtimeCacheScript"
 }
 . $runtimeCacheScript
+. $desktopShutdownScript
 
 function Write-RefreshLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -569,16 +571,19 @@ function Request-DesktopClose {
     param([Parameter(Mandatory)][string]$DesktopExecutable)
 
     $roots = @(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable)
-    $requested = 0
+    if ($roots.Count -eq 0) { return }
     foreach ($root in $roots) {
-        $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
-        if ($null -ne $process -and $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.CloseMainWindow()) {
-            $requested += 1
-            Write-RefreshLog "Desktop close requested. pid=$($root.ProcessId)"
+        $process = Get-Process -Id $root.ProcessId -ErrorAction Stop
+        $startedAt = $process.StartTime.ToUniversalTime().ToString('o')
+        Write-RefreshLog "Normal Desktop application shutdown requested. pid=$($process.Id) method=RestartManager"
+        $shutdown = Invoke-CodexDesktopNormalShutdown -ProcessId $process.Id `
+            -ExpectedExecutable $DesktopExecutable -ExpectedStartTimeUtc $startedAt -Execute
+        if (-not $shutdown.ShutdownRequested -or $shutdown.ReturnCode -ne 0 -or
+            @($shutdown.AffectedProcessIds).Count -ne 1 -or
+            $shutdown.AffectedProcessIds[0] -ne $process.Id) {
+            throw "Normal Desktop shutdown was not confirmed. code=$($shutdown.ReturnCode). No forced close or retry was attempted."
         }
-    }
-    if ($requested -eq 0) {
-        throw 'Codex Desktop had no closeable main window. No process termination was attempted.'
+        Write-RefreshLog "Normal Desktop shutdown accepted. pid=$($process.Id)"
     }
 
     $deadline = if ($DesktopCloseTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($DesktopCloseTimeoutSeconds) }
