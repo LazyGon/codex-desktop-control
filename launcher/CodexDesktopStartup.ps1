@@ -14,7 +14,7 @@ function New-CodexDesktopStartInfo {
 }
 
 function Get-CodexDesktopConnectionDecision {
-    param([bool]$Connected,[bool]$ServerAlive,[bool]$DesktopAlive,[bool]$Cancelled,[double]$ElapsedSeconds,[int]$TimeoutSeconds=180)
+    param([bool]$Connected,[bool]$ServerAlive,[bool]$DesktopAlive,[bool]$Cancelled,[double]$ElapsedSeconds,[int]$TimeoutSeconds=0)
     if($TimeoutSeconds -lt 0){throw 'An optional Desktop connection timeout cannot be negative.'}
     if($Cancelled){throw [OperationCanceledException]::new('Desktop startup was cancelled.')}
     if(-not $ServerAlive){throw 'The owned shared AppServer exited during Desktop initialization.'}

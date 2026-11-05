@@ -12,6 +12,7 @@ import {
   resumePausedGoals,
   selectDrainStateForUpdate,
   waitForTurnCompletion,
+  deliverRuntimeCompletion,
 } from './runtime-update-drain.mjs';
 
 const launcherRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -301,7 +302,8 @@ test('refresh task ownership rejects foreign actions, principals, triggers and a
     "-WaitForThreadId '00000000-0000-0000-0000-000000000001'",
     "-WaitForTurnId '00000000-0000-0000-0000-000000000002'",
     "-FromVersion '26.820.1.0' -ToVersion '26.820.2.0'",
-    '-TurnTimeoutSeconds 1800 -RestartTimeoutSeconds 240 -DesktopCloseTimeoutSeconds 120',
+    '-TurnTimeoutSeconds 0 -RestartTimeoutSeconds 0 -DesktopCloseTimeoutSeconds 0',
+    "-PackagePath 'C:\\update folder\\ChatGPT.msix' -PackageSha256 '" + 'a'.repeat(64) + "'",
     "-ScheduledController -RefreshRequestId '00000000-0000-0000-0000-000000000003'",
     "-ScheduledTaskName '" + taskName + "'",
   ].join(' ');
@@ -326,4 +328,55 @@ test('refresh task ownership rejects foreign actions, principals, triggers and a
   const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {encoding:'utf8', windowsHide:true}));
   assert.equal(result.admitted, true);
   assert.deepEqual(result.rejected, ['action', 'principal', 'trigger', 'state', 'directory']);
+});
+
+test('completion delivery reads the current turn and sends exactly once without settings overrides', async () => {
+  for (const active of [true, false]) {
+    const client = new FakeClient((method, params) => {
+      if (method === 'thread/read') return { thread: { id: 'THREAD' } };
+      if (method === 'thread/turns/list') return { data: [{ id: 'TURN', status: active ? 'inProgress' : 'completed' }] };
+      assert.equal(method, active ? 'turn/steer' : 'turn/start');
+      assert.deepEqual(Object.keys(params).sort(), active
+        ? ['expectedTurnId', 'input', 'threadId'] : ['input', 'threadId']);
+      if (active) assert.equal(params.expectedTurnId, 'TURN');
+      return { turn: { id: active ? 'TURN' : 'NEW-TURN' } };
+    });
+    const receipt = await deliverRuntimeCompletion(client, 'THREAD', 'update settled');
+    assert.equal(receipt.accepted, true);
+    assert.equal(client.calls.length, 3);
+    assert.equal(receipt.turnId, active ? 'TURN' : 'NEW-TURN');
+  }
+});
+
+test('uncertain completion delivery is never replayed', async () => {
+  let writes = 0;
+  const client = new FakeClient((method) => {
+    if (method === 'thread/read') return { thread: { id: 'THREAD' } };
+    if (method === 'thread/turns/list') return { data: [] };
+    writes++;
+    return {};
+  });
+  await assert.rejects(deliverRuntimeCompletion(client, 'THREAD', 'done'), /uncertain/);
+  assert.equal(writes, 1);
+});
+
+test('default turn wait has no agent deadline and observes terminal readback', async () => {
+  const client = new FakeClient(() => ({ data: [{ id: 'TURN', status: 'completed' }] }));
+  assert.equal((await waitForTurnCompletion(client, 'THREAD', 'TURN')).status, 'completed');
+});
+
+test('update installation follows normal shutdown and excludes forced process termination', () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Start-BridgeHidden');
+  assert.doesNotMatch(close, /Stop-Process/);
+  assert.match(close, /CloseMainWindow/);
+  assert.match(source, /\[int\]\$TurnTimeoutSeconds = 0/);
+  assert.match(source, /\[int\]\$RestartTimeoutSeconds = 0/);
+  assert.match(source, /\[int\]\$DesktopCloseTimeoutSeconds = 0/);
+  const install = source.indexOf('Add-AppxPackage -Path $PackagePath');
+  assert.ok(install > source.indexOf('Old shared runtime exited under its owning supervisor.'));
+  assert.ok(install < source.indexOf("Write-RefreshLog 'Replacement shared launcher started.'"));
+  assert.match(source.slice(0, install), /\$signature.Status -ne 'Valid'/);
+  assert.doesNotMatch(source, /ReasoningVM MVP-833/);
+  assert.match(source, /uncertain-no-resend/);
 });

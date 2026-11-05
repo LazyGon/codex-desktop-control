@@ -16,9 +16,9 @@ test('a healthy cold startup is not failed just because thirty seconds elapsed',
  assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -Connected $false -Cancelled $false -ElapsedSeconds 120'),'pending');
  assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -Connected $true -Cancelled $false -ElapsedSeconds 120'),'ready');
 });
-test('the three-minute inactivity limit does not impose a total startup deadline',()=>{
- assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -ElapsedSeconds 179'),'pending');
- assert.equal(run("try{Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -ElapsedSeconds 180;'unexpected'}catch{'rejected'}"),'rejected');
+test('default startup has no agent deadline; an explicit inactivity limit is honored',()=>{
+ assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -ElapsedSeconds 86400'),'pending');
+ assert.equal(run("try{Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -TimeoutSeconds 180 -ElapsedSeconds 180;'unexpected'}catch{'rejected'}"),'rejected');
 });
 test('only forward startup stages count; reconnect errors and unrelated hosts do not',()=>{
  const stages=JSON.parse(run("@((Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Starting app-server connection hostId=local transport=websocket'),(Get-CodexDesktopStartupLogStage -Line 'error [AppServerConnection] websocket_error hostId=local'),(Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Transport start success connectionId=1 hostId=local transport=websocket'),(Get-CodexDesktopStartupLogStage -Line 'info [AppServerConnection] Starting app-server connection hostId=durable transport=websocket'))|ConvertTo-Json"));

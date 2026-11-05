@@ -16,14 +16,18 @@ param(
     [ValidatePattern('^[0-9]+(?:\.[0-9]+){1,3}$')]
     [string]$ToVersion,
 
-    [ValidateRange(60, 3600)]
-    [int]$TurnTimeoutSeconds = 1800,
+    [ValidateScript({ $_ -ge 0 })]
+    [int]$TurnTimeoutSeconds = 0,
 
-    [ValidateRange(60, 600)]
-    [int]$RestartTimeoutSeconds = 240,
+    [ValidateScript({ $_ -ge 0 })]
+    [int]$RestartTimeoutSeconds = 0,
 
-    [ValidateRange(30, 600)]
-    [int]$DesktopCloseTimeoutSeconds = 120,
+    [ValidateScript({ $_ -ge 0 })]
+    [int]$DesktopCloseTimeoutSeconds = 0,
+
+    [string]$PackagePath = '',
+    [ValidatePattern('^(?:[0-9a-fA-F]{64})?$')]
+    [string]$PackageSha256 = '',
 
     [switch]$ScheduledController,
 
@@ -194,6 +198,7 @@ function Assert-OwnedRefreshTask {
                 '-TurnTimeoutSeconds [0-9]+ ' +
                 '-RestartTimeoutSeconds [0-9]+ ' +
                 '-DesktopCloseTimeoutSeconds [0-9]+ ' +
+                "(?:-PackagePath '(?:[^']|'')*' -PackageSha256 '(?:[A-Fa-f0-9]{64})?' )?" +
                 '-ScheduledController ' +
                 "-RefreshRequestId '[0-9a-f-]{36}' " +
                 "-ScheduledTaskName '$([regex]::Escape($ScheduledTaskName))'$"
@@ -245,8 +250,7 @@ function Assert-NoUnresolvedRefreshReceipt {
 }
 
 function Wait-ForControllerAcceptance {
-    $deadline = [DateTimeOffset]::Now.AddSeconds(35)
-    while ([DateTimeOffset]::Now -lt $deadline) {
+    while ($true) {
         try {
             $receipt = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if (
@@ -268,7 +272,6 @@ function Wait-ForControllerAcceptance {
         Start-Sleep -Milliseconds 250
     }
 
-    throw 'The detached refresh controller was not acknowledged within 35 seconds.'
 }
 
 function Start-DetachedRefreshController {
@@ -297,6 +300,7 @@ function Start-DetachedRefreshController {
 
         $requestId = [Guid]::NewGuid().ToString()
         $escapedScriptPath = $PSCommandPath.Replace("'", "''")
+        $escapedPackagePath = $PackagePath.Replace("'", "''")
         $controllerCommand = @"
 & '$escapedScriptPath' `
     -WaitForThreadId '$WaitForThreadId' `
@@ -306,6 +310,7 @@ function Start-DetachedRefreshController {
     -TurnTimeoutSeconds $TurnTimeoutSeconds `
     -RestartTimeoutSeconds $RestartTimeoutSeconds `
     -DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds `
+    -PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256' `
     -ScheduledController `
     -RefreshRequestId '$requestId' `
     -ScheduledTaskName '$ScheduledTaskName'
@@ -341,8 +346,7 @@ function Start-DetachedRefreshController {
             -Force | Out-Null
         Start-ScheduledTask -TaskName $ScheduledTaskName
 
-        $deadline = [DateTimeOffset]::Now.AddSeconds(30)
-        while ([DateTimeOffset]::Now -lt $deadline) {
+        while ($true) {
             $receipt = $null
             if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
                 try {
@@ -395,13 +399,13 @@ function Start-DetachedRefreshController {
                     throw "Detached runtime refresh controller failed before acceptance: $($receipt.error)"
                 }
             }
+            $liveTask = Get-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction Stop
+            if ([string]$liveTask.State -ne 'Running') {
+                throw "Refresh controller exited without an armed receipt. requestId=$requestId"
+            }
             Start-Sleep -Milliseconds 250
         }
 
-        throw (
-            'Detached runtime refresh launch is uncertain because no matching armed receipt ' +
-            "was observed within 30 seconds. Task=$ScheduledTaskName requestId=$requestId"
-        )
     }
     finally {
         Exit-ExclusiveMutex -Mutex $launchMutex
@@ -424,7 +428,7 @@ function Invoke-DrainCommand {
             $arguments += @(
                 '--thread', $WaitForThreadId,
                 '--turn', $WaitForTurnId,
-                '--timeout-ms', ([string]($TurnTimeoutSeconds * 1000))
+                '--timeout-ms', $(if ($TurnTimeoutSeconds -eq 0) { 'none' } else { [string]([long]$TurnTimeoutSeconds * 1000) })
             )
         }
     }
@@ -571,7 +575,7 @@ function Request-DesktopClose {
         throw 'Codex Desktop had no closeable main window. No process termination was attempted.'
     }
 
-    $deadline = [DateTimeOffset]::Now.AddSeconds($DesktopCloseTimeoutSeconds)
+    $deadline = if ($DesktopCloseTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($DesktopCloseTimeoutSeconds) }
     while ([DateTimeOffset]::Now -lt $deadline) {
         if (@(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable).Count -eq 0) {
             Write-RefreshLog 'Codex Desktop exited normally.'
@@ -580,45 +584,7 @@ function Request-DesktopClose {
         Start-Sleep -Milliseconds 500
     }
 
-    $remainingRoots = @(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable)
-    foreach ($root in $remainingRoots) {
-        $liveRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($root.ProcessId)" -ErrorAction Stop
-        if (
-            $null -eq $liveRoot -or
-            $liveRoot.ExecutablePath -ne $DesktopExecutable -or
-            $liveRoot.CommandLine -match '(?:^|\s)--type='
-        ) {
-            throw "Desktop-only termination safety check failed for PID $($root.ProcessId)."
-        }
-    }
-    Write-RefreshLog (
-        "Desktop remained alive after $DesktopCloseTimeoutSeconds seconds; " +
-        "stopping verified roots. ids=$($remainingRoots.ProcessId -join ',')"
-    )
-    foreach ($root in $remainingRoots) {
-        Stop-Process -Id $root.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-
-    $forcedDeadline = [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds)
-    while ([DateTimeOffset]::Now -lt $forcedDeadline) {
-        $stillRunning = @(
-            foreach ($root in $remainingRoots) {
-                $process = Get-CimInstance Win32_Process `
-                    -Filter "ProcessId=$($root.ProcessId)" `
-                    -ErrorAction SilentlyContinue
-                if ($null -ne $process -and $process.ExecutablePath -eq $DesktopExecutable) {
-                    $process
-                }
-            }
-        )
-        if ($stillRunning.Count -eq 0) {
-            Write-RefreshLog 'Verified Desktop roots exited after the bounded stop request.'
-            return
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    throw "Verified Codex Desktop roots did not exit within $RestartTimeoutSeconds seconds."
+    throw 'Desktop did not exit normally within the explicitly supplied observation limit. No process was terminated.'
 }
 
 function Start-BridgeHidden {
@@ -633,7 +599,7 @@ function Start-BridgeHidden {
 }
 
 function Wait-ForBridge {
-    $deadline = [DateTimeOffset]::Now.AddSeconds(60)
+    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
     while ([DateTimeOffset]::Now -lt $deadline) {
         try {
             $status = (& $bridgeStatusScript -Json | ConvertFrom-Json)
@@ -651,7 +617,7 @@ function Wait-ForBridge {
         }
         Start-Sleep -Seconds 1
     }
-    throw 'Discord Bridge did not return to a fully connected state within 60 seconds.'
+    throw 'Discord Bridge did not reconnect within the explicitly supplied observation limit.'
 }
 
 function Wait-ForOldRuntimeExit {
@@ -660,7 +626,7 @@ function Wait-ForOldRuntimeExit {
         [Parameter(Mandatory)][int]$OldSupervisorProcessId
     )
 
-    $deadline = [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds)
+    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
     while ([DateTimeOffset]::Now -lt $deadline) {
         $serverAlive = $null -ne (Get-Process -Id $OldServerProcessId -ErrorAction SilentlyContinue)
         $supervisorAlive = $null -ne (Get-Process -Id $OldSupervisorProcessId -ErrorAction SilentlyContinue)
@@ -676,7 +642,7 @@ function Wait-ForOldRuntimeExit {
 function Wait-ForNewRuntime {
     param([Parameter(Mandatory)][int]$OldServerProcessId)
 
-    $deadline = [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds)
+    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
     while ([DateTimeOffset]::Now -lt $deadline) {
         try {
             $state = Get-VerifiedRuntimeState
@@ -700,23 +666,25 @@ function Wait-ForNewRuntime {
 }
 
 function Send-CompletionCallback {
-    param([Parameter(Mandatory)][object]$NewState)
+    param([object]$NewState = $null, [string]$FailureMessage = '')
 
+    $resultDetails = if ($FailureMessage) { "Refresh failed: $FailureMessage" } else {
+        "new server PID: $($NewState.serverProcessId)`nnew server SHA-256: $($NewState.serverSha256)"
+    }
     $message = @"
-Shared Codex runtime refresh completed with a fresh shared App Server.
+Shared Codex runtime refresh settled. Verify the receipt before claiming success.
 
 from package: $FromVersion
 to package: $ToVersion
 request id: $RefreshRequestId
-new server PID: $($NewState.serverProcessId)
-new server SHA-256: $($NewState.serverSha256)
+$resultDetails
 receipt: $resultPath
 
-The updater waited for all active turns, paused active goals before draining, and restored only goals paused by this update. Verify the receipt and continue the authorized ReasoningVM MVP-833 B5 workflow. Do not rerun the refresh merely because this callback arrived.
+Verify the receipt, installed package, shared Desktop connection and Discord Bridge, then continue the requested Desktop and shared App Server update. Do not rerun an uncertain operation merely because this callback arrived. No Windows restart or credit policy activation was authorized.
 "@
     $output = @(
-        & $nodeExecutable $controlScript deliver $WaitForThreadId `
-            --url 'ws://127.0.0.1:8798' `
+        & $nodeExecutable $drainScript deliver --thread $WaitForThreadId `
+            --endpoint 'ws://127.0.0.1:8798' `
             --message $message `
             --compact 2>&1
     )
@@ -745,6 +713,7 @@ $controllerMutex = Enter-ExclusiveMutex `
     -Name $controllerMutexName `
     -FailureMessage 'Another shared runtime refresh controller already owns the operation.'
 $controllerExitCode = 0
+$callbackAttempted = $false
 try {
     if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
         try {
@@ -787,6 +756,15 @@ try {
             throw "Current shared server package version is $($oldState.packageVersion), not $FromVersion."
         }
 
+        if ($PackagePath) {
+            if ($PackageSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+                (Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256) {
+                throw 'The supplied update package hash was not verified.'
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $PackagePath
+            if ($signature.Status -ne 'Valid') { throw 'The update package signature is not valid.' }
+        }
+
         $null = Invoke-DrainCommand -Command 'pause-active'
         Write-RefreshLog 'Active goals were paused before the current-turn wait.'
         $turnResult = Invoke-DrainCommand -Command 'wait-turn'
@@ -800,7 +778,13 @@ try {
             $bridgeWasRunning = $false
         }
         if ($bridgeWasRunning) {
-            & $bridgeStopScript -TimeoutSeconds 30 | ForEach-Object { Write-RefreshLog $_ }
+            $bridgeProcess = Get-Process -Id $bridgeStatus.Pid -ErrorAction Stop
+            $bridgeHost = if ($bridgeStatus.HostProcessAlive) { Get-Process -Id $bridgeStatus.HostPid -ErrorAction Stop } else { $null }
+            $null = $bridgeProcess.Handle
+            if ($bridgeHost) { $null = $bridgeHost.Handle }
+            & $bridgeStopScript -NoWait | ForEach-Object { Write-RefreshLog $_ }
+            $bridgeProcess.WaitForExit()
+            if ($bridgeHost) { $bridgeHost.WaitForExit() }
             $bridgeWasStopped = $true
         }
 
@@ -811,6 +795,16 @@ try {
             -OldServerProcessId ([int]$oldState.serverProcessId) `
             -OldSupervisorProcessId ([int]$oldState.supervisorProcessId)
         Write-RefreshLog 'Old shared runtime exited under its owning supervisor.'
+
+        if ($PackagePath) {
+            if ((Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256) {
+                throw 'The update package changed after preflight.'
+            }
+            Add-AppxPackage -Path $PackagePath -ErrorAction Stop
+            $installed = Get-AppxPackage -Name OpenAI.Codex
+            if ([string]$installed.Version -ne $ToVersion) { throw 'Installed package version did not match the requested update.' }
+            Write-RefreshLog "Signed package installed. version=$ToVersion"
+        }
 
         Start-Process -FilePath $launcherExecutable -ArgumentList '--no-dialogs' -WindowStyle Hidden | Out-Null
         Write-RefreshLog 'Replacement shared launcher started.'
@@ -844,6 +838,7 @@ try {
             logPath = $logPath
         }
         Write-RefreshResult -Result $pendingResult
+        $callbackAttempted = $true
         $delivery = Send-CompletionCallback -NewState $newState
 
         $pendingResult.ok = $true
@@ -866,7 +861,7 @@ try {
                 Write-RefreshLog "Bridge recovery failed: $($_.Exception.Message)"
             }
         }
-        Write-RefreshResult -Result ([ordered]@{
+        $failureResult = [ordered]@{
             ok = $false
             phase = 'failed'
             requestId = $RefreshRequestId
@@ -880,7 +875,22 @@ try {
             error = $message
             failedAt = [DateTimeOffset]::Now.ToString('o')
             logPath = $logPath
-        })
+            callbackStatus = if ($callbackAttempted) { 'uncertain-no-resend' } else { 'not-attempted' }
+        }
+        Write-RefreshResult -Result $failureResult
+        if (-not $callbackAttempted) {
+            $callbackAttempted = $true
+            $failureResult.callbackStatus = 'dispatching'
+            Write-RefreshResult -Result $failureResult
+            try {
+                $delivery = Send-CompletionCallback -FailureMessage $message
+                $failureResult.callbackStatus = 'accepted'
+                $failureResult.callbackMode = $delivery.mode
+                $failureResult.callbackTurnId = $delivery.turnId
+            }
+            catch { $failureResult.callbackStatus = 'uncertain-no-resend' }
+            Write-RefreshResult -Result $failureResult
+        }
         $controllerExitCode = 1
     }
 }

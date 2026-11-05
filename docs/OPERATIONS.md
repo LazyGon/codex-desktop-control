@@ -85,11 +85,24 @@ no-trigger task may be replaced. The worker writes an atomic request-id-bound
 `controller-accepted`; without that acknowledgement it stops before inspecting
 or changing the runtime. The controller then revalidates the actual Desktop
 loopback connection, pauses active goals before waiting, stops Bridge ingress,
-waits for every active turn, allows 120 seconds for normal Desktop shutdown,
+waits for every active turn and normal Desktop shutdown without forced termination,
 replaces the old owned server, verifies the new Desktop connection and hashes,
 restores only updater-paused goals, restarts the Bridge, and sends one completion
 callback. Its finite receipt is written to
 `launcher\state\runtime-refresh-last.json`.
+
+For an Owner-requested app update, the refresh controller also accepts
+`-PackagePath` and `-PackageSha256` for a downloaded official, signed MSIX. It
+verifies the hash and signature before draining, installs only after the old
+Desktop and shared owner have exited, and verifies the exact target version.
+The completion callback returns to the requesting task, not a project-specific
+workflow. Default turn, shutdown and reconnection waits have no agent-created
+deadline; explicit nonzero observation limits must have an Owner/evidence basis.
+The replacement launcher's server readiness and Desktop connection waits likewise
+default to no deadline; process exit and explicit cancellation still fail closed.
+RPC page sizes and polling intervals are not operation ceilings.
+These parameters never authorize forced termination, a Windows reboot, credit
+reset consumption or paid recovery.
 
 ## Discover and catch up a phone-created task
 

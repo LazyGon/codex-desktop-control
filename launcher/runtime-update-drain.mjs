@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { deliveryFor } from '../control/shared-task-operations.mjs';
 
 function nowIso() {
   return new Date().toISOString();
@@ -80,14 +81,23 @@ export class AppServerClient {
   async connect() {
     this.socket = new WebSocket(this.url);
     this.socket.addEventListener('message', (event) => this.#handleMessage(event));
+    this.socket.addEventListener('close', () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error('Shared App Server disconnected; no request was retried.'));
+      }
+      this.pending.clear();
+      for (const waiter of this.waiters) {
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error('Shared App Server disconnected.'));
+      }
+      this.waiters.clear();
+    });
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`WebSocket open timed out: ${this.url}`)), 10_000);
       this.socket.addEventListener('open', () => {
-        clearTimeout(timeout);
         resolve();
       }, { once: true });
       this.socket.addEventListener('error', () => {
-        clearTimeout(timeout);
         reject(new Error(`Unable to connect to ${this.url}`));
       }, { once: true });
     });
@@ -95,6 +105,7 @@ export class AppServerClient {
       clientInfo: { name: 'codex-runtime-update-drain', version: '1.0.0' },
       capabilities: { experimentalApi: true },
     });
+    this.socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }));
   }
 
   #handleMessage(event) {
@@ -110,7 +121,6 @@ export class AppServerClient {
     if (!message.method) return;
     const notification = { receivedAt: Date.now(), ...message };
     this.recentNotifications.push(notification);
-    if (this.recentNotifications.length > 500) this.recentNotifications.shift();
     for (const waiter of [...this.waiters]) {
       if (!waiter.predicate(notification)) continue;
       this.waiters.delete(waiter);
@@ -119,14 +129,14 @@ export class AppServerClient {
     }
   }
 
-  call(method, params, timeoutMilliseconds = 60_000) {
+  call(method, params, timeoutMilliseconds = null) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('WebSocket is not open.'));
     }
     const id = this.nextId;
     this.nextId += 1;
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const timeout = timeoutMilliseconds === null ? null : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
       }, timeoutMilliseconds);
@@ -248,9 +258,26 @@ function turnCompleted(notification, threadId, turnId) {
   return notificationThreadId === threadId && turn?.id === turnId;
 }
 
-export async function waitForTurnCompletion(client, threadId, turnId, timeoutMilliseconds) {
+export async function deliverRuntimeCompletion(client, threadId, message) {
+  const metadata = await client.call('thread/read', { threadId, includeTurns: false });
+  if (metadata?.thread?.id !== threadId) throw new Error('Completion task identity mismatch.');
+  const turns = await client.call('thread/turns/list', {
+    threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded',
+  });
+  const active = turns.data?.find(turn => turn.status === 'inProgress') ?? null;
+  const [method, params] = deliveryFor(threadId, active, message);
+  const result = await client.call(method, params);
+  const turnId = result?.turn?.id ?? result?.turnId;
+  if (!turnId || (method === 'turn/steer' && turnId !== active.id)
+      || (result.threadId && result.threadId !== threadId)) {
+    throw new Error('Completion delivery uncertain; no replay is authorized.');
+  }
+  return { accepted: true, threadId, turnId, mode: method === 'turn/steer' ? 'steer' : 'start' };
+}
+
+export async function waitForTurnCompletion(client, threadId, turnId, timeoutMilliseconds = null) {
   const subscribedAt = Date.now();
-  const deadline = subscribedAt + timeoutMilliseconds;
+  const deadline = timeoutMilliseconds === null ? Infinity : subscribedAt + timeoutMilliseconds;
   while (Date.now() < deadline) {
     const turns = await client.call('thread/turns/list', {
       threadId,
@@ -291,6 +318,12 @@ async function main() {
   const client = new AppServerClient(endpoint);
   await client.connect();
   try {
+    if (command === 'deliver') {
+      const result = await deliverRuntimeCompletion(client,
+        requiredString(options.thread, '--thread'), requiredString(options.message, '--message'));
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      return;
+    }
     if (command === 'pause-active') {
       const statePath = path.resolve(requiredString(options.state, '--state'));
       const fromVersion = requiredString(options['from-version'], '--from-version');
@@ -352,13 +385,14 @@ async function main() {
         client,
         requiredString(options.thread, '--thread'),
         requiredString(options.turn, '--turn'),
-        positiveInteger(options['timeout-ms'], 30 * 60_000, '--timeout-ms'),
+        options['timeout-ms'] === undefined || options['timeout-ms'] === 'none'
+          ? null : positiveInteger(options['timeout-ms'], null, '--timeout-ms'),
       );
       process.stdout.write(`${JSON.stringify(result)}\n`);
       return;
     }
 
-    throw new Error('Usage: runtime-update-drain.mjs <pause-active|active|resume-paused|wait-turn> [options]');
+    throw new Error('Usage: runtime-update-drain.mjs <pause-active|active|resume-paused|wait-turn|deliver> [options]');
   } finally {
     client.close();
   }
@@ -366,8 +400,7 @@ async function main() {
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
 if (invokedPath === import.meta.url) {
-  main().catch((error) => {
-    process.stderr.write(`runtime-update-drain: ${error.stack ?? error.message}\n`);
-    process.exitCode = 1;
+  main().then(() => process.stdout.write('', () => process.exit(0))).catch((error) => {
+    process.stderr.write(`runtime-update-drain: ${error.stack ?? error.message}\n`, () => process.exit(1));
   });
 }

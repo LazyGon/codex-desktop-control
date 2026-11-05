@@ -246,8 +246,8 @@ the controller does not inherit the old app-server's kill-on-close Job. It
 serializes admission, replaces only an owned stale task, and requires a matching
 request-id acknowledgement before the controller can touch the runtime. The
 controller revalidates the live loopback Desktop connection, pauses active
-goals, waits for every active turn, allows 120 seconds for a normal Desktop
-exit, replaces the server and Desktop as one runtime, restores only
+goals, waits for every active turn and a normal Desktop exit without forced
+termination, replaces the server and Desktop as one runtime, restores only
 updater-paused goals, and delivers one completion callback. Each phase replaces
 the prior receipt atomically; an overlap, foreign stale task, duplicate request,
 or unacknowledged launch stops before runtime mutation.

@@ -4,8 +4,8 @@ param(
     [int]$Port = 8798,
 
     [Alias('DesktopConnectionTimeoutSeconds')]
-    [ValidateRange(1, 2147483647)]
-    [int]$DesktopConnectionStallSeconds = 180,
+    [ValidateRange(0, 2147483647)]
+    [int]$DesktopConnectionStallSeconds = 0,
 
     [switch]$SelfTest,
 
@@ -486,12 +486,12 @@ function Wait-AppServerReady {
     param(
         [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
         [Parameter(Mandatory)][int]$PortNumber,
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 0
     )
 
     $uri = "http://127.0.0.1:$PortNumber/readyz"
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+    while ($TimeoutSeconds -eq 0 -or $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         Assert-LauncherNotCancelled
         if ($Process.HasExited) {
             $stderrTail = if (Test-Path -LiteralPath $serverStderrPath) {
@@ -711,7 +711,7 @@ function Wait-DesktopSharedConnection {
         [Parameter(Mandatory)][object]$PackageInfo,
         [Parameter(Mandatory)][int]$PortNumber,
         [Parameter(Mandatory)][int]$OwnedServerProcessId,
-        [int]$TimeoutSeconds = 180,
+        [int]$TimeoutSeconds = 0,
         [int]$PollMilliseconds = 500
     )
 
