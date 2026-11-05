@@ -177,6 +177,12 @@ decisions; the verification owner retains ordinary Product proof.
 
 ## System-error recovery (2026-10-13)
 
+- Image-history Bad Request repair is a separate, confirmed-episode route in the
+  same worker. Read `docs/image-history-repair.md` before diagnosing/registering it.
+  Only an operator-confirmed image cause, pinned to the exact task and failed turn,
+  permits image offload and compaction. Image presence or HTTP 400 alone is not
+  evidence of that cause. Capacity failures retain the ordinary recovery path.
+  Preserve backups, same-thread settings, stop/exclusions and UNKNOWN fences.
 - OMEN deployment (2026-10-22) uses the Owner-supplied, hash-pinned package via
   `control/Install-OmenSystemErrorRecovery.ps1`; see
   `docs/omen-system-error-recovery.md`. Keep the original package immutable and

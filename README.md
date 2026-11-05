@@ -382,3 +382,7 @@ powershell.exe -NoProfile -File .\control\Test-CodexControl.ps1
 `CODEX_APP_SERVER_WS_URL` is an internal Desktop integration and may change in
 a future Codex release. The launcher verifies the actual Desktop connection on
 every start instead of assuming compatibility.
+
+## Image-history Bad Request recovery
+
+The existing system-error worker can offload embedded images and compact a diagnosed failed conversation. It requires confirmation for the exact task and failed turn; capacity failures retain ordinary recovery. See [setup, diagnosis and stop instructions](docs/image-history-repair.md).

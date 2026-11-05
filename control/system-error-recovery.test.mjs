@@ -119,6 +119,24 @@ test('permanent HTTP and unrecognized errors fail closed', () => {
   f.error.codexErrorInfo = 'badRequest'; assert.equal(eligibility(thread('t'), [f], null), 'non-retryable-error');
   f.error = { ...failed('f').error, willRetry: true }; assert.equal(eligibility(thread('t'), [f], null), 'server-retrying');
 });
+test('image repair is a separate route: capacity and protected tasks never call it', async () => {
+  const config = { ...defaultConfig, imageHistoryRepair: true };
+  const c = mocked(), st = memoryStore(); let imageCalls = 0;
+  st.repairImages = async () => { imageCalls++; return { action: 'image-cause-unconfirmed' }; };
+  assert.equal((await runCycle(c, config, { threads: {} }, st)).resumed, 1);
+  assert.equal(imageCalls, 0);
+  const bad = mocked(), badStore = memoryStore();
+  bad.records.get('task').turns[0].error = { codexErrorInfo: 'other', message: '{"detail":"Bad Request"}' };
+  badStore.repairImages = st.repairImages;
+  const result = await runCycle(bad, config, { threads: {} }, badStore);
+  assert.equal(result.results[0].action, 'image-cause-unconfirmed'); assert.equal(result.resumed, 0);
+  assert.equal(bad.calls.some(c => ['thread/archive', 'thread/resume', 'turn/start'].includes(c.method)), false);
+  assert.equal(imageCalls, 1);
+  bad.records.get('task').goal = goal('paused');
+  await runCycle(bad, config, { threads: {} }, badStore);
+  assert.equal(imageCalls, 1);
+  assert.throws(() => validateConfig({ ...defaultConfig, imageHistoryRepair: 'yes' }), /imageHistoryRepair/);
+});
 test('snapshot distinguishes null goal from missing/failed goal read', async () => {
   const c = mocked(); assert.equal((await snapshot(c, 'task')).goal, null);
   const original = c.call.bind(c); c.call = (m, p) => m === 'thread/goal/get' ? Promise.resolve({}) : original(m, p);

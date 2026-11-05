@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { connectCanonical, readJson, saveJson, deliveryFor } from './shared-task-operations.mjs';
 import { manageCreditReset, paidRecoveryAvailable, validateCreditPolicy } from './credit-reset-policy.mjs';
 import { creditResetStore } from './credit-reset-store.mjs';
+import { imageFailure, imageSafety, confirmationPath } from './image-repair-policy.mjs';
+import { repairImageHistory } from './image-history-repair.mjs';
+import { validateSharedRuntime } from './codex-shared.mjs';
 import { uuidV7TimestampMs, turnTimestampMs } from '../discord-bridge/src/recent-history.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -307,6 +310,7 @@ function rotateNotices(rows, after) {
   return index < 0 ? sorted : [...sorted.slice(index), ...sorted.slice(0, index)];
 }
 export function validateConfig(c) {
+  if (c?.imageHistoryRepair !== undefined && typeof c.imageHistoryRepair !== 'boolean') throw new Error('Invalid imageHistoryRepair');
   if (c?.creditResetPolicy !== undefined) validateCreditPolicy(c.creditResetPolicy);
   if (c?.schemaVersion !== 1 || typeof c.enabled !== 'boolean' || !Array.isArray(c.excludedThreadIds)
       || c.excludedThreadIds.some(x => typeof x !== 'string')) throw new Error('Invalid config');
@@ -470,6 +474,20 @@ export async function runCycle(client, config, state, store, now = Date.now, dry
             parentId: parentRelationship(s.thread).parentId, phase: 'pending-parent', createdAt: new Date(now()).toISOString() });
           result.parentNotice = await notice(s, s.turns[0].id, 'native-failure');
         }
+      }
+      if (imageFailure(s.turns[0]) && !imageSafety(s, config.excludedThreadIds) && store.repairImages) {
+        if (store.exists(episodeKey(id, s.turns[0])) || store.existingEpisode?.(id, s.turns[0].id)) {
+          result.action = 'episode-already-recorded'; continue;
+        }
+        if (report.resumed + report.noticeStarts >= startLimit || now() - started >= cycleBudget) {
+          result.action = 'image-repair-cycle-deferred'; continue;
+        }
+        const imageRate = await client.call('account/rateLimits/read', {}, config.requestTimeoutMs);
+        if (!rateAvailable(imageRate, config.creditResetPolicy, id)) { result.action = 'rate-unavailable'; continue; }
+        const repaired = await store.repairImages(s, dryRun);
+        Object.assign(result, repaired);
+        if (repaired.action === 'image-recovery-accepted') report.resumed++;
+        continue;
       }
       if (eligible !== 'eligible') continue;
       const turn = s.turns[0], key = episodeKey(id, turn);
@@ -716,6 +734,19 @@ export async function runOnce(directory = defaultDirectory, dryRun = false) {
       catch { creditPolicyReport = { action: 'credit-policy-unavailable-no-redemption' }; }
       if (['redeemed','already-redeemed','completed-one-reset','unknown-no-resend','credit-policy-unavailable-no-redemption']
           .includes(creditPolicyReport.action)) config.creditResetPolicy = { ...config.creditResetPolicy, enabled: false };
+    }
+    if (config.imageHistoryRepair === true) {
+      store.repairImages = async (initial, imageDryRun) => {
+        if (!fs.existsSync(confirmationPath(directory, initial.thread.id, initial.turns[0].id))) return { action: 'image-cause-unconfirmed' };
+        await validateSharedRuntime({ timeoutMilliseconds: null });
+        return repairImageHistory({ client, snapshot: id => snapshot(client, id, null), initial, directory,
+          dryRun: imageDryRun, allowed: async () => {
+            const current = validateConfig(readJson(path.join(directory, 'config.json')));
+            if (!current.enabled || current.imageHistoryRepair !== true || current.excludedThreadIds.includes(initial.thread.id)) return false;
+            const rates = await client.call('account/rateLimits/read', {}, null);
+            return rateAvailable(rates, current.creditResetPolicy, initial.thread.id);
+          } });
+      };
     }
     stage = 'cycle';
     const report = await runCycle(client, config, state, store, Date.now, dryRun);
