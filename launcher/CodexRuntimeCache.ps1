@@ -119,3 +119,30 @@ function Initialize-CodexRuntimeCache {
         SandboxSetupSha256 = $sandboxSetupHash
     }
 }
+
+function Get-CodexPackageRuntime {
+    param([Parameter(Mandatory)][object]$Package, [Parameter(Mandatory)][string]$CacheRoot)
+
+    $runtimeCache = Initialize-CodexRuntimeCache `
+        -BundledServerExecutable $package.BundledServerExecutable `
+        -BundledCodeModeHostExecutable $package.BundledCodeModeHostExecutable `
+        -BundledCommandRunnerExecutable $package.BundledCommandRunnerExecutable `
+        -BundledSandboxServiceExecutable $package.BundledSandboxServiceExecutable `
+        -BundledSandboxSetupExecutable $package.BundledSandboxSetupExecutable `
+        -CacheRoot $CacheRoot `
+        -PackageVersion $package.Version
+
+    [pscustomobject]@{
+        Version = $package.Version
+        PackageFamilyName = $package.PackageFamilyName
+        ApplicationUserModelId = $package.ApplicationUserModelId
+        InstallLocation = $package.InstallLocation
+        DesktopExecutable = $package.DesktopExecutable
+        BundledServerExecutable = $package.BundledServerExecutable
+        BundledCodeModeHostExecutable = $package.BundledCodeModeHostExecutable
+        ServerExecutable = $runtimeCache.ServerExecutable
+        ServerSha256 = $runtimeCache.ServerSha256
+        CodeModeHostExecutable = $runtimeCache.CodeModeHostExecutable
+        CodeModeHostSha256 = $runtimeCache.CodeModeHostSha256
+    }
+}

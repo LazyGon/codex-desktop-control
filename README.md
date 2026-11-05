@@ -239,18 +239,11 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
 The result is written to
 `launcher/state/project-repair-last.json`.
 
-To replace an already-running stale shared app-server after a Store update, run
-`launcher\Refresh-CodexSharedRuntime.ps1`, bound to the exact current thread and
-turn. The script registers and starts a no-trigger one-shot Scheduled Task so
-the controller does not inherit the old app-server's kill-on-close Job. It
-serializes admission, replaces only an owned stale task, and requires a matching
-request-id acknowledgement before the controller can touch the runtime. The
-controller revalidates the live loopback Desktop connection, pauses active
-goals, waits for every active turn and a normal Desktop exit without forced
-termination, replaces the server and Desktop as one runtime, restores only
-updater-paused goals, and delivers one completion callback. Each phase replaces
-the prior receipt atomically; an overlap, foreign stale task, duplicate request,
-or unacknowledged launch stops before runtime mutation.
+For Desktop updates, use the official updater or signed Windows package. The
+shared launcher handles the AppServer handoff after Windows registers the new
+package and Desktop exits. It waits for AppServer's own graceful shutdown and
+checks that the replacement Desktop and any running Bridge reconnect. See
+[the shared-runtime update and recovery procedure](docs/OPERATIONS.md#update-desktop-and-its-shared-appserver).
 
 ```powershell
 .\control\codex-control.cmd status
@@ -369,7 +362,7 @@ paths, even in a private repository.
 ```powershell
 node --test .\launcher\sync-desktop-projects.test.mjs
 node --test .\launcher\runtime-cache.test.mjs
-node --test .\launcher\runtime-update-drain.test.mjs
+node --test .\launcher\runtime-handoff.test.mjs .\launcher\desktop-connection.test.mjs .\launcher\runtime-update-drain.test.mjs
 node --test .\launcher\codex-app-tools-bridge.test.mjs
 node --test .\launcher\codex-app-tools-config.test.mjs
 node --test .\launcher\shared-launcher.test.mjs

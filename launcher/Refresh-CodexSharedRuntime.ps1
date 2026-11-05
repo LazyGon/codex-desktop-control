@@ -44,16 +44,11 @@ $ErrorActionPreference = 'Stop'
 $launcherRoot = $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $launcherRoot
 $runtimeStatePath = Join-Path $launcherRoot 'state\current.json'
-$drainStatePath = Join-Path $launcherRoot 'state\package-update-drain.json'
 $resultPath = Join-Path $launcherRoot 'state\runtime-refresh-last.json'
 $logPath = Join-Path $launcherRoot 'logs\runtime-refresh-last.log'
 $drainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
-$launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 $runtimeCacheScript = Join-Path $launcherRoot 'CodexRuntimeCache.ps1'
 $desktopShutdownScript = Join-Path $launcherRoot 'CodexDesktopShutdown.ps1'
-$controlScript = Join-Path $repositoryRoot 'control\codex-control.mjs'
-$bridgeStopScript = Join-Path $repositoryRoot 'discord-bridge\Stop-DiscordBridge.ps1'
-$bridgeStartScript = Join-Path $repositoryRoot 'discord-bridge\Start-DiscordBridge.ps1'
 $bridgeStatusScript = Join-Path $repositoryRoot 'discord-bridge\Get-DiscordBridgeStatus.ps1'
 $refreshScriptPath = $PSCommandPath
 $scheduledTaskDescription = 'One-shot controller for a safe shared Codex runtime refresh.'
@@ -61,13 +56,14 @@ $launchMutexName = 'Local\CodexSharedRuntimeRefreshLaunch'
 $controllerMutexName = 'Local\CodexSharedRuntimeRefreshController'
 $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
 $bridgeWasRunning = $false
-$bridgeWasStopped = $false
 
 if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
     throw "Codex runtime cache helper was not found: $runtimeCacheScript"
 }
 . $runtimeCacheScript
 . $desktopShutdownScript
+. (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')
+. (Join-Path $launcherRoot 'CodexDesktopPackage.ps1')
 
 function Write-RefreshLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -421,17 +417,10 @@ function Start-DetachedRefreshController {
 }
 
 function Invoke-DrainCommand {
-    param([Parameter(Mandatory)][ValidateSet('pause-active', 'active', 'wait-turn')][string]$Command)
+    param([Parameter(Mandatory)][ValidateSet('active', 'wait-turn')][string]$Command)
 
     $arguments = @($drainScript, $Command, '--endpoint', 'ws://127.0.0.1:8798')
     switch ($Command) {
-        'pause-active' {
-            $arguments += @(
-                '--state', $drainStatePath,
-                '--from-version', $FromVersion,
-                '--to-version', $ToVersion
-            )
-        }
         'wait-turn' {
             $arguments += @(
                 '--thread', $WaitForThreadId,
@@ -545,25 +534,10 @@ function Get-VerifiedRuntimeState {
 }
 
 function Wait-AllThreadsIdle {
-    $idleChecks = 0
-    $lastActiveSet = $null
-    while ($idleChecks -lt 5) {
-        $drain = Invoke-DrainCommand -Command 'pause-active'
-        $activeThreadIds = @($drain.activeThreadIds)
-        $activeSet = $activeThreadIds -join ','
-        if ($activeSet -ne $lastActiveSet) {
-            Write-RefreshLog "Active task set while draining: count=$($activeThreadIds.Count) ids=$activeSet"
-            $lastActiveSet = $activeSet
-        }
-        if ($activeThreadIds.Count -eq 0) {
-            $idleChecks += 1
-        }
-        else {
-            $idleChecks = 0
-        }
-        if ($idleChecks -lt 5) {
-            Start-Sleep -Seconds 1
-        }
+    while ($true) {
+        $activity = Invoke-DrainCommand -Command 'active'
+        if ($activity.idle -eq $true) { return }
+        Start-Sleep -Seconds 1
     }
 }
 
@@ -572,6 +546,7 @@ function Request-DesktopClose {
 
     $roots = @(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable)
     if ($roots.Count -eq 0) { return }
+    if ($roots.Count -ne 1) { throw 'More than one Desktop root was found. No shutdown was requested.' }
     foreach ($root in $roots) {
         $process = Get-Process -Id $root.ProcessId -ErrorAction Stop
         $startedAt = $process.StartTime.ToUniversalTime().ToString('o')
@@ -598,82 +573,58 @@ function Request-DesktopClose {
     throw 'Desktop did not exit normally within the explicitly supplied observation limit. No process was terminated.'
 }
 
-function Start-BridgeHidden {
-    $scheduledTask = Get-ScheduledTask -TaskName 'Codex Discord Remote' -ErrorAction SilentlyContinue
-    if ($null -ne $scheduledTask) {
-        Start-ScheduledTask -TaskName 'Codex Discord Remote'
-        return
-    }
-    $powerShellExecutable = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bridgeStartScript`""
-    Start-Process -FilePath $powerShellExecutable -ArgumentList $arguments -WindowStyle Hidden | Out-Null
-}
-
-function Wait-ForBridge {
-    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
-    while ([DateTimeOffset]::Now -lt $deadline) {
-        try {
-            $status = (& $bridgeStatusScript -Json | ConvertFrom-Json)
-            if (
-                $status.ProcessAlive -eq $true -and
-                $status.DiscordReady -eq $true -and
-                $status.CodexConnected -eq $true -and
-                $status.AppServerReady -eq $true
-            ) {
-                return $status
-            }
-        }
-        catch {
-            # Retry while the Bridge initializes.
-        }
-        Start-Sleep -Seconds 1
-    }
-    throw 'Discord Bridge did not reconnect within the explicitly supplied observation limit.'
-}
-
 function Wait-ForOldRuntimeExit {
-    param(
-        [Parameter(Mandatory)][int]$OldServerProcessId,
-        [Parameter(Mandatory)][int]$OldSupervisorProcessId
-    )
-
-    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
-    while ([DateTimeOffset]::Now -lt $deadline) {
-        $serverAlive = $null -ne (Get-Process -Id $OldServerProcessId -ErrorAction SilentlyContinue)
-        $supervisorAlive = $null -ne (Get-Process -Id $OldSupervisorProcessId -ErrorAction SilentlyContinue)
-        $listener = @(Get-NetTCPConnection -LocalPort 8798 -State Listen -ErrorAction SilentlyContinue)
-        if (-not $serverAlive -and -not $supervisorAlive -and $listener.Count -eq 0) {
-            return
+    param([Diagnostics.Process]$Server, [Diagnostics.Process]$Supervisor)
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $Server.HasExited -or -not $Supervisor.HasExited -or (Get-CodexHandoffDesktopProcesses)) {
+        if ($RestartTimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -ge $RestartTimeoutSeconds) {
+            throw 'The old runtime did not release normally within the supplied observation limit.'
         }
         Start-Sleep -Milliseconds 500
     }
-    throw 'The old shared runtime did not exit within the restart timeout.'
+    if ($Server.ExitCode -ne 0 -or $Supervisor.ExitCode -ne 0) {
+        throw 'The old runtime did not exit cleanly; no install or launch was attempted.'
+    }
 }
 
-function Wait-ForNewRuntime {
-    param([Parameter(Mandatory)][int]$OldServerProcessId)
-
-    $deadline = if ($RestartTimeoutSeconds -eq 0) { [DateTimeOffset]::MaxValue } else { [DateTimeOffset]::Now.AddSeconds($RestartTimeoutSeconds) }
-    while ([DateTimeOffset]::Now -lt $deadline) {
-        try {
-            $state = Get-VerifiedRuntimeState
-            if (
-                [int]$state.serverProcessId -ne $OldServerProcessId -and
-                $state.packageVersion -eq $ToVersion -and
-                $state.desktopConnectionVerified -eq $true
-            ) {
-                $drain = Get-Content -LiteralPath $drainStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($drain.phase -eq 'completed' -and $drain.toVersion -eq $ToVersion) {
-                    return $state
-                }
-            }
-        }
-        catch {
-            # Runtime state changes atomically during startup; retry transient states.
-        }
-        Start-Sleep -Milliseconds 500
+function Assert-OfficialUpdateArtifact {
+    param([object]$Registered)
+    if ($PackageSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        (Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256 -or
+        (Get-AuthenticodeSignature -LiteralPath $PackagePath).Status -ne 'Valid') {
+        throw 'The supplied update package hash and signature were not verified.'
     }
-    throw 'The replacement shared runtime was not verified within the restart timeout.'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($PackagePath)
+    try {
+        $entry = $archive.GetEntry('AppxManifest.xml')
+        if (-not $entry) { throw 'The signed update is not a Desktop MSIX package.' }
+        $reader = [IO.StreamReader]::new($entry.Open())
+        try { $manifest = [xml]$reader.ReadToEnd() } finally { $reader.Dispose() }
+        $identity = $manifest.Package.Identity
+        if ($identity.Name -ne $Registered.Name -or $identity.Publisher -ne $Registered.Publisher -or
+            $identity.Version -ne $ToVersion -or $identity.ProcessorArchitecture -ne [string]$Registered.Architecture) {
+            throw 'The update manifest does not match the registered package identity, architecture, and requested version.'
+        }
+    }
+    finally { $archive.Dispose() }
+}
+
+function Complete-RegisteredRefresh {
+    param([string]$Directory, [object]$Package, [object]$OldRuntime, [object]$OldServer, [object]$OldSupervisor)
+    $handoffPath = Join-Path $Directory 'request.json'
+    if (Test-Path -LiteralPath $handoffPath) { throw 'The replacement request already exists; inspect its receipt.' }
+    Write-CodexHandoffJson $handoffPath @{
+        id = $RefreshRequestId; port = $OldRuntime.port; fromVersion = $FromVersion; toVersion = $Package.Version
+        desktop = $Package.DesktopExecutable; family = $Package.PackageFamilyName
+        serverSha256 = Get-CodexFileSha256 $Package.BundledServerExecutable
+        oldServer = $OldServer; oldSupervisor = $OldSupervisor; bridgeWasRunning = $bridgeWasRunning
+        startupStallSeconds = $RestartTimeoutSeconds
+    }
+    & (Join-Path $launcherRoot 'Complete-CodexRuntimeHandoff.ps1') -RequestPath $handoffPath
+    $handoff = Read-CodexHandoffJson (Join-Path $Directory 'result.json')
+    if ($handoff.phase -ne 'verified') { throw "Replacement verification is incomplete: $($handoff.detail)" }
+    Get-VerifiedRuntimeState
 }
 
 function Send-CompletionCallback {
@@ -758,6 +709,8 @@ try {
     })
     Write-RefreshLog "Runtime refresh armed. threadId=$WaitForThreadId turnId=$WaitForTurnId"
 
+    $directory = $null
+    $oldCleanExit = $false
     try {
         $null = Wait-ForControllerAcceptance
         Write-RefreshLog 'Detached controller receipt was positively acknowledged by the entry process.'
@@ -767,71 +720,68 @@ try {
             throw "Current shared server package version is $($oldState.packageVersion), not $FromVersion."
         }
 
-        if ($PackagePath) {
-            if ($PackageSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
-                (Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256) {
-                throw 'The supplied update package hash was not verified.'
-            }
-            $signature = Get-AuthenticodeSignature -LiteralPath $PackagePath
-            if ($signature.Status -ne 'Valid') { throw 'The update package signature is not valid.' }
+        if ((Get-OptionalObjectProperty $oldState 'appServerGracefulShutdown') -ne $true) {
+            throw 'Open the updated shared launcher normally first; the running supervisor does not support safe handoff.'
+        }
+        if ([version]$ToVersion -le [version]$FromVersion) { throw 'The refresh target must be newer.' }
+        $installed = Get-AppxPackage -Name OpenAI.Codex
+        if ($PackagePath) { Assert-OfficialUpdateArtifact $installed }
+        elseif ([string]$installed.Version -ne $ToVersion) {
+            throw 'Register the target Desktop package first or supply the signed update artifact.'
         }
 
-        $null = Invoke-DrainCommand -Command 'pause-active'
-        Write-RefreshLog 'Active goals were paused before the current-turn wait.'
         $turnResult = Invoke-DrainCommand -Command 'wait-turn'
         Write-RefreshLog "Exact source turn reached finite status. status=$($turnResult.status)"
-
-        try {
-            $bridgeStatus = (& $bridgeStatusScript -Json | ConvertFrom-Json)
-            $bridgeWasRunning = $bridgeStatus.ProcessAlive -eq $true
+        $bridgeWasRunning = (& $bridgeStatusScript -Json | ConvertFrom-Json).ProcessAlive -eq $true
+        $live = Get-VerifiedRuntimeState
+        if ($live.serverProcessId -ne $oldState.serverProcessId -or $live.supervisorProcessId -ne $oldState.supervisorProcessId) {
+            throw 'The verified runtime changed while waiting.'
         }
-        catch {
-            $bridgeWasRunning = $false
-        }
-        if ($bridgeWasRunning) {
-            $bridgeProcess = Get-Process -Id $bridgeStatus.Pid -ErrorAction Stop
-            $bridgeHost = if ($bridgeStatus.HostProcessAlive) { Get-Process -Id $bridgeStatus.HostPid -ErrorAction Stop } else { $null }
-            $null = $bridgeProcess.Handle
-            if ($bridgeHost) { $null = $bridgeHost.Handle }
-            & $bridgeStopScript -NoWait | ForEach-Object { Write-RefreshLog $_ }
-            $bridgeProcess.WaitForExit()
-            if ($bridgeHost) { $bridgeHost.WaitForExit() }
-            $bridgeWasStopped = $true
-        }
-
+        $server = Get-Process -Id $live.serverProcessId
+        $supervisor = Get-Process -Id $live.supervisorProcessId
+        $null = $server.Handle
+        $null = $supervisor.Handle
+        $oldServer = Get-CodexHandoffActor $server
+        $oldSupervisor = Get-CodexHandoffActor $supervisor
+        $directory = Join-Path (Join-Path $launcherRoot 'state/runtime-handoffs') $RefreshRequestId
+        $null = New-Item -ItemType Directory -Path $directory
+        $drainPath = Join-Path $directory 'drain.json'
         Wait-AllThreadsIdle
-        Write-RefreshLog 'All tasks remained idle for five consecutive checks.'
+        $current = Read-CodexHandoffJson $runtimeStatePath
+        if ($server.HasExited -or $supervisor.HasExited -or -not $current -or
+            $current.serverProcessId -ne $server.Id -or $current.supervisorProcessId -ne $supervisor.Id) {
+            throw 'The admitted runtime changed before Desktop shutdown.'
+        }
+        Write-CodexHandoffJson $drainPath @{ phase = 'desktop-close-requested' }
         Request-DesktopClose -DesktopExecutable $oldState.desktopExecutable
-        Wait-ForOldRuntimeExit `
-            -OldServerProcessId ([int]$oldState.serverProcessId) `
-            -OldSupervisorProcessId ([int]$oldState.supervisorProcessId)
+        Wait-ForOldRuntimeExit $server $supervisor
+        Write-CodexHandoffJson $drainPath @{ phase = 'exited'; exitCode = $server.ExitCode }
+        $oldCleanExit = $true
         Write-RefreshLog 'Old shared runtime exited under its owning supervisor.'
 
-        if ($PackagePath) {
-            if ((Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256) {
-                throw 'The update package changed after preflight.'
+        $installed = Get-AppxPackage -Name OpenAI.Codex
+        if ($PackagePath -and [string]$installed.Version -ne $ToVersion) {
+            if ([string]$installed.Version -ne $FromVersion -or $installed.PackageFamilyName -ne $oldState.packageFamilyName -or
+                (Get-CodexFileSha256 -Path $PackagePath) -ne $PackageSha256 -or (Get-CodexHandoffDesktopProcesses)) {
+                throw 'Package or process state changed after preflight; no installation was attempted.'
             }
-            Add-AppxPackage -Path $PackagePath -ErrorAction Stop
+            $installReceipt = Join-Path $directory 'install.json'
+            Write-CodexHandoffJson $installReceipt @{ phase = 'requested'; toVersion = $ToVersion; packageSha256 = $PackageSha256 }
+            Add-AppxPackage -Path $PackagePath -DeferRegistrationWhenPackagesAreInUse -ErrorAction Stop
             $installed = Get-AppxPackage -Name OpenAI.Codex
-            if ([string]$installed.Version -ne $ToVersion) { throw 'Installed package version did not match the requested update.' }
-            Write-RefreshLog "Signed package installed. version=$ToVersion"
+            Write-CodexHandoffJson $installReceipt @{ phase = 'observed'; registeredVersion = [string]$installed.Version }
         }
-
-        Start-Process -FilePath $launcherExecutable -ArgumentList '--no-dialogs' -WindowStyle Hidden | Out-Null
-        Write-RefreshLog 'Replacement shared launcher started.'
-        $newState = Wait-ForNewRuntime -OldServerProcessId ([int]$oldState.serverProcessId)
+        $package = Get-CodexDesktopPackageInfo -RequireBundledRuntime -RequireTrustedRegistration
+        if ($package.Version -ne $ToVersion -or $package.PackageFamilyName -ne $oldState.packageFamilyName) {
+            throw 'The requested version is not registered. Inspect Windows package state before any other action.'
+        }
+        $newState = Complete-RegisteredRefresh $directory $package $oldState $oldServer $oldSupervisor
         Write-RefreshLog "Replacement shared runtime verified. serverPid=$($newState.serverProcessId)"
-
-        if ($bridgeWasRunning) {
-            Start-BridgeHidden
-            $bridgeStatus = Wait-ForBridge
-            $bridgeWasStopped = $false
-            Write-RefreshLog "Discord Bridge restored. pid=$($bridgeStatus.Pid)"
-        }
 
         $pendingResult = [ordered]@{
             ok = $null
             phase = 'callback-pending'
+            callbackStatus = 'dispatching'
             requestId = $RefreshRequestId
             controllerLaunchMode = 'scheduled-task'
             scheduledTaskName = $ScheduledTaskName
@@ -854,6 +804,7 @@ try {
 
         $pendingResult.ok = $true
         $pendingResult.phase = 'completed'
+        $pendingResult.callbackStatus = 'accepted'
         $pendingResult.callbackMode = $delivery.mode
         $pendingResult.callbackTurnId = $delivery.turnId
         $pendingResult.completedAt = [DateTimeOffset]::Now.ToString('o')
@@ -863,14 +814,19 @@ try {
     catch {
         $message = $_.Exception.Message
         Write-RefreshLog "ERROR $message"
-        if ($bridgeWasStopped) {
+        $recoveredVersion = $null
+        if ($oldCleanExit -and -not (Test-Path -LiteralPath (Join-Path $directory 'request.json'))) {
             try {
-                Start-BridgeHidden
-                Write-RefreshLog 'Bridge restart requested during failure recovery.'
+                # Registration may have changed despite a deployment error. Read it;
+                # never repeat Add-AppxPackage or start a second replacement.
+                $actual = Get-CodexDesktopPackageInfo -RequireBundledRuntime -RequireTrustedRegistration
+                if ($actual.PackageFamilyName -eq $oldState.packageFamilyName -and $actual.Version -in @($FromVersion, $ToVersion)) {
+                    $recovered = Complete-RegisteredRefresh $directory $actual $oldState $oldServer $oldSupervisor
+                    $recoveredVersion = $recovered.packageVersion
+                    $message += " Shared runtime recovered on registered version $recoveredVersion."
+                }
             }
-            catch {
-                Write-RefreshLog "Bridge recovery failed: $($_.Exception.Message)"
-            }
+            catch { Write-RefreshLog "Registered runtime recovery could not be verified: $($_.Exception.Message)" }
         }
         $failureResult = [ordered]@{
             ok = $false
@@ -884,6 +840,7 @@ try {
             fromVersion = $FromVersion
             toVersion = $ToVersion
             error = $message
+            recoveredVersion = $recoveredVersion
             failedAt = [DateTimeOffset]::Now.ToString('o')
             logPath = $logPath
             callbackStatus = if ($callbackAttempted) { 'uncertain-no-resend' } else { 'not-attempted' }

@@ -4,7 +4,9 @@ function Get-CodexDesktopPackageInfo {
         [AllowEmptyCollection()]
         [object[]]$Packages,
 
-        [switch]$RequireBundledRuntime
+        [switch]$RequireBundledRuntime,
+
+        [switch]$RequireTrustedRegistration
     )
 
     if (-not $PSBoundParameters.ContainsKey('Packages')) {
@@ -17,6 +19,9 @@ function Get-CodexDesktopPackageInfo {
         Select-Object -First 1
     if ($null -eq $package) {
         throw 'OpenAI.Codex is not installed for the current Windows user.'
+    }
+    if ($RequireTrustedRegistration -and ($package.Status.ToString() -ne 'Ok' -or $package.SignatureKind.ToString() -ne 'Store')) {
+        throw 'The registered Desktop package is not healthy and Store-signed.'
     }
 
     $installLocation = [IO.Path]::GetFullPath([string]$package.InstallLocation)
@@ -70,12 +75,18 @@ function Get-CodexDesktopPackageReplacement {
         [string]$CurrentDesktopExecutable,
 
         [AllowEmptyCollection()]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [switch]$RequireTrustedRegistration
     )
 
     $parameters = @{}
     if ($PSBoundParameters.ContainsKey('Packages')) {
         $parameters.Packages = $Packages
+    }
+    if ($RequireTrustedRegistration) {
+        $parameters.RequireTrustedRegistration = $true
+        $parameters.RequireBundledRuntime = $true
     }
     $candidate = Get-CodexDesktopPackageInfo @parameters
     if (

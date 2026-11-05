@@ -7,11 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  listAllThreads,
-  pauseActiveGoals,
-  resumePausedGoals,
-  selectDrainStateForUpdate,
   waitForTurnCompletion,
+  inspectLoadedActivity,
   deliverRuntimeCompletion,
 } from './runtime-update-drain.mjs';
 
@@ -56,113 +53,31 @@ class FakeClient {
   }
 }
 
-test('listAllThreads follows cursors without losing thread status', async () => {
-  const client = new FakeClient((method, params) => {
-    assert.equal(method, 'thread/list');
-    if (!params.cursor) {
-      return { data: [{ id: 'T2', status: { type: 'active' } }], nextCursor: 'NEXT' };
-    }
-    assert.equal(params.cursor, 'NEXT');
-    return { data: [{ id: 'T1', status: 'idle' }], nextCursor: null };
-  });
-
-  assert.deepEqual(await listAllThreads(client), [
-    { id: 'T2', status: { type: 'active' } },
-    { id: 'T1', status: 'idle' },
-  ]);
+test('loaded activity allows a finished child to unload but blocks newly loaded unverified work', async () => {
+  for (const late of [null, 'LATE']) {
+    let inventory = ['IDLE', 'CLOSED'];
+    const client = new FakeClient((method, params) => {
+      if (method === 'thread/loaded/list') return { data: inventory, nextCursor: null };
+      if (method === 'thread/read' && params.threadId === 'IDLE') {
+        return { thread: { id: 'IDLE', status: { type: 'idle' } } };
+      }
+      if (method === 'thread/read' && params.threadId === 'CLOSED') {
+        inventory = late ? ['IDLE', late] : ['IDLE'];
+        throw new Error('thread/read: {"code":-32600,"message":"thread not loaded: CLOSED"}');
+      }
+      throw new Error('Unexpected update preflight operation: ' + method);
+    });
+    assert.deepEqual(await inspectLoadedActivity(client), { idle: late === null });
+  }
 });
 
-test('pauseActiveGoals persists every newly paused goal and preserves pre-paused goals', async () => {
-  const goals = new Map([
-    ['ACTIVE-GOAL', 'active'],
-    ['PAUSED-GOAL', 'paused'],
-    ['NO-GOAL', null],
-  ]);
-  const client = new FakeClient((method, params) => {
-    if (method === 'thread/list') {
-      return {
-        data: [
-          { id: 'ACTIVE-GOAL', status: 'active' },
-          { id: 'PAUSED-GOAL', status: 'idle' },
-          { id: 'NO-GOAL', status: 'idle' },
-        ],
-        nextCursor: null,
-      };
-    }
-    if (method === 'thread/goal/get') {
-      const status = goals.get(params.threadId);
-      return { goal: status ? { threadId: params.threadId, status } : null };
-    }
-    if (method === 'thread/goal/set') {
-      assert.equal(params.status, 'paused');
-      goals.set(params.threadId, 'paused');
-      return { goal: { threadId: params.threadId, status: 'paused' } };
-    }
-    throw new Error(`Unexpected method: ${method}`);
+test('a loaded task in progress blocks Desktop closure', async () => {
+  const client = new FakeClient(method => {
+    if (method === 'thread/loaded/list') return { data: ['BUSY'], nextCursor: null };
+    if (method === 'thread/read') return { thread: { id: 'BUSY', status: { type: 'active' } } };
+    throw new Error('Unexpected update preflight operation: ' + method);
   });
-  const persisted = [];
-  const result = await pauseActiveGoals(
-    client,
-    { schemaVersion: 1, pausedThreadIds: ['ALREADY-RECORDED'] },
-    (state) => persisted.push(structuredClone(state)),
-  );
-
-  assert.deepEqual(result.pausedThreadIds, ['ACTIVE-GOAL', 'ALREADY-RECORDED']);
-  assert.deepEqual(result.activeThreadIds, ['ACTIVE-GOAL']);
-  assert.equal(goals.get('PAUSED-GOAL'), 'paused');
-  assert.ok(persisted.some((state) => state.pausedThreadIds.includes('ACTIVE-GOAL')));
-  assert.equal(
-    client.calls.filter((call) => call.method === 'thread/goal/set').length,
-    1,
-  );
-});
-
-test('resumePausedGoals resumes only goals recorded by this update', async () => {
-  const goals = new Map([
-    ['PAUSED-BY-UPDATE', 'paused'],
-    ['CHANGED-AFTER-PAUSE', 'blocked'],
-  ]);
-  const client = new FakeClient((method, params) => {
-    if (method === 'thread/goal/get') {
-      return { goal: { threadId: params.threadId, status: goals.get(params.threadId) } };
-    }
-    if (method === 'thread/goal/set') {
-      assert.equal(params.threadId, 'PAUSED-BY-UPDATE');
-      assert.equal(params.status, 'active');
-      goals.set(params.threadId, 'active');
-      return { goal: { threadId: params.threadId, status: 'active' } };
-    }
-    throw new Error(`Unexpected method: ${method}`);
-  });
-
-  const result = await resumePausedGoals(client, {
-    pausedThreadIds: ['PAUSED-BY-UPDATE', 'CHANGED-AFTER-PAUSE'],
-  });
-  assert.deepEqual(result.resumedThreadIds, ['PAUSED-BY-UPDATE']);
-  assert.deepEqual(result.unchangedThreadIds, ['CHANGED-AFTER-PAUSE']);
-  assert.equal(goals.get('CHANGED-AFTER-PAUSE'), 'blocked');
-});
-
-test('a completed drain from an earlier package update cannot block a later update', () => {
-  const completed = {
-    phase: 'completed',
-    fromVersion: '26.820.7780.0',
-    toVersion: '26.820.9563.0',
-    pausedThreadIds: [],
-  };
-  assert.equal(
-    selectDrainStateForUpdate(completed, '26.917.9434.0', '26.930.2377.0'),
-    null,
-  );
-  assert.equal(
-    selectDrainStateForUpdate(completed, '26.820.7780.0', '26.820.9563.0'),
-    completed,
-  );
-  const interrupted = { ...completed, phase: 'draining', pausedThreadIds: ['GOAL'] };
-  assert.equal(
-    selectDrainStateForUpdate(interrupted, '26.917.9434.0', '26.930.2377.0'),
-    interrupted,
-  );
+  assert.deepEqual(await inspectLoadedActivity(client), { idle: false });
 });
 
 test('waitForTurnCompletion closes the notification race using threadId from params', async () => {
@@ -198,54 +113,6 @@ test('waitForTurnCompletion re-reads terminal state after a missed notification'
 
   const result = await waitForTurnCompletion(client, 'THREAD', 'TURN', 10_000);
   assert.equal(result.status, 'completed');
-});
-
-test('Desktop bootstrap stdio helper does not abort a subsequently successful shared connection', context => {
-  if (process.platform !== 'win32') { context.skip('Windows PowerShell is required.'); return; }
-  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
-  const waiter = extractPowerShellFunction(source, 'Wait-DesktopSharedConnection', 'Start-DesktopOnRuntime');
-  const script = `
-$ErrorActionPreference = 'Stop'
-. ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1'))}
-$script:checks = 0
-function Assert-LauncherNotCancelled { }
-function Test-DesktopWebSocketConnection { $script:checks += 1; return ($script:checks -ge 3) }
-function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
-function Read-CodexDesktopStartupProgress { return 0 }
-function Get-DesktopLocalAppServers { [pscustomobject]@{ ProcessId = 202 } }
-function Write-LauncherLog { }
-${waiter}
-$ok = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -OwnedServerProcessId $PID -TimeoutSeconds 1 -PollMilliseconds 1
-[pscustomobject]@{ok=$ok} | ConvertTo-Json -Compress
-`;
-  const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
-  assert.equal(JSON.parse(output.trim()).ok, true);
-});
-
-test('Desktop connection wait remains cancellable before a shared connection exists', context => {
-  if (process.platform !== 'win32') { context.skip('Windows PowerShell is required.'); return; }
-  const source = fs.readFileSync(path.join(launcherRoot, 'Start-CodexShared.ps1'), 'utf8');
-  const waiter = extractPowerShellFunction(source, 'Wait-DesktopSharedConnection', 'Start-DesktopOnRuntime');
-  const script = `
-$ErrorActionPreference = 'Stop'
-. ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1'))}
-$script:checks = 0
-function Assert-LauncherNotCancelled { if ($script:checks -ge 1) { throw [OperationCanceledException]::new('fixture cancellation') } }
-function Test-DesktopWebSocketConnection { $script:checks += 1; return $false }
-function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
-function Read-CodexDesktopStartupProgress { return 0 }
-function Get-DesktopLocalAppServers { }
-function Write-LauncherLog { }
-${waiter}
-try {
-  $null = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -OwnedServerProcessId $PID -TimeoutSeconds 10 -PollMilliseconds 1
-  throw 'Cancellation was ignored.'
-} catch [OperationCanceledException] {
-  [pscustomobject]@{cancelled=$true} | ConvertTo-Json -Compress
-}
-`;
-  const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
-  assert.equal(JSON.parse(output.trim()).cancelled, true);
 });
 
 test('request receipts replace the prior run atomically in Windows PowerShell 5.1', {
@@ -360,33 +227,34 @@ test('uncertain completion delivery is never replayed', async () => {
   assert.equal(writes, 1);
 });
 
+test('completion resumes an unloaded task with its saved settings before delivering', async () => {
+  let loaded = false;
+  const client = new FakeClient((method, params) => {
+    if (method === 'thread/read') return { thread: { id: 'THREAD', status: { type: 'notLoaded' } } };
+    if (method === 'thread/resume') {
+      assert.deepEqual(params, { threadId: 'THREAD', excludeTurns: true });
+      loaded = true;
+      return { thread: { id: 'THREAD' } };
+    }
+    assert.ok(loaded, 'new runtime rejects turn operations on an unloaded task');
+    if (method === 'thread/turns/list') return { data: [] };
+    assert.equal(method, 'turn/start');
+    assert.equal(params.threadId, 'THREAD');
+    return { turn: { id: 'DELIVERED' } };
+  });
+  assert.equal((await deliverRuntimeCompletion(client, 'THREAD', 'done')).turnId, 'DELIVERED');
+});
+
 test('default turn wait has no agent deadline and observes terminal readback', async () => {
   const client = new FakeClient(() => ({ data: [{ id: 'TURN', status: 'completed' }] }));
   assert.equal((await waitForTurnCompletion(client, 'THREAD', 'TURN')).status, 'completed');
-});
-
-test('update installation follows normal shutdown and excludes forced process termination', () => {
-  const source = fs.readFileSync(refreshScriptPath, 'utf8');
-  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Start-BridgeHidden');
-  assert.doesNotMatch(close, /Stop-Process/);
-  assert.match(close, /Invoke-CodexDesktopNormalShutdown/);
-  assert.doesNotMatch(close, /CloseMainWindow/);
-  assert.match(source, /\[int\]\$TurnTimeoutSeconds = 0/);
-  assert.match(source, /\[int\]\$RestartTimeoutSeconds = 0/);
-  assert.match(source, /\[int\]\$DesktopCloseTimeoutSeconds = 0/);
-  const install = source.indexOf('Add-AppxPackage -Path $PackagePath');
-  assert.ok(install > source.indexOf('Old shared runtime exited under its owning supervisor.'));
-  assert.ok(install < source.indexOf("Write-RefreshLog 'Replacement shared launcher started.'"));
-  assert.match(source.slice(0, install), /\$signature.Status -ne 'Valid'/);
-  assert.doesNotMatch(source, /ReasoningVM MVP-833/);
-  assert.match(source, /uncertain-no-resend/);
 });
 
 test('refresh requests normal application shutdown once and respects a veto', {
   skip: process.platform !== 'win32',
 }, () => {
   const source = fs.readFileSync(refreshScriptPath, 'utf8');
-  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Start-BridgeHidden');
+  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Wait-ForOldRuntimeExit');
   for (const returnCode of [0, 350]) {
     const script = [
       "$ErrorActionPreference='Stop'; $DesktopCloseTimeoutSeconds=0; $script:calls=0",

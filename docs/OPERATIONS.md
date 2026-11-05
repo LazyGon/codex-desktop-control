@@ -74,38 +74,62 @@ Bridge. `-WaitForThreadId` names the current task that must finish first;
 proved after Desktop reattaches. The final result is written to
 `launcher\state\project-repair-last.json`.
 
-For an already-running shared runtime whose package version is stale, use
-`launcher\Refresh-CodexSharedRuntime.ps1`. Supply the exact active thread and
-turn plus the current and target package versions. The entry process launches
-the real controller through a no-trigger one-shot Scheduled Task, keeping it
-outside the old app-server's kill-on-close Job. A local admission mutex and the
-Task Scheduler's single-instance policy reject overlap; only an owned, idle,
-no-trigger task may be replaced. The worker writes an atomic request-id-bound
-`armed` receipt and waits for the entry process to replace it with
-`controller-accepted`; without that acknowledgement it stops before inspecting
-or changing the runtime. The controller then revalidates the actual Desktop
-loopback connection, pauses active goals before waiting, stops Bridge ingress,
-waits for every active turn and normal Desktop shutdown without forced termination,
-replaces the old owned server, verifies the new Desktop connection and hashes,
-restores only updater-paused goals, restarts the Bridge, and sends one completion
-callback. Its finite receipt is written to
-`launcher\state\runtime-refresh-last.json`.
+## Update Desktop and its shared AppServer
 
-For an Owner-requested app update, the refresh controller also accepts
-`-PackagePath` and `-PackageSha256` for a downloaded official, signed MSIX. It
-verifies the hash and signature before draining, installs only after the old
-Desktop and shared owner have exited, and verifies the exact target version.
-The completion callback returns to the requesting task, not a project-specific
-workflow. Default turn, shutdown and reconnection waits have no agent-created
-deadline; explicit nonzero observation limits must have an Owner/evidence basis.
-The replacement launcher's server readiness and Desktop connection waits likewise
-default to no deadline; process exit and explicit cancellation still fail closed.
-RPC page sizes and polling intervals are not operation ceilings.
-These parameters never authorize forced termination, a Windows reboot, credit
-reset consumption or paid recovery.
-Desktop shutdown uses the existing identity-bound Restart Manager helper with
-force flags disabled, rather than closing only the window (which may leave the
-application in the tray). An application veto is recorded, not retried or forced.
+Use [OpenAI's Desktop update mechanism](https://learn.chatgpt.com/docs/enterprise/manage-app-updates)
+or the [signed MSIX](https://learn.chatgpt.com/docs/enterprise/windows-deployment).
+For a manual MSIX update, Windows supports
+[`Add-AppxPackage -DeferRegistrationWhenPackagesAreInUse`](https://learn.microsoft.com/en-us/powershell/module/appx/add-appxpackage#-deferregistrationwhenpackagesareinuse).
+An accepted deployment may still be pending until the next Windows app launch.
+Check the registered version with `Get-AppxPackage OpenAI.Codex`; do not reinstall
+merely because the process still reports the previous version.
+
+1. Allow the app to finish its update. Quit Desktop normally if it has already
+   reopened on the new package. The handoff waits while any ChatGPT process
+   remains in the current session.
+2. Once a newer package is registered, the running shared supervisor verifies
+   the same package family and prepares its versioned cache. It arms a
+   current-user, no-trigger Scheduled Task and then sends one graceful shutdown
+   request to its isolated AppServer console. AppServer stops admitting new work
+   and waits for already running work. The launcher does not enumerate histories,
+   pause goals, or force the shutdown. The Bridge stays running.
+3. The scheduled worker verifies the old processes exited and the clean exit was
+   recorded. It starts the registered replacement once, or adopts a replacement
+   already started through the shared launcher. It verifies the actual Desktop
+   loopback connection, AppServer health and bundle hash, and, if Bridge was
+   running, its Gateway readiness and connection to the replacement.
+
+Each operation keeps `request.json`, `drain.json`, `result.json` and, if it
+started the replacement, `startup.json` under
+`launcher/state/runtime-handoffs/<id>/`. A `verified` result is complete.
+`desktop-ready` means only the Bridge reconnection remains to be verified.
+If the scheduled worker was interrupted, run the **same** scheduled task
+(`Codex Shared Runtime Handoff <id>`) after inspecting its receipt. The worker
+reads actual state before acting and does not repeat a recorded launch request.
+If no replacement is running after a failed or uncertain launch, use the
+normal shared launcher once after verifying both old processes exited and no
+replacement is already starting. Keep the original receipt. If the new Desktop
+opened outside the shared launcher, quit it normally before opening the shared
+launcher. If the signal could not be sent to an isolated AppServer console,
+the old server stays alive; do not send a second interrupt to it.
+
+For an explicitly requested update from a Codex task, use
+`launcher/Refresh-CodexSharedRuntime.ps1` with the exact `-WaitForThreadId`,
+`-WaitForTurnId`, `-FromVersion` and `-ToVersion`. To install an official MSIX
+that has not registered yet, also pass its `-PackagePath` and `-PackageSha256`.
+The scheduled controller verifies the signature and package identity, waits
+for the exact turn and for loaded work to go idle, and requests a normal
+Desktop shutdown once. The supervisor drains AppServer, then the controller
+installs only if needed and uses the same replacement worker. Completion is
+delivered once to the requesting task; its receipt is
+`launcher/state/runtime-refresh-last.json`. If Windows defers registration,
+inspect the actual registered version before any other install attempt.
+Optional observation limits default to zero (no deadline).
+
+The new handoff loads on the next normal shared startup. An older running
+supervisor is preserved, and the manual updater refuses to close it without
+the new graceful-shutdown capability. Historical `package-update-drain.json`
+records are retained and are never applied by the new launcher.
 
 ## Discover and catch up a phone-created task
 

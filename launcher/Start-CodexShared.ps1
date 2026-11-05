@@ -63,9 +63,6 @@ $desktopPackageScript = Join-Path $launcherRoot 'CodexDesktopPackage.ps1'
 $processEnvironmentScript = Join-Path $launcherRoot 'CodexProcessEnvironment.ps1'
 $codexAppToolsConfigScript = Join-Path $launcherRoot 'CodexAppToolsSharedConfig.ps1'
 $codexAppToolsBridgeScript = Join-Path $launcherRoot 'codex-app-tools-bridge.mjs'
-$runtimeUpdateDrainScript = Join-Path $launcherRoot 'runtime-update-drain.mjs'
-$runtimeUpdateStatePath = Join-Path $stateRoot 'package-update-drain.json'
-$launcherExecutable = Join-Path $launcherRoot 'CodexSharedLauncher.exe'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
@@ -84,12 +81,11 @@ if (-not (Test-Path -LiteralPath $codexAppToolsConfigScript -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $codexAppToolsBridgeScript -PathType Leaf)) {
     throw "Shared codex-app-tools bridge was not found: $codexAppToolsBridgeScript"
 }
-if (-not (Test-Path -LiteralPath $runtimeUpdateDrainScript -PathType Leaf)) {
-    throw "Runtime update drain helper was not found: $runtimeUpdateDrainScript"
-}
 . $runtimeCacheScript
 . $desktopPackageScript
 . (Join-Path $launcherRoot 'CodexDesktopStartup.ps1')
+. (Join-Path $launcherRoot 'CodexDesktopConnection.ps1')
+. (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')
 . $processEnvironmentScript
 . $codexAppToolsConfigScript
 . (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
@@ -152,119 +148,6 @@ function Assert-LauncherNotCancelled {
     }
 }
 
-function Invoke-RuntimeUpdateDrain {
-    param(
-        [Parameter(Mandatory)][ValidateSet('pause-active', 'active', 'resume-paused')][string]$Command,
-        [Parameter(Mandatory)][string]$WebSocketUrl,
-        [AllowNull()][string]$FromVersion,
-        [AllowNull()][string]$ToVersion
-    )
-
-    $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
-    $arguments = @($runtimeUpdateDrainScript, $Command, '--endpoint', $WebSocketUrl)
-    if ($Command -in @('pause-active', 'resume-paused')) {
-        $arguments += @('--state', $runtimeUpdateStatePath)
-    }
-    if ($Command -eq 'pause-active') {
-        $arguments += @('--from-version', $FromVersion, '--to-version', $ToVersion)
-    }
-
-    $output = @(& $nodeExecutable @arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Runtime update drain command failed ($Command): $($output -join [Environment]::NewLine)"
-    }
-    if ($output.Count -eq 0) {
-        throw "Runtime update drain command returned no result: $Command"
-    }
-    $output[-1] | ConvertFrom-Json
-}
-
-function Wait-RuntimeUpdateQuiescence {
-    param(
-        [Parameter(Mandatory)][string]$WebSocketUrl,
-        [Parameter(Mandatory)][string]$FromVersion,
-        [Parameter(Mandatory)][string]$ToVersion
-    )
-
-    $consecutiveIdleChecks = 0
-    $lastActiveSet = $null
-    while ($consecutiveIdleChecks -lt 5) {
-        try {
-            $drain = Invoke-RuntimeUpdateDrain `
-                -Command 'pause-active' `
-                -WebSocketUrl $WebSocketUrl `
-                -FromVersion $FromVersion `
-                -ToVersion $ToVersion
-            $activeThreadIds = @($drain.activeThreadIds)
-            $activeSet = $activeThreadIds -join ','
-            if ($activeSet -ne $lastActiveSet) {
-                Write-LauncherLog (
-                    "Runtime update drain observed active threads. count=$($activeThreadIds.Count) " +
-                    "ids=$activeSet"
-                )
-                $lastActiveSet = $activeSet
-            }
-            if ($activeThreadIds.Count -eq 0) {
-                $consecutiveIdleChecks += 1
-            }
-            else {
-                $consecutiveIdleChecks = 0
-            }
-        }
-        catch {
-            $consecutiveIdleChecks = 0
-            Write-LauncherLog "Runtime update drain inspection failed; preserving the current server: $($_.Exception.Message)"
-        }
-        if ($consecutiveIdleChecks -lt 5) {
-            Start-Sleep -Seconds 1
-        }
-    }
-    Write-LauncherLog 'Runtime update drain reached five consecutive idle checks.'
-}
-
-function Restore-RuntimeUpdateGoals {
-    param(
-        [Parameter(Mandatory)][string]$WebSocketUrl,
-        [Parameter(Mandatory)][string]$PackageVersion
-    )
-
-    if (-not (Test-Path -LiteralPath $runtimeUpdateStatePath -PathType Leaf)) {
-        return
-    }
-    try {
-        $state = Get-Content -LiteralPath $runtimeUpdateStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($state.phase -eq 'completed' -or $state.toVersion -ne $PackageVersion) {
-            return
-        }
-    }
-    catch {
-        Write-LauncherLog "Unable to inspect paused-goal update state: $($_.Exception.Message)"
-        return
-    }
-
-    for ($attempt = 1; $attempt -le 5; $attempt += 1) {
-        try {
-            $restored = Invoke-RuntimeUpdateDrain `
-                -Command 'resume-paused' `
-                -WebSocketUrl $WebSocketUrl `
-                -FromVersion $null `
-                -ToVersion $null
-            Write-LauncherLog (
-                "Runtime update goals restored. resumed=$(@($restored.resumedThreadIds).Count) " +
-                "unchanged=$(@($restored.unchangedThreadIds).Count)"
-            )
-            return
-        }
-        catch {
-            Write-LauncherLog "Runtime update goal restore attempt $attempt failed: $($_.Exception.Message)"
-            if ($attempt -lt 5) {
-                Start-Sleep -Seconds 1
-            }
-        }
-    }
-    Write-LauncherLog 'Paused goals remain paused because all automatic restore attempts failed.'
-}
-
 Write-LauncherLog "CLI redirect enabled for child processes: $cliRedirectEnabledForChildProcesses"
 
 function Show-LauncherMessage {
@@ -313,33 +196,6 @@ function Invoke-LauncherSignal {
     }
     catch {
         [System.Media.SystemSounds]::Exclamation.Play()
-    }
-}
-
-function Get-CodexPackageInfo {
-    $package = Get-CodexDesktopPackageInfo -RequireBundledRuntime
-
-    $runtimeCache = Initialize-CodexRuntimeCache `
-        -BundledServerExecutable $package.BundledServerExecutable `
-        -BundledCodeModeHostExecutable $package.BundledCodeModeHostExecutable `
-        -BundledCommandRunnerExecutable $package.BundledCommandRunnerExecutable `
-        -BundledSandboxServiceExecutable $package.BundledSandboxServiceExecutable `
-        -BundledSandboxSetupExecutable $package.BundledSandboxSetupExecutable `
-        -CacheRoot $cacheRoot `
-        -PackageVersion $package.Version
-
-    [pscustomobject]@{
-        Version = $package.Version
-        PackageFamilyName = $package.PackageFamilyName
-        ApplicationUserModelId = $package.ApplicationUserModelId
-        InstallLocation = $package.InstallLocation
-        DesktopExecutable = $package.DesktopExecutable
-        BundledServerExecutable = $package.BundledServerExecutable
-        BundledCodeModeHostExecutable = $package.BundledCodeModeHostExecutable
-        ServerExecutable = $runtimeCache.ServerExecutable
-        ServerSha256 = $runtimeCache.ServerSha256
-        CodeModeHostExecutable = $runtimeCache.CodeModeHostExecutable
-        CodeModeHostSha256 = $runtimeCache.CodeModeHostSha256
     }
 }
 
@@ -604,227 +460,6 @@ function Invoke-DesktopProjectSync {
     Write-LauncherLog "Desktop project sync completed. $($syncOutput -join ' ')"
 }
 
-function Get-ReusableRuntimeState {
-    param(
-        [Parameter(Mandatory)][object]$PackageInfo,
-        [Parameter(Mandatory)][int]$PortNumber,
-        [switch]$SuppressFailureLog
-    )
-
-    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-        return $null
-    }
-
-    try {
-        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $expectedWebSocketUrl = "ws://127.0.0.1:$PortNumber"
-        $expectedReadyUrl = "http://127.0.0.1:$PortNumber/readyz"
-        if (
-            [int]$state.port -ne $PortNumber -or
-            $state.websocketUrl -ne $expectedWebSocketUrl -or
-            $state.readyUrl -ne $expectedReadyUrl
-        ) {
-            throw 'The recorded endpoint does not match the requested loopback endpoint.'
-        }
-        if (
-            $state.packageVersion -ne $PackageInfo.Version -or
-            $state.desktopExecutable -ne $PackageInfo.DesktopExecutable -or
-            $state.serverExecutable -ne $PackageInfo.ServerExecutable -or
-            $state.codeModeHostExecutable -ne $PackageInfo.CodeModeHostExecutable -or
-            $state.codeModeHostSha256 -ne $PackageInfo.CodeModeHostSha256
-        ) {
-            throw 'The recorded runtime does not match the installed Codex package and this launcher cache.'
-        }
-        if ($state.desktopConnectionVerified -ne $true) {
-            throw 'The recorded shared runtime has not completed Desktop connection verification.'
-        }
-
-        $listener = @(
-            Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |
-                Where-Object { $_.LocalAddress -eq '127.0.0.1' }
-        )
-        if ($listener.Count -ne 1 -or [int]$listener[0].OwningProcess -ne [int]$state.serverProcessId) {
-            throw 'The loopback listener owner does not match launcher state.'
-        }
-
-        $server = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.serverProcessId)" -ErrorAction Stop
-        if (
-            $null -eq $server -or
-            -not $server.ExecutablePath -or
-            $server.ExecutablePath -ne $PackageInfo.ServerExecutable
-        ) {
-            throw 'The live app-server executable does not match this launcher cache.'
-        }
-
-        $supervisor = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.supervisorProcessId)" -ErrorAction Stop
-        if (
-            $null -eq $supervisor -or
-            -not $supervisor.CommandLine -or
-            $supervisor.CommandLine -notmatch [regex]::Escape($PSCommandPath)
-        ) {
-            throw 'The recorded shared-launcher supervisor is not alive or is owned by another launcher.'
-        }
-
-        $readyResponse = Invoke-WebRequest -UseBasicParsing -Uri $expectedReadyUrl -TimeoutSec 2
-        if ($readyResponse.StatusCode -ne 200) {
-            throw "The app-server ready endpoint returned HTTP $($readyResponse.StatusCode)."
-        }
-
-        return $state
-    }
-    catch {
-        if (-not $SuppressFailureLog) {
-            Write-LauncherLog "Existing runtime is not reusable: $($_.Exception.Message)"
-        }
-        return $null
-    }
-}
-
-function Wait-ReusableRuntimeState {
-    param(
-        [Parameter(Mandatory)][object]$PackageInfo,
-        [Parameter(Mandatory)][int]$PortNumber,
-        [int]$TimeoutSeconds = 120,
-        [int]$PollMilliseconds = 500
-    )
-
-    if ($TimeoutSeconds -le 0) { throw 'The concurrent-launch wait timeout must be positive.' }
-    if ($PollMilliseconds -le 0) { throw 'The concurrent-launch poll interval must be positive.' }
-
-    $wait = [Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        Assert-LauncherNotCancelled
-        $state = Get-ReusableRuntimeState `
-            -PackageInfo $PackageInfo `
-            -PortNumber $PortNumber `
-            -SuppressFailureLog
-        if ($null -ne $state) {
-            return $state
-        }
-        Start-Sleep -Milliseconds $PollMilliseconds
-    }
-    return $null
-}
-
-function Wait-DesktopSharedConnection {
-    param(
-        [Parameter(Mandatory)][object]$PackageInfo,
-        [Parameter(Mandatory)][int]$PortNumber,
-        [Parameter(Mandatory)][int]$OwnedServerProcessId,
-        [int]$TimeoutSeconds = 0,
-        [int]$PollMilliseconds = 500
-    )
-
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    $helperLogged = $false
-    $lastProgressSeconds = 0.0
-    $lastStage = 0
-    $progressOffsets = @{}
-    while ($true) {
-        Assert-LauncherNotCancelled
-        $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
-        if ($roots.Count -gt 0) {
-            $stage = Read-CodexDesktopStartupProgress -DesktopRoots $roots -Offsets $progressOffsets -PackageInfo $PackageInfo
-            if ($stage -gt $lastStage) {
-                $lastStage = $stage
-                $lastProgressSeconds = $watch.Elapsed.TotalSeconds
-                Write-LauncherLog "Desktop forward startup progress observed. stage=$lastStage totalSeconds=$([int]$watch.Elapsed.TotalSeconds)"
-                Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の初期化が進んでいます。進捗が続く間は接続を待ちます。' -Detail "確認済み段階: $lastStage。進捗停止の確認時間: $TimeoutSeconds 秒。" -ServerStatus '起動済み' -DesktopStatus '初期化進行中…'
-            }
-        }
-        $ownedServer = Get-Process -Id $OwnedServerProcessId -ErrorAction SilentlyContinue
-        $decision = Get-CodexDesktopConnectionDecision `
-            -Connected (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) `
-            -ServerAlive ($null -ne $ownedServer -and -not $ownedServer.HasExited) `
-            -DesktopAlive ($roots.Count -gt 0) -Cancelled $false `
-            -ElapsedSeconds ($watch.Elapsed.TotalSeconds - $lastProgressSeconds) -TimeoutSeconds $TimeoutSeconds
-        if ($decision -eq 'ready') {
-            return $true
-        }
-        if (-not $helperLogged) {
-            $rootIds = @($roots | ForEach-Object { [int]$_.ProcessId })
-            $helpers = @(Get-DesktopLocalAppServers -DesktopRootProcessIds $rootIds)
-            if ($helpers.Count -gt 0) {
-                Write-LauncherLog "Desktop bootstrap stdio helper observed; continuing to wait for its shared WebSocket. pid=$($helpers.ProcessId -join ',')"
-                $helperLogged = $true
-            }
-        }
-        Start-Sleep -Milliseconds $PollMilliseconds
-    }
-}
-
-function Start-DesktopOnRuntime {
-    param(
-        [Parameter(Mandatory)][object]$PackageInfo,
-        [Parameter(Mandatory)][object]$RuntimeState,
-        [Parameter(Mandatory)][int]$PortNumber
-    )
-
-    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopExecutable' -Value $PackageInfo.DesktopExecutable
-    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
-    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
-    Write-RuntimeState -State $RuntimeState
-
-    Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
-    Invoke-DesktopProjectSync -WebSocketUrl $RuntimeState.websocketUrl
-    Assert-LauncherNotCancelled
-    Set-UserWebSocketEnvironment -WebSocketUrl $RuntimeState.websocketUrl
-    Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
-    Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
-
-    Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
-    # Explorer/package activation can race environment broadcasts at logon.
-    # Start the installed package executable with an explicit inherited endpoint.
-    $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable -WebSocketUrl $RuntimeState.websocketUrl
-    $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
-    if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
-    Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"
-
-    $desktopRoots = @()
-    $launchWatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
-        Assert-LauncherNotCancelled
-        $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
-        if ($desktopRoots.Count -gt 0) {
-            break
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    if ($desktopRoots.Count -eq 0) {
-        throw 'Codex Desktop did not start within 30 seconds.'
-    }
-    $script:launchedDesktopRoots = $desktopRoots
-
-    Set-RuntimeStateValue `
-        -State $RuntimeState `
-        -Name 'desktopProcessIds' `
-        -Value @($desktopRoots | ForEach-Object { [int]$_.ProcessId })
-    Write-RuntimeState -State $RuntimeState
-    Write-LauncherLog "Desktop root detected. pid=$($RuntimeState.desktopProcessIds -join ',')"
-
-    Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の共有接続を確認しています。' -ServerStatus '起動済み' -DesktopStatus '共有接続待ち…'
-    $connectionVerified = Wait-DesktopSharedConnection -PackageInfo $PackageInfo -PortNumber $PortNumber -OwnedServerProcessId ([int]$RuntimeState.serverProcessId) -TimeoutSeconds $DesktopConnectionStallSeconds
-
-    if (-not $connectionVerified) {
-        Show-LauncherMessage -Message "Codex started, but the shared app-server connection could not be verified.`n`nCodex remains open. See:`n$logPath" -Icon 16
-        throw 'Desktop の共有接続を確認できませんでした。Desktop の認証画面と共有接続のログを確認してください。'
-    }
-
-    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
-    Set-RuntimeStateValue `
-        -State $RuntimeState `
-        -Name 'desktopProcessIds' `
-        -Value @(Get-CodexDesktopProcessIds -DesktopExecutable $PackageInfo.DesktopExecutable)
-    Write-RuntimeState -State $RuntimeState
-    Write-LauncherLog 'Desktop WebSocket connection verified.'
-    Write-LauncherProgress -Phase 'ready' -Summary 'Desktop は共有サーバーに接続済みです。Discord Bridge を確認しています。' -ServerStatus '起動済み' -DesktopStatus '共有接続済み'
-
-    [pscustomobject]@{
-        RuntimeState = $RuntimeState
-        DesktopProcessIds = @($RuntimeState.desktopProcessIds)
-    }
-}
-
 function Remove-RuntimeStateIfOwned {
     param([int]$ExpectedServerProcessId)
 
@@ -844,120 +479,7 @@ function Remove-RuntimeStateIfOwned {
 }
 
 if (-not ('CodexSharedLauncher.KillOnCloseJob' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-
-namespace CodexSharedLauncher
-{
-    public sealed class KillOnCloseJob : IDisposable
-    {
-        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-        private IntPtr handle;
-
-        public KillOnCloseJob()
-        {
-            handle = CreateJobObject(IntPtr.Zero, null);
-            if (handle == IntPtr.Zero)
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-
-            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            int length = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
-            IntPtr pointer = Marshal.AllocHGlobal(length);
-            try
-            {
-                Marshal.StructureToPtr(info, pointer, false);
-                if (!SetInformationJobObject(handle, 9, pointer, (uint)length))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
-            catch
-            {
-                CloseHandle(handle);
-                handle = IntPtr.Zero;
-                throw;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(pointer);
-            }
-        }
-
-        public void AddProcess(Process process)
-        {
-            if (handle == IntPtr.Zero)
-                throw new ObjectDisposedException("KillOnCloseJob");
-            if (!AssignProcessToJobObject(handle, process.Handle))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
-
-        public void Dispose()
-        {
-            if (handle != IntPtr.Zero)
-            {
-                CloseHandle(handle);
-                handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~KillOnCloseJob()
-        {
-            Dispose();
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct IO_COUNTERS
-        {
-            public ulong ReadOperationCount;
-            public ulong WriteOperationCount;
-            public ulong OtherOperationCount;
-            public ulong ReadTransferCount;
-            public ulong WriteTransferCount;
-            public ulong OtherTransferCount;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
-        {
-            public long PerProcessUserTimeLimit;
-            public long PerJobUserTimeLimit;
-            public uint LimitFlags;
-            public UIntPtr MinimumWorkingSetSize;
-            public UIntPtr MaximumWorkingSetSize;
-            public uint ActiveProcessLimit;
-            public UIntPtr Affinity;
-            public uint PriorityClass;
-            public uint SchedulingClass;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-        {
-            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
-            public IO_COUNTERS IoInfo;
-            public UIntPtr ProcessMemoryLimit;
-            public UIntPtr JobMemoryLimit;
-            public UIntPtr PeakProcessMemoryUsed;
-            public UIntPtr PeakJobMemoryUsed;
-        }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr CreateJobObject(IntPtr securityAttributes, string name);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr handle);
-    }
-}
-'@
+    Add-Type -Path (Join-Path $launcherRoot 'CodexAppServerJob.cs')
 }
 
 $mutex = $null
@@ -969,8 +491,7 @@ $exitCode = 1
 $packageInfo = $null
 $registeredWebSocketUrl = $null
 $startupHandled = $false
-$restartAfterCleanup = $false
-$replacementPackageVersion = $null
+$handoff = $null
 $codexAppToolsDefinition = $null
 $codexAppToolsConfigPath = $null
 $launchedDesktopRoots = @()
@@ -1071,7 +592,7 @@ try {
         Invoke-BridgeRetry
         exit 0
     }
-    $packageInfo = Get-CodexPackageInfo
+    $packageInfo = Get-CodexPackageRuntime -Package (Get-CodexDesktopPackageInfo -RequireBundledRuntime) -CacheRoot $cacheRoot
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
 
     $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
@@ -1130,9 +651,6 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $reusableRuntime `
                 -PortNumber $Port
-            Restore-RuntimeUpdateGoals `
-                -WebSocketUrl $reusableRuntime.websocketUrl `
-                -PackageVersion $packageInfo.Version
             Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
             Invoke-LauncherSignal -Kind Ready
             $exitCode = 0
@@ -1205,6 +723,14 @@ try {
         Write-LauncherLog "app-server ready. url=ws://127.0.0.1:$Port"
         Write-LauncherProgress -Phase 'server-ready' -Summary '共有 App Server は起動済みです。' -ServerStatus '起動済み'
 
+        $gracefulShutdown = $false
+        if (-not $SelfTest) {
+            try {
+                Assert-CodexGracefulShutdownSupported $serverProcess
+                $gracefulShutdown = $true
+            }
+            catch { Write-LauncherLog $_.Exception.Message }
+        }
         $runtimeState = [ordered]@{
             schemaVersion = 2
             mode = $modeName
@@ -1213,6 +739,7 @@ try {
             port = $Port
             serverProcessId = $serverProcessId
             supervisorProcessId = $PID
+            appServerGracefulShutdown = $gracefulShutdown
             desktopProcessIds = @()
             desktopConnectionVerified = $false
             packageVersion = $packageInfo.Version
@@ -1249,70 +776,12 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $runtimeState `
                 -PortNumber $Port
-            Restore-RuntimeUpdateGoals `
-                -WebSocketUrl $runtimeState.websocketUrl `
-                -PackageVersion $packageInfo.Version
             Invoke-LauncherSignal -Kind Ready
 
-            $monitoredDesktopVersion = $packageInfo.Version
-            $monitoredDesktopExecutable = $packageInfo.DesktopExecutable
-            $attemptedReplacementKey = $null
-            $missingSince = $null
-            while ($true) {
-                $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $monitoredDesktopExecutable)
-                if ($currentRoots.Count -gt 0) {
-                    $missingSince = $null
-                }
-                else {
-                    $replacement = $null
-                    try {
-                        $replacement = Get-CodexDesktopPackageReplacement `
-                            -CurrentVersion $monitoredDesktopVersion `
-                            -CurrentDesktopExecutable $monitoredDesktopExecutable
-                    }
-                    catch {
-                        Write-LauncherLog "Unable to inspect a possible Desktop package replacement: $($_.Exception.Message)"
-                    }
-
-                    if ($null -ne $replacement) {
-                        $replacementKey = "$($replacement.Version)|$($replacement.DesktopExecutable)"
-                        if ($replacementKey -ne $attemptedReplacementKey) {
-                            $attemptedReplacementKey = $replacementKey
-                            Write-LauncherLog (
-                                "Desktop package replacement detected. " +
-                                "oldVersion=$monitoredDesktopVersion newVersion=$($replacement.Version)"
-                            )
-                            Wait-RuntimeUpdateQuiescence `
-                                -WebSocketUrl $runtimeState.websocketUrl `
-                                -FromVersion $monitoredDesktopVersion `
-                                -ToVersion $replacement.Version
-                            $restartAfterCleanup = $true
-                            $replacementPackageVersion = $replacement.Version
-                            Write-LauncherLog (
-                                "Updated Desktop and shared app-server will restart together. " +
-                                "version=$replacementPackageVersion"
-                            )
-                            break
-                        }
-                    }
-
-                    if ($null -eq $missingSince) {
-                        $missingSince = Get-Date
-                    }
-                    elseif (((Get-Date) - $missingSince).TotalSeconds -ge 60) {
-                        break
-                    }
-                }
-                Start-Sleep -Seconds 1
-            }
-
-            if ($restartAfterCleanup) {
-                Write-LauncherLog 'Runtime update drain completed; beginning old shared app-server cleanup.'
-            }
-            else {
-                Write-LauncherLog 'Desktop exited; beginning owned app-server cleanup.'
-            }
-            $exitCode = 0
+            $exit = Wait-CodexDesktopRuntimeExit -Runtime $runtimeState -Server $serverProcess -StateRoot $stateRoot -CacheRoot $cacheRoot -StartupStallSeconds $DesktopConnectionStallSeconds -Log { param($Message) Write-LauncherLog $Message }
+            $handoff = $exit.Handoff
+            Write-LauncherLog "Owned AppServer exited. exitCode=$($exit.ExitCode) handoff=$handoff"
+            $exitCode = $exit.ExitCode
         }
         }
     }
@@ -1379,31 +848,10 @@ finally {
         $mutex.Dispose()
     }
 
-    if (-not $SelfTest -and $exitCode -eq 0 -and $serverProcessId -ne 0 -and -not $restartAfterCleanup) {
+    if (-not $SelfTest -and $exitCode -eq 0 -and $serverProcessId -ne 0 -and -not $handoff) {
         Invoke-LauncherSignal -Kind Stopped
     }
     Write-LauncherLog "Launcher finished. exitCode=$exitCode"
-}
-
-if (-not $SelfTest -and $exitCode -eq 0 -and $restartAfterCleanup) {
-    try {
-        if (-not (Test-Path -LiteralPath $launcherExecutable -PathType Leaf)) {
-            throw "Shared launcher executable was not found: $launcherExecutable"
-        }
-        Start-Process `
-            -FilePath $launcherExecutable `
-            -ArgumentList '--no-dialogs' `
-            -WindowStyle Hidden | Out-Null
-        Write-LauncherLog (
-            "Replacement shared launcher started after runtime cleanup. " +
-            "targetVersion=$replacementPackageVersion"
-        )
-    }
-    catch {
-        Write-LauncherLog "Unable to start replacement shared launcher: $($_.Exception.Message)"
-        Invoke-LauncherSignal -Kind Error
-        $exitCode = 1
-    }
 }
 
 exit $exitCode

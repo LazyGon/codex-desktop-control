@@ -88,6 +88,9 @@ if (-not $Controller) {
             'CodexDesktopShutdown.ps1' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'CodexDesktopShutdown.ps1')).Hash
             'CodexDesktopShutdown.cs' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'CodexDesktopShutdown.cs')).Hash
             'Start-CodexShared.ps1' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'Start-CodexShared.ps1')).Hash
+            'CodexDesktopConnection.ps1' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'CodexDesktopConnection.ps1')).Hash
+            'CodexAppServerJob.cs' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'CodexAppServerJob.cs')).Hash
+            'CodexRuntimeHandoff.ps1' = (Get-FileHash -LiteralPath (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')).Hash
         }
         projectRecoveryBackup = $ProjectRecoveryBackup
         projectRecoveryBackupSha256 = if ($ProjectRecoveryBackup) { (Get-FileHash -LiteralPath $ProjectRecoveryBackup).Hash } else { $null }
