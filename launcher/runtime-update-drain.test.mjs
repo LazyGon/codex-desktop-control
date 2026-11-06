@@ -312,6 +312,22 @@ test('refresh requests normal application shutdown once and respects a veto', {
   }
 });
 
+test('helper selection admits only recognized descendants with matching path, session and birth order', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const helper = path.join(launcherRoot, 'CodexDesktopHelpers.ps1');
+  const script = [
+    "$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest",
+    `. ${quotePowerShell(helper)}`,
+    "function Actor($ProcessId,$ParentProcessId,$time,$CommandLine,$ExecutablePath='trusted.exe',$SessionId=1) { [pscustomobject]@{ProcessId=$ProcessId;ParentProcessId=$ParentProcessId;CreationDate=[datetime]$time;CommandLine=$CommandLine;ExecutablePath=$ExecutablePath;SessionId=$SessionId} }",
+    "$root=Actor 11 1 '2026-11-06T01:00:00Z' 'trusted.exe'",
+    "$rows=@($root,(Actor 12 11 '2026-11-06T01:00:01Z' 'trusted.exe --type=crashpad-handler'),(Actor 13 12 '2026-11-06T01:00:02Z' 'trusted.exe --type=utility'),(Actor 14 11 '2026-11-06T00:59:00Z' 'trusted.exe --type=utility'),(Actor 15 11 '2026-11-06T01:00:02Z' 'trusted.exe'),(Actor 16 11 '2026-11-06T01:00:02Z' 'foreign.exe --type=utility' 'foreign.exe'),(Actor 17 11 '2026-11-06T01:00:02Z' 'trusted.exe --type=utility' 'trusted.exe' 2),(Actor 18 22 '2026-11-06T01:00:02Z' 'trusted.exe --type=utility'))",
+    'ConvertTo-Json -InputObject @(Select-CodexDesktopHelperCandidates $root $rows | ForEach-Object pid) -Compress',
+  ].join('\n');
+  const output = execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true});
+  assert.deepEqual(JSON.parse(output), [12,13]);
+});
+
 test('a separately reopened Desktop ends the old-runtime wait without a second shutdown', {
   skip: process.platform !== 'win32',
 }, () => {
@@ -340,6 +356,7 @@ test('restart-only admits only the exact same version without installer or force
   const script = [
     "$ErrorActionPreference='Stop'",
     source.slice(start, end),
+    '$CleanupExitedDesktopHelpers=$false',
     "$FromVersion='26.1029.7803.0'",
     "function Check-Mode($RestartOnly,$ToVersion,$PackagePath,$PackageSha256,$AllowTargetApplicationShutdown) { try { Assert-RefreshMode; $true } catch { $false } }",
     "$results=@((Check-Mode $true $FromVersion '' '' $false),(Check-Mode $true '26.1030.1.0' '' '' $false),(Check-Mode $true $FromVersion 'package.msix' '' $false),(Check-Mode $true $FromVersion '' 'hash' $false),(Check-Mode $true $FromVersion '' '' $true),(Check-Mode $false $FromVersion '' '' $false),(Check-Mode $false '26.1030.1.0' '' '' $false))",
@@ -360,6 +377,7 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
     "$PackagePath=\"C:\\Owner's folder\\ChatGPT.msix\"",
     "$PackageSha256='" + 'a'.repeat(64) + "'",
     '$RestartOnly=$false',
+    '$CleanupExitedDesktopHelpers=$false',
     '$AllowTargetApplicationShutdown=$true',
     "$WaitForThreadId='00000000-0000-0000-0000-000000000001'",
     "$WaitForTurnId='00000000-0000-0000-0000-000000000002'",
@@ -376,6 +394,6 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
   assert.equal(result.statements, 1);
   assert.equal(result.errors, 0);
   assert.deepEqual(result.parameters, ['WaitForThreadId','WaitForTurnId','FromVersion','ToVersion',
-    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','RestartOnly','AllowTargetApplicationShutdown',
+    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','RestartOnly','CleanupExitedDesktopHelpers','AllowTargetApplicationShutdown',
     'ScheduledController','RefreshRequestId','ScheduledTaskName']);
 });

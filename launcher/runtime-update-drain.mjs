@@ -2,6 +2,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { deliveryFor, listPages } from '../control/shared-task-operations.mjs';
+import { goalIdentity } from '../control/system-error-recovery.mjs';
 
 function nowIso() {
   return new Date().toISOString();
@@ -247,6 +248,14 @@ async function main() {
       process.stdout.write(JSON.stringify(await inspectLoadedActivity(client)) + '\n');
       return;
     }
+    if (command === 'goal') {
+      const threadId = requiredString(options.thread, '--thread');
+      const { goal } = await client.call('thread/goal/get', { threadId });
+      if (goal && goal.threadId !== threadId) throw new Error('Goal thread identity mismatch.');
+      process.stdout.write(JSON.stringify({ status: goal?.status ?? null,
+        identity: goalIdentity(goal), updatedAt: goal?.updatedAt ?? null }) + '\n');
+      return;
+    }
 
     if (command === 'wait-turn') {
       const result = await waitForTurnCompletion(
@@ -260,7 +269,7 @@ async function main() {
       return;
     }
 
-    throw new Error('Usage: runtime-update-drain.mjs <active|wait-turn|deliver> [options]');
+    throw new Error('Usage: runtime-update-drain.mjs <active|wait-turn|deliver|goal> [options]');
   } finally {
     client.close();
   }

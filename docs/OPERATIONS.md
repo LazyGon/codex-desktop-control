@@ -132,6 +132,11 @@ same controller with `-RestartOnly` and identical `-FromVersion` and
 clean-exit and one-shot same-task continuation checks, without installing an MSIX.
 If Desktop is opened separately while the old runtime is still releasing, the
 controller stops and records the conflict without closing the reopened Desktop.
+If explicitly approved for that same-version restart, `-CleanupExitedDesktopHelpers`
+can terminate only identity-verified residual Electron children captured before
+normal shutdown. It requires proof that the captured root exited, journals each
+termination attempt, and refuses unrelated or unverified processes. It does not
+force the Desktop root, AppServer, Bridge, or Windows to close.
 
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.

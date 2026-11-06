@@ -30,6 +30,7 @@ param(
     [string]$PackageSha256 = '',
 
     [switch]$RestartOnly,
+    [switch]$CleanupExitedDesktopHelpers,
 
     # Requires explicit Owner approval for this update. Never stop dependency
     # packages or use a general process-kill fallback.
@@ -70,6 +71,7 @@ if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
 . $desktopShutdownScript
 . (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')
 . (Join-Path $launcherRoot 'CodexDesktopPackage.ps1')
+. (Join-Path $launcherRoot 'CodexDesktopHelpers.ps1')
 
 function Write-RefreshLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -204,6 +206,7 @@ function Assert-OwnedRefreshTask {
                 '-DesktopCloseTimeoutSeconds [0-9]+ ' +
                 "(?:-PackagePath '(?:[^']|'')*' -PackageSha256 '(?:[A-Fa-f0-9]{64})?' )?" +
                 '(?:-RestartOnly:\$(?:True|False) )?' +
+                '(?:-CleanupExitedDesktopHelpers:\$(?:True|False) )?' +
                 '(?:-AllowTargetApplicationShutdown:\$(?:True|False) )?' +
                 '-ScheduledController ' +
                 "-RefreshRequestId '[0-9a-f-]{36}' " +
@@ -296,6 +299,7 @@ function New-RefreshControllerCommand {
         "-DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds",
         "-PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256'",
         "-RestartOnly:`$$([bool]$RestartOnly)",
+        "-CleanupExitedDesktopHelpers:`$$([bool]$CleanupExitedDesktopHelpers)",
         "-AllowTargetApplicationShutdown:`$$([bool]$AllowTargetApplicationShutdown)",
         '-ScheduledController',
         "-RefreshRequestId '$RequestId'",
@@ -383,6 +387,7 @@ function Start-DetachedRefreshController {
                     $receipt.fromVersion -eq $FromVersion -and
                     $receipt.toVersion -eq $ToVersion -and
                     $receipt.restartOnly -eq [bool]$RestartOnly -and
+                    $receipt.cleanupExitedDesktopHelpers -eq [bool]$CleanupExitedDesktopHelpers -and
                     $receipt.allowTargetApplicationShutdown -eq [bool]$AllowTargetApplicationShutdown
                 ) {
                     $acceptedAt = [DateTimeOffset]::Now.ToString('o')
@@ -398,6 +403,7 @@ function Start-DetachedRefreshController {
                         fromVersion = $FromVersion
                         toVersion = $ToVersion
                         restartOnly = [bool]$RestartOnly
+                        cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
                         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
                         armedAt = $receipt.armedAt
                         controllerAcceptedAt = $acceptedAt
@@ -431,10 +437,11 @@ function Start-DetachedRefreshController {
 }
 
 function Invoke-DrainCommand {
-    param([Parameter(Mandatory)][ValidateSet('active', 'wait-turn')][string]$Command)
+    param([Parameter(Mandatory)][ValidateSet('active', 'wait-turn', 'goal')][string]$Command)
 
     $arguments = @($drainScript, $Command, '--endpoint', 'ws://127.0.0.1:8798')
     switch ($Command) {
+        'goal' { $arguments += @('--thread', $WaitForThreadId) }
         'wait-turn' {
             $arguments += @(
                 '--thread', $WaitForThreadId,
@@ -556,13 +563,18 @@ function Wait-AllThreadsIdle {
 }
 
 function Request-DesktopClose {
-    param([Parameter(Mandatory)][string]$DesktopExecutable)
+    param([Parameter(Mandatory)][string]$DesktopExecutable, [object]$ExpectedRootActor)
 
     $roots = @(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable)
     if ($roots.Count -eq 0) { return }
     if ($roots.Count -ne 1) { throw 'More than one Desktop root was found. No shutdown was requested.' }
     foreach ($root in $roots) {
         $process = Get-Process -Id $root.ProcessId -ErrorAction Stop
+        if ($ExpectedRootActor -and ($process.Id -ne $ExpectedRootActor.pid -or
+            $process.StartTime.ToUniversalTime().Ticks.ToString() -ne $ExpectedRootActor.startedUtcTicks -or
+            $process.Path -ne $ExpectedRootActor.executable)) {
+            throw 'Desktop root changed after capturing helpers; no shutdown was requested.'
+        }
         $startedAt = $process.StartTime.ToUniversalTime().ToString('o')
         Write-RefreshLog "Normal Desktop application shutdown requested. pid=$($process.Id) method=RestartManager"
         $shutdown = Invoke-CodexDesktopNormalShutdown -ProcessId $process.Id `
@@ -672,6 +684,7 @@ function Send-CompletionCallback {
         "new server PID: $($NewState.serverProcessId)`nnew server SHA-256: $($NewState.serverSha256)"
     }
     $operation = if ($RestartOnly) { 'same-version restart' } else { 'package update' }
+    $goalPausePath = Join-Path (Split-Path -Parent $resultPath) "runtime-refresh-history/$RefreshRequestId-goal-pause.json"
     $message = @"
 Shared Codex runtime refresh settled. Verify the receipt before claiming success.
 
@@ -683,6 +696,7 @@ $resultDetails
 receipt: $resultPath
 
 Verify the receipt, installed package, shared Desktop connection and Discord Bridge, then report the requested operation's result. Do not rerun an uncertain operation merely because this callback arrived. No Windows restart or credit policy activation was authorized.
+If the exact waiter-owned goal pause receipt exists at $goalPausePath, verify it and the current goal identity and paused revision, then resume that same goal once using the supported shared App Server before continuing goal work. Do not undo a later manual pause, changed goal or terminal state.
 "@
     $output = @(
         & $nodeExecutable $drainScript deliver --thread $WaitForThreadId `
@@ -701,6 +715,9 @@ Verify the receipt, installed package, shared Desktop connection and Discord Bri
 }
 
 function Assert-RefreshMode {
+    if ($CleanupExitedDesktopHelpers -and -not $RestartOnly) {
+        throw 'Opt-in residual helper cleanup applies only to a same-version restart.'
+    }
     if ($RestartOnly) {
         if ($FromVersion -ne $ToVersion -or $PackagePath -or $PackageSha256 -or $AllowTargetApplicationShutdown) {
             throw 'Restart-only requires the same exact version and disallows installation inputs and forced shutdown.'
@@ -757,6 +774,7 @@ try {
         fromVersion = $FromVersion
         toVersion = $ToVersion
         restartOnly = [bool]$RestartOnly
+        cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
         armedAt = [DateTimeOffset]::Now.ToString('o')
         logPath = $logPath
@@ -791,6 +809,17 @@ try {
 
         $turnResult = Invoke-DrainCommand -Command 'wait-turn'
         Write-RefreshLog "Exact source turn reached finite status. status=$($turnResult.status)"
+        if ($CleanupExitedDesktopHelpers) {
+            $goal = Invoke-DrainCommand -Command 'goal'
+            $goalPausePath = Join-Path (Split-Path -Parent $resultPath) "runtime-refresh-history/$RefreshRequestId-goal-pause.json"
+            $pause = Read-CodexHandoffJson $goalPausePath
+            if (($goal.status -eq 'active' -or $pause) -and (-not $pause -or
+                $pause.phase -ne 'waiter-paused' -or $pause.requestId -ne $RefreshRequestId -or
+                $pause.threadId -ne $WaitForThreadId -or $pause.sourceTurnId -ne $WaitForTurnId -or
+                $pause.goalIdentity -ne $goal.identity -or $pause.pausedUpdatedAt -ne $goal.updatedAt -or $goal.status -ne 'paused')) {
+                throw 'The waiter-owned goal pause could not be verified; no shutdown was requested.'
+            }
+        }
         $bridgeWasRunning = (& $bridgeStatusScript -Json | ConvertFrom-Json).ProcessAlive -eq $true
         $live = Get-VerifiedRuntimeState
         if ($live.serverProcessId -ne $oldState.serverProcessId -or $live.supervisorProcessId -ne $oldState.supervisorProcessId) {
@@ -811,8 +840,28 @@ try {
             $current.serverProcessId -ne $server.Id -or $current.supervisorProcessId -ne $supervisor.Id) {
             throw 'The admitted runtime changed before Desktop shutdown.'
         }
+        $rootActor = $null
+        if ($CleanupExitedDesktopHelpers) {
+            $roots = @(Get-DesktopRootProcesses -DesktopExecutable $oldState.desktopExecutable)
+            if ($roots.Count -ne 1) { throw 'Expected one exact Desktop root before capturing residual helpers.' }
+            $root = Get-Process -Id $roots[0].ProcessId
+            $null = $root.Handle
+            if ($root.Path -ne $oldState.desktopExecutable -or $root.HasExited) { throw 'The admitted Desktop root changed.' }
+            $rootActor = Get-CodexHandoffActor $root
+            $helpers = @(Select-CodexDesktopHelperCandidates $roots[0] @(Get-DesktopProcesses $oldState.desktopExecutable))
+            $helperIds = @($helpers | ForEach-Object pid)
+            $unknown = @(Get-CodexHandoffDesktopProcesses | Where-Object { $_.Id -ne $root.Id -and $_.Id -notin $helperIds })
+            if ($unknown.Count -gt 0) { throw 'Unrelated or unverified Desktop processes are present; no shutdown was requested.' }
+        }
         Write-CodexHandoffJson $drainPath @{ phase = 'desktop-close-requested' }
-        Request-DesktopClose -DesktopExecutable $oldState.desktopExecutable
+        Request-DesktopClose -DesktopExecutable $oldState.desktopExecutable -ExpectedRootActor $rootActor
+        if ($CleanupExitedDesktopHelpers) {
+            if (-not $root.HasExited -or @(Get-DesktopRootProcesses -DesktopExecutable $oldState.desktopExecutable).Count) {
+                throw 'Desktop exit was not confirmed for the recorded helper cohort.'
+            }
+            $null = Stop-CodexExitedDesktopHelpers $rootActor $helpers (Join-Path $directory 'helper-cleanup.json')
+            if (Get-CodexHandoffDesktopProcesses) { throw 'Unverified Desktop processes remain after cleanup; no additional process was terminated.' }
+        }
         Wait-ForOldRuntimeExit $server $supervisor -DesktopExecutable $oldState.desktopExecutable -AllowLegacyExit:$legacyUpdate
         Write-CodexHandoffJson $drainPath @{ phase = 'exited'; exitCode = $server.ExitCode; supervisorExitCode = $supervisor.ExitCode; ownerApprovedLegacyUpdate = $legacyUpdate }
         $oldExitVerified = $true
@@ -867,6 +916,7 @@ try {
             fromVersion = $FromVersion
             toVersion = $ToVersion
             restartOnly = [bool]$RestartOnly
+            cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             serverSha256 = $newState.serverSha256
             desktopConnectionVerified = $newState.desktopConnectionVerified
@@ -916,6 +966,7 @@ try {
             fromVersion = $FromVersion
             toVersion = $ToVersion
             restartOnly = [bool]$RestartOnly
+            cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             error = $message
             recoveredVersion = $recoveredVersion
