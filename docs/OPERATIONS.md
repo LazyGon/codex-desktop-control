@@ -138,23 +138,22 @@ normal shutdown. It requires proof that the captured root exited, journals each
 termination attempt, and refuses unrelated or unverified processes. It does not
 force the Desktop root, AppServer, Bridge, or Windows to close.
 
-For a controlled Chrome verification on Desktop `26.1029.7803.0`, the
-same-version controller also accepts `-DesktopBrowserAccessTrial`. This is an
-opt-in compatibility trial. The explicit loopback WebSocket remains the
-connection, and only the launched Desktop receives the flag that lets it add
-its own signed browser access context to the normal Computer Use configuration
-for Desktop-originated threads. The launcher does not read or store that
-context. The receipt records the trial setting, not browser success.
+The shared launcher enables Chrome Computer Use compatibility by default on
+Desktop `26.1029.7803.0`. On this build the explicit loopback WebSocket still
+selects the shared AppServer. Only the launched Desktop receives the flag
+that lets it add its own signed browser access context to the normal Computer
+Use configuration. The launcher does not read or store that context. The
+runtime state records the setting in `desktopBrowserAccessCompatibility`.
+No user-level environment or scheduler setting is required.
 
-After a verified handoff, start an ordinary new chat in the Desktop UI and
-ask `@Chrome` to open `https://example.com/` and read its title and heading.
-Check that the built-in Computer Use tool actually discovers Chrome and reads
-the page. A read through the alternate Chrome plugin or web search does not
-verify the trial. Check an existing Desktop task separately before claiming
-that its existing Computer Use configuration was repaired. Threads created
-directly on the shared server are outside this trial's verification scope.
-Omitting the switch on the next authorized normal launch reverts the setting;
-there is no user-level environment or scheduler setting to undo.
+The one-shot `-DesktopBrowserAccessTrial` records an explicit trial request
+in its receipt; it is no longer needed to enable compatibility. The integrated
+`cua_repl` selected Chrome and read the heading and body of
+`https://example.com/` in a post-restart test turn. This is separate from
+success through the alternate Chrome plugin or web search. The compatibility
+flag is limited to this exact build; verify ordinary `@Chrome` from the
+Desktop UI after a package update before changing the version gate. A turn
+started entirely outside Desktop is not covered by this check.
 
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.

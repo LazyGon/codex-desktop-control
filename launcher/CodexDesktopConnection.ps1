@@ -159,6 +159,7 @@ function Start-DesktopOnRuntime {
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value $false
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' -Value $false
     Write-RuntimeState -State $RuntimeState
 
     Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
@@ -210,6 +211,8 @@ function Start-DesktopOnRuntime {
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value ([bool]$DesktopBrowserAccessTrial)
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' `
+        -Value ($desktopStartInfo.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'] -eq '1')
     Set-RuntimeStateValue `
         -State $RuntimeState `
         -Name 'desktopProcessIds' `
