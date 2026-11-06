@@ -312,6 +312,24 @@ test('refresh requests normal application shutdown once and respects a veto', {
   }
 });
 
+test('a separately reopened Desktop ends the old-runtime wait without a second shutdown', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const wait = extractPowerShellFunction(source, 'Wait-ForOldRuntimeExit', 'New-DesktopPackageInstallParameters');
+  const script = [
+    "$ErrorActionPreference='Stop'; $RestartTimeoutSeconds=0",
+    'function Get-CodexHandoffDesktopProcesses { throw "Unneeded child-process probe" }',
+    'function Get-DesktopRootProcesses { param($DesktopExecutable) [pscustomobject]@{ProcessId=123} }',
+    'function Start-Sleep { throw "Unexpected wait" }',
+    'function Request-DesktopClose { throw "Unexpected second close" }',
+    wait,
+    "try { $current=[Diagnostics.Process]::GetCurrentProcess(); Wait-ForOldRuntimeExit $current $current -DesktopExecutable 'fixture' } catch { [Console]::WriteLine($_.Exception.Message) }",
+  ].join('\n');
+  const output = execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true});
+  assert.match(output, /Desktop reopened.*will not close or replace/);
+});
+
 test('restart-only admits only the exact same version without installer or force inputs', {
   skip: process.platform !== 'win32',
 }, () => {

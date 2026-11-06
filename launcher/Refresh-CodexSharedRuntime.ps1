@@ -588,9 +588,20 @@ function Request-DesktopClose {
 }
 
 function Wait-ForOldRuntimeExit {
-    param([Diagnostics.Process]$Server, [Diagnostics.Process]$Supervisor, [switch]$AllowLegacyExit)
+    param(
+        [Diagnostics.Process]$Server,
+        [Diagnostics.Process]$Supervisor,
+        [Parameter(Mandatory)][string]$DesktopExecutable,
+        [switch]$AllowLegacyExit
+    )
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (-not $Server.HasExited -or -not $Supervisor.HasExited -or (Get-CodexHandoffDesktopProcesses)) {
+        # Request-DesktopClose has already verified that the admitted Desktop
+        # root exited. A root appearing now belongs to a separate launch, not
+        # to this request. Do not wait indefinitely or close that new Desktop.
+        if (@(Get-DesktopRootProcesses -DesktopExecutable $DesktopExecutable).Count -gt 0) {
+            throw 'Desktop reopened while the old AppServer was still releasing. This request will not close or replace the reopened Desktop.'
+        }
         if ($RestartTimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -ge $RestartTimeoutSeconds) {
             throw 'The old runtime did not release normally within the supplied observation limit.'
         }
@@ -802,7 +813,7 @@ try {
         }
         Write-CodexHandoffJson $drainPath @{ phase = 'desktop-close-requested' }
         Request-DesktopClose -DesktopExecutable $oldState.desktopExecutable
-        Wait-ForOldRuntimeExit $server $supervisor -AllowLegacyExit:$legacyUpdate
+        Wait-ForOldRuntimeExit $server $supervisor -DesktopExecutable $oldState.desktopExecutable -AllowLegacyExit:$legacyUpdate
         Write-CodexHandoffJson $drainPath @{ phase = 'exited'; exitCode = $server.ExitCode; supervisorExitCode = $supervisor.ExitCode; ownerApprovedLegacyUpdate = $legacyUpdate }
         $oldExitVerified = $true
         Write-RefreshLog 'Old shared runtime exited under its owning supervisor.'

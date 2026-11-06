@@ -130,6 +130,8 @@ For an explicitly authorized normal restart without a package update, use the
 same controller with `-RestartOnly` and identical `-FromVersion` and
 `-ToVersion`. Omit package inputs and forced shutdown. This reuses the same
 clean-exit and one-shot same-task continuation checks, without installing an MSIX.
+If Desktop is opened separately while the old runtime is still releasing, the
+controller stops and records the conflict without closing the reopened Desktop.
 
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.
