@@ -1,5 +1,17 @@
+function Assert-CodexDesktopBrowserAccessTrialVersion {
+    param([string]$PackageVersion)
+    if ($PackageVersion -ne '26.1029.7803.0') {
+        throw 'The Desktop browser access trial is limited to the inspected Desktop package 26.1029.7803.0.'
+    }
+}
+
 function New-CodexDesktopStartInfo {
-    param([Parameter(Mandatory)][string]$DesktopExecutable,[Parameter(Mandatory)][string]$WebSocketUrl)
+    param(
+        [Parameter(Mandatory)][string]$DesktopExecutable,
+        [Parameter(Mandatory)][string]$WebSocketUrl,
+        [string]$PackageVersion,
+        [switch]$DesktopBrowserAccessTrial
+    )
     if($WebSocketUrl -notmatch '^ws://127\.0\.0\.1:\d+$'){throw 'Desktop startup requires the exact local shared endpoint.'}
     $info=[Diagnostics.ProcessStartInfo]::new()
     $info.FileName=[IO.Path]::GetFullPath($DesktopExecutable)
@@ -10,6 +22,13 @@ function New-CodexDesktopStartInfo {
     $info.EnvironmentVariables['CODEX_APP_SERVER_WS_URL']=$WebSocketUrl
     $info.EnvironmentVariables.Remove('CODEX_APP_SERVER_FORCE_CLI')
     $info.EnvironmentVariables.Remove('CODEX_APP_SERVER_USE_LOCAL_DAEMON')
+    if ($DesktopBrowserAccessTrial) {
+        Assert-CodexDesktopBrowserAccessTrialVersion $PackageVersion
+        # In this build the explicit WebSocket still selects the transport.
+        # Desktop itself can attach its signed access context to cua_repl in
+        # Desktop-originated threads; the launcher never reads that context.
+        $info.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON']='1'
+    }
     $info
 }
 

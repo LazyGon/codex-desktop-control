@@ -356,14 +356,20 @@ test('restart-only admits only the exact same version without installer or force
   const script = [
     "$ErrorActionPreference='Stop'",
     source.slice(start, end),
+    '. ' + quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1')),
     '$CleanupExitedDesktopHelpers=$false',
+    '$DesktopBrowserAccessTrial=$false',
     "$FromVersion='26.1029.7803.0'",
     "function Check-Mode($RestartOnly,$ToVersion,$PackagePath,$PackageSha256,$AllowTargetApplicationShutdown) { try { Assert-RefreshMode; $true } catch { $false } }",
     "$results=@((Check-Mode $true $FromVersion '' '' $false),(Check-Mode $true '26.1030.1.0' '' '' $false),(Check-Mode $true $FromVersion 'package.msix' '' $false),(Check-Mode $true $FromVersion '' 'hash' $false),(Check-Mode $true $FromVersion '' '' $true),(Check-Mode $false $FromVersion '' '' $false),(Check-Mode $false '26.1030.1.0' '' '' $false))",
+    '$DesktopBrowserAccessTrial=$true',
+    "$results+=@((Check-Mode $true $FromVersion '' '' $false),(Check-Mode $false '26.1030.1.0' '' '' $false))",
+    "$FromVersion='26.1030.1.0'",
+    "$results+=(Check-Mode $true $FromVersion '' '' $false)",
     'ConvertTo-Json -InputObject $results -Compress',
   ].join('\n');
   const output = execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true});
-  assert.deepEqual(JSON.parse(output), [true,false,false,false,false,false,true]);
+  assert.deepEqual(JSON.parse(output), [true,false,false,false,false,false,true,true,false,false]);
 });
 
 test('encoded scheduled controller is one invocation with all arguments in Windows PowerShell', {
@@ -378,6 +384,7 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
     "$PackageSha256='" + 'a'.repeat(64) + "'",
     '$RestartOnly=$false',
     '$CleanupExitedDesktopHelpers=$false',
+    '$DesktopBrowserAccessTrial=$true',
     '$AllowTargetApplicationShutdown=$true',
     "$WaitForThreadId='00000000-0000-0000-0000-000000000001'",
     "$WaitForTurnId='00000000-0000-0000-0000-000000000002'",
@@ -394,6 +401,6 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
   assert.equal(result.statements, 1);
   assert.equal(result.errors, 0);
   assert.deepEqual(result.parameters, ['WaitForThreadId','WaitForTurnId','FromVersion','ToVersion',
-    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','RestartOnly','CleanupExitedDesktopHelpers','AllowTargetApplicationShutdown',
+    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','RestartOnly','CleanupExitedDesktopHelpers','DesktopBrowserAccessTrial','AllowTargetApplicationShutdown',
     'ScheduledController','RefreshRequestId','ScheduledTaskName']);
 });

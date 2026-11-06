@@ -48,7 +48,7 @@ test('nonzero legacy exit requires approval in both the manual request and obser
 
 test('the scheduled handoff starts only after a clean exit and does not repeat an unconfirmed launch', { skip: !windows }, t => {
   const dir = fixture(t);
-  for (const file of ['Complete-CodexRuntimeHandoff.ps1', 'CodexRuntimeHandoff.ps1', 'CodexDesktopPackage.ps1', 'CodexRuntimeCache.ps1']) {
+  for (const file of ['Complete-CodexRuntimeHandoff.ps1', 'CodexRuntimeHandoff.ps1', 'CodexDesktopPackage.ps1', 'CodexRuntimeCache.ps1', 'CodexDesktopStartup.ps1']) {
     fs.copyFileSync(path.join(launcher, file), path.join(dir, file));
   }
   const app = path.join(dir, 'package', 'app');
@@ -67,16 +67,17 @@ test('the scheduled handoff starts only after a clean exit and does not repeat a
   const launched = path.join(dir, 'launch.txt');
   fs.mkdirSync(job, { recursive: true });
   fs.writeFileSync(path.join(dir, 'Start-CodexShared.ps1'),
-    "Add-Content -LiteralPath " + quote(launched) + " -Value launched; exit 1");
+    "Add-Content -LiteralPath " + quote(launched) + " -Value ($args -join ' '); exit 1");
   const request = path.join(job, 'request.json');
-  fs.writeFileSync(request, JSON.stringify({
+  const baseRequest = {
     id, port: 52819, fromVersion: '26.1027.3384.0', toVersion: version, family,
     desktop: path.join(app, 'ChatGPT.exe'),
     serverSha256: createHash('sha256').update(bytes).digest('hex').toUpperCase(),
     oldServer: { pid: 2147483647, startedUtcTicks: '1' },
     oldSupervisor: { pid: 2147483646, startedUtcTicks: '1' },
     bridgeWasRunning: false, startupStallSeconds: 1,
-  }));
+  };
+  fs.writeFileSync(request, JSON.stringify({ ...baseRequest, desktopBrowserAccessTrial: true }));
   const worker = path.join(dir, 'Complete-CodexRuntimeHandoff.ps1');
   const invoke = () => run(`
     function Get-AppxPackage { param($Name) [pscustomobject]@{
@@ -89,6 +90,9 @@ test('the scheduled handoff starts only after a clean exit and does not repeat a
     catch { [Console]::WriteLine($_.Exception.Message) }
   `);
   const drain = path.join(job, 'drain.json');
+  assert.match(invoke(), /limited to the inspected Desktop package/);
+  assert.equal(fs.existsSync(launched), false);
+  fs.writeFileSync(request, JSON.stringify({ ...baseRequest, fromVersion: version, desktopBrowserAccessTrial: true }));
   fs.writeFileSync(drain, JSON.stringify({ phase: 'exited', exitCode: 1 }));
   assert.match(invoke(), /did not record a clean exit/);
   assert.equal(fs.existsSync(launched), false);
@@ -97,9 +101,12 @@ test('the scheduled handoff starts only after a clean exit and does not repeat a
   const record = path.join(job, 'result.json');
   const first = JSON.parse(fs.readFileSync(record, 'utf8'));
   assert.ok(first.launchRequestedAt);
+  assert.equal(first.desktopBrowserAccessTrial, true);
   assert.match(invoke(), /No verified replacement/);
   assert.equal(JSON.parse(fs.readFileSync(record, 'utf8')).launchRequestedAt, first.launchRequestedAt);
-  assert.deepEqual(fs.readFileSync(launched, 'utf8').trim().split(/\r?\n/), ['launched']);
+  const launches = fs.readFileSync(launched, 'utf8').trim().split(/\r?\n/);
+  assert.equal(launches.length, 1);
+  assert.match(launches[0], /(?:^| )-DesktopBrowserAccessTrial(?: |$)/);
 });
 
 test('shutdown reaches only the pinned isolated process and allows it to finish in-flight work', { skip: !windows }, t => {

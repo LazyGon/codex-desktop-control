@@ -151,12 +151,14 @@ function Start-DesktopOnRuntime {
     param(
         [Parameter(Mandatory)][object]$PackageInfo,
         [Parameter(Mandatory)][object]$RuntimeState,
-        [Parameter(Mandatory)][int]$PortNumber
+        [Parameter(Mandatory)][int]$PortNumber,
+        [switch]$DesktopBrowserAccessTrial
     )
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopExecutable' -Value $PackageInfo.DesktopExecutable
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value $false
     Write-RuntimeState -State $RuntimeState
 
     Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
@@ -169,7 +171,9 @@ function Start-DesktopOnRuntime {
     Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
     # Explorer/package activation can race environment broadcasts at logon.
     # Start the installed package executable with an explicit inherited endpoint.
-    $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable -WebSocketUrl $RuntimeState.websocketUrl
+    $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable `
+        -WebSocketUrl $RuntimeState.websocketUrl -PackageVersion $PackageInfo.Version `
+        -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial
     $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
     if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
     Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"
@@ -205,6 +209,7 @@ function Start-DesktopOnRuntime {
     }
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
+    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value ([bool]$DesktopBrowserAccessTrial)
     Set-RuntimeStateValue `
         -State $RuntimeState `
         -Name 'desktopProcessIds' `

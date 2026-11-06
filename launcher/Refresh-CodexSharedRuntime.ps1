@@ -31,6 +31,7 @@ param(
 
     [switch]$RestartOnly,
     [switch]$CleanupExitedDesktopHelpers,
+    [switch]$DesktopBrowserAccessTrial,
 
     # Requires explicit Owner approval for this update. Never stop dependency
     # packages or use a general process-kill fallback.
@@ -71,6 +72,7 @@ if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
 . $desktopShutdownScript
 . (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')
 . (Join-Path $launcherRoot 'CodexDesktopPackage.ps1')
+. (Join-Path $launcherRoot 'CodexDesktopStartup.ps1')
 . (Join-Path $launcherRoot 'CodexDesktopHelpers.ps1')
 
 function Write-RefreshLog {
@@ -207,6 +209,7 @@ function Assert-OwnedRefreshTask {
                 "(?:-PackagePath '(?:[^']|'')*' -PackageSha256 '(?:[A-Fa-f0-9]{64})?' )?" +
                 '(?:-RestartOnly:\$(?:True|False) )?' +
                 '(?:-CleanupExitedDesktopHelpers:\$(?:True|False) )?' +
+                '(?:-DesktopBrowserAccessTrial:\$(?:True|False) )?' +
                 '(?:-AllowTargetApplicationShutdown:\$(?:True|False) )?' +
                 '-ScheduledController ' +
                 "-RefreshRequestId '[0-9a-f-]{36}' " +
@@ -269,6 +272,9 @@ function Wait-ForControllerAcceptance {
                 throw 'The refresh receipt was replaced before controller acceptance.'
             }
             if ($receipt.phase -eq 'controller-accepted') {
+                if ($receipt.desktopBrowserAccessTrial -ne [bool]$DesktopBrowserAccessTrial) {
+                    throw 'The accepted receipt does not match the requested Desktop browser access mode.'
+                }
                 return $receipt
             }
             if ($receipt.phase -ne 'armed') {
@@ -300,6 +306,7 @@ function New-RefreshControllerCommand {
         "-PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256'",
         "-RestartOnly:`$$([bool]$RestartOnly)",
         "-CleanupExitedDesktopHelpers:`$$([bool]$CleanupExitedDesktopHelpers)",
+        "-DesktopBrowserAccessTrial:`$$([bool]$DesktopBrowserAccessTrial)",
         "-AllowTargetApplicationShutdown:`$$([bool]$AllowTargetApplicationShutdown)",
         '-ScheduledController',
         "-RefreshRequestId '$RequestId'",
@@ -388,6 +395,7 @@ function Start-DetachedRefreshController {
                     $receipt.toVersion -eq $ToVersion -and
                     $receipt.restartOnly -eq [bool]$RestartOnly -and
                     $receipt.cleanupExitedDesktopHelpers -eq [bool]$CleanupExitedDesktopHelpers -and
+                    $receipt.desktopBrowserAccessTrial -eq [bool]$DesktopBrowserAccessTrial -and
                     $receipt.allowTargetApplicationShutdown -eq [bool]$AllowTargetApplicationShutdown
                 ) {
                     $acceptedAt = [DateTimeOffset]::Now.ToString('o')
@@ -404,6 +412,7 @@ function Start-DetachedRefreshController {
                         toVersion = $ToVersion
                         restartOnly = [bool]$RestartOnly
                         cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
+                        desktopBrowserAccessTrial = [bool]$DesktopBrowserAccessTrial
                         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
                         armedAt = $receipt.armedAt
                         controllerAcceptedAt = $acceptedAt
@@ -668,6 +677,7 @@ function Complete-RegisteredRefresh {
         desktop = $Package.DesktopExecutable; family = $Package.PackageFamilyName
         serverSha256 = Get-CodexFileSha256 $Package.BundledServerExecutable
         oldServer = $OldServer; oldSupervisor = $OldSupervisor; bridgeWasRunning = $bridgeWasRunning
+        desktopBrowserAccessTrial = [bool]$DesktopBrowserAccessTrial
         ownerApprovedLegacyUpdate = [bool]$legacyUpdate
         startupStallSeconds = $RestartTimeoutSeconds
     }
@@ -683,7 +693,8 @@ function Send-CompletionCallback {
     $resultDetails = if ($FailureMessage) { "Refresh failed: $FailureMessage" } else {
         "new server PID: $($NewState.serverProcessId)`nnew server SHA-256: $($NewState.serverSha256)"
     }
-    $operation = if ($RestartOnly) { 'same-version restart' } else { 'package update' }
+    $operation = if ($DesktopBrowserAccessTrial) { 'same-version restart for the Desktop browser access trial' }
+        elseif ($RestartOnly) { 'same-version restart' } else { 'package update' }
     $goalPausePath = Join-Path (Split-Path -Parent $resultPath) "runtime-refresh-history/$RefreshRequestId-goal-pause.json"
     $message = @"
 Shared Codex runtime refresh settled. Verify the receipt before claiming success.
@@ -715,6 +726,11 @@ If the exact waiter-owned goal pause receipt exists at $goalPausePath, verify it
 }
 
 function Assert-RefreshMode {
+    if ($DesktopBrowserAccessTrial) {
+        if (-not $RestartOnly) { throw 'The Desktop browser access trial requires a same-version restart.' }
+        Assert-CodexDesktopBrowserAccessTrialVersion $FromVersion
+        Assert-CodexDesktopBrowserAccessTrialVersion $ToVersion
+    }
     if ($CleanupExitedDesktopHelpers -and -not $RestartOnly) {
         throw 'Opt-in residual helper cleanup applies only to a same-version restart.'
     }
@@ -775,6 +791,7 @@ try {
         toVersion = $ToVersion
         restartOnly = [bool]$RestartOnly
         cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
+        desktopBrowserAccessTrial = [bool]$DesktopBrowserAccessTrial
         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
         armedAt = [DateTimeOffset]::Now.ToString('o')
         logPath = $logPath
@@ -917,6 +934,7 @@ try {
             toVersion = $ToVersion
             restartOnly = [bool]$RestartOnly
             cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
+            desktopBrowserAccessTrial = [bool]$DesktopBrowserAccessTrial
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             serverSha256 = $newState.serverSha256
             desktopConnectionVerified = $newState.desktopConnectionVerified
@@ -967,6 +985,7 @@ try {
             toVersion = $ToVersion
             restartOnly = [bool]$RestartOnly
             cleanupExitedDesktopHelpers = [bool]$CleanupExitedDesktopHelpers
+            desktopBrowserAccessTrial = [bool]$DesktopBrowserAccessTrial
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             error = $message
             recoveredVersion = $recoveredVersion

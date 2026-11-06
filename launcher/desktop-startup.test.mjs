@@ -12,6 +12,11 @@ test('Desktop receives an explicit endpoint without Explorer or permanent settin
  const value=JSON.parse(run("$env:CODEX_APP_SERVER_FORCE_CLI='1'; $env:CODEX_APP_SERVER_USE_LOCAL_DAEMON='1'; $env:CODEX_APP_SERVER_WS_URL='ws://127.0.0.1:1'; $i=New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798'; @{exe=$i.FileName;shell=$i.UseShellExecute;endpoint=$i.EnvironmentVariables['CODEX_APP_SERVER_WS_URL'];force=$i.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_FORCE_CLI');daemon=$i.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_USE_LOCAL_DAEMON');parentEndpoint=$env:CODEX_APP_SERVER_WS_URL}|ConvertTo-Json"));
  assert.equal(value.shell,false);assert.equal(value.endpoint,'ws://127.0.0.1:8798');assert.equal(value.force,false);assert.equal(value.daemon,false);assert.equal(value.parentEndpoint,'ws://127.0.0.1:1');
 });
+test('the version-pinned browser access trial changes only the launched Desktop environment',()=>{
+ const value=JSON.parse(run("$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON='parent'; $i=New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion '26.1029.7803.0' -DesktopBrowserAccessTrial; @{endpoint=$i.EnvironmentVariables['CODEX_APP_SERVER_WS_URL'];trial=$i.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'];parent=$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON}|ConvertTo-Json"));
+ assert.deepEqual(value,{endpoint:'ws://127.0.0.1:8798',trial:'1',parent:'parent'});
+ assert.equal(run("try{New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion '26.1030.1.0' -DesktopBrowserAccessTrial;'unexpected'}catch{'rejected'}"),'rejected');
+});
 test('a healthy cold startup is not failed just because thirty seconds elapsed',()=>{
  assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -Connected $false -Cancelled $false -ElapsedSeconds 120'),'pending');
  assert.equal(run('Get-CodexDesktopConnectionDecision -ServerAlive $true -DesktopAlive $true -Connected $true -Cancelled $false -ElapsedSeconds 120'),'ready');

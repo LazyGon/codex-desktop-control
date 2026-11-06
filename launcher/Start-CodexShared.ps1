@@ -18,6 +18,7 @@ param(
     [switch]$InteractiveWorker,
 
     [switch]$RuntimeSupervisor,
+    [switch]$DesktopBrowserAccessTrial,
 
     [int]$ProgressOwnerProcessId = 0,
 
@@ -577,6 +578,10 @@ function Invoke-BridgeRetry {
     throw "Discord Bridge の再試行が 5 分以内に完了しませんでした。$($status.AppServerStatus)"
 }
 
+if ($DesktopBrowserAccessTrial -and (-not $RuntimeSupervisor -or $InteractiveWorker -or $SelfTest -or $RetryStep -ne 'All')) {
+    throw 'The Desktop browser access trial requires a full runtime supervisor launch.'
+}
+
 if ($InteractiveWorker) {
     try { exit (Invoke-InteractiveLauncherWorker) }
     catch {
@@ -593,6 +598,7 @@ try {
         exit 0
     }
     $packageInfo = Get-CodexPackageRuntime -Package (Get-CodexDesktopPackageInfo -RequireBundledRuntime) -CacheRoot $cacheRoot
+    if ($DesktopBrowserAccessTrial) { Assert-CodexDesktopBrowserAccessTrialVersion $packageInfo.Version }
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
 
     $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
@@ -612,6 +618,9 @@ try {
     }
 
     $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
+    if ($DesktopBrowserAccessTrial -and $existingDesktopRoots.Count -gt 0) {
+        throw 'Desktop is already running. Its launch settings were not changed.'
+    }
     if (-not $SelfTest -and $RetryStep -eq 'Desktop' -and $existingDesktopRoots.Count -gt 0) {
         $healthy = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port -SuppressFailureLog
         if ($null -eq $healthy -or -not (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port)) {
@@ -646,6 +655,7 @@ try {
     elseif (-not $SelfTest) {
         $reusableRuntime = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port
         if ($null -ne $reusableRuntime) {
+            if ($DesktopBrowserAccessTrial) { throw 'Another App Server is still running. The trial was not applied.' }
             Write-LauncherLog "Reusing healthy owned app-server. pid=$($reusableRuntime.serverProcessId)"
             $null = Start-DesktopOnRuntime `
                 -PackageInfo $packageInfo `
@@ -668,6 +678,7 @@ try {
             $ownsMutex = $true
         }
         if (-not $ownsMutex) {
+            if ($DesktopBrowserAccessTrial) { throw 'Another launcher owns the shared runtime. The trial was not applied.' }
             Write-LauncherProgress -Phase 'waiting-for-owner' -Summary '先に開始された共有ランチャーの完了を待っています。重複起動は行いません。'
             Write-LauncherLog (
                 "Another launcher owns port $Port; waiting for its runtime to complete exact Desktop verification."
@@ -775,7 +786,8 @@ try {
             $null = Start-DesktopOnRuntime `
                 -PackageInfo $packageInfo `
                 -RuntimeState $runtimeState `
-                -PortNumber $Port
+                -PortNumber $Port `
+                -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial
             Invoke-LauncherSignal -Kind Ready
 
             $exit = Wait-CodexDesktopRuntimeExit -Runtime $runtimeState -Server $serverProcess -StateRoot $stateRoot -CacheRoot $cacheRoot -StartupStallSeconds $DesktopConnectionStallSeconds -Log { param($Message) Write-LauncherLog $Message }

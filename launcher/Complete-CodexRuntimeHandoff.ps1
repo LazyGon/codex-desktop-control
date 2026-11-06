@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CodexRuntimeHandoff.ps1')
 . (Join-Path $PSScriptRoot 'CodexDesktopPackage.ps1')
 . (Join-Path $PSScriptRoot 'CodexRuntimeCache.ps1')
+. (Join-Path $PSScriptRoot 'CodexDesktopStartup.ps1')
 
 $stateRoot = Join-Path $PSScriptRoot 'state'
 $handoffs = Join-Path $stateRoot 'runtime-handoffs'
@@ -18,6 +19,12 @@ if ((Split-Path -Parent $directory) -ne $handoffs -or (Split-Path -Leaf $Request
 $request = Read-CodexHandoffJson (Join-Path $directory 'request.json')
 if (-not $request -or $request.id -ne $id -or $request.port -lt 1024 -or $request.port -gt 65535) {
     throw 'The handoff request is missing or does not match its recorded identity.'
+}
+$browserAccessTrial = [bool]($request.PSObject.Properties['desktopBrowserAccessTrial'] -and
+    $request.desktopBrowserAccessTrial -eq $true)
+if ($browserAccessTrial) {
+    Assert-CodexDesktopBrowserAccessTrialVersion $request.fromVersion
+    Assert-CodexDesktopBrowserAccessTrialVersion $request.toVersion
 }
 $port = [int]$request.port
 $endpoint = "ws://127.0.0.1:$port"
@@ -58,6 +65,11 @@ function Get-VerifiedReplacement {
     if ($live.serverSha256 -ne $request.serverSha256 -or (Get-CodexFileSha256 $server.Path) -ne $request.serverSha256) {
         throw 'The live server does not match the registered Desktop bundle.'
     }
+    $liveBrowserAccessTrial = [bool]($live.PSObject.Properties['desktopBrowserAccessTrial'] -and
+        $live.desktopBrowserAccessTrial -eq $true)
+    if ($liveBrowserAccessTrial -ne $browserAccessTrial) {
+        throw 'The verified runtime was started with a different Desktop browser access mode. It was left running.'
+    }
     @{
         server = Get-CodexHandoffActor $server
         supervisor = Get-CodexHandoffActor $supervisor
@@ -77,6 +89,7 @@ try {
     $result = [ordered]@{
         id = $id; fromVersion = $request.fromVersion; toVersion = $request.toVersion
         bridgeWasRunning = $request.bridgeWasRunning
+        desktopBrowserAccessTrial = $browserAccessTrial
         launchRequestedAt = if ($previous) { $previous.launchRequestedAt } else { $null }
         launchActor = if ($previous -and $previous.PSObject.Properties['launchActor']) { $previous.launchActor } else { $null }
     }
@@ -111,8 +124,10 @@ try {
                 $result.launchRequestedAt = [DateTimeOffset]::UtcNow.ToString('o')
                 Save-HandoffResult 'launch-requested'
                 $startup = Join-Path $PSScriptRoot 'Start-CodexShared.ps1'
-                $child = Start-CodexHandoffChild ('"{0}" -Port {1} -NoDialogs -RuntimeSupervisor -ProgressPath "{2}" -DesktopConnectionStallSeconds {3}' -f
-                    $startup, $port, $progress, $request.startupStallSeconds)
+                $startupArguments = '"{0}" -Port {1} -NoDialogs -RuntimeSupervisor -ProgressPath "{2}" -DesktopConnectionStallSeconds {3}' -f
+                    $startup, $port, $progress, $request.startupStallSeconds
+                if ($browserAccessTrial) { $startupArguments += ' -DesktopBrowserAccessTrial' }
+                $child = Start-CodexHandoffChild $startupArguments
                 try { $result.launchActor = Get-CodexHandoffActor $child }
                 catch { if (-not $child.HasExited) { throw } }
                 Save-HandoffResult 'starting'
