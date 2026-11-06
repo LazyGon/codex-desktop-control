@@ -132,37 +132,47 @@ function walkFiles(root, predicate, results = []) {
   return results;
 }
 
+export function findDesktopLogFiles(localAppData, packageFamilyName) {
+  const roots = [
+    path.join(localAppData, 'Codex', 'Logs'),
+    path.join(localAppData, 'Packages', packageFamilyName, 'LocalCache', 'Local', 'Codex', 'Logs'),
+  ].filter(root => fs.statSync(root, { throwIfNoEntry: false })?.isDirectory());
+  if (roots.length === 0) {
+    throw new Error('The current Desktop log directory was not found.');
+  }
+  return roots.flatMap(root => walkFiles(root, name => name.toLowerCase().endsWith('.log')));
+}
+
 export function selectNativePipeFromLogs(logFiles, processId, creationTimeUtc) {
   const expectedName = new RegExp(`-${processId}-t0-i1-[^-]+-\\d+\\.log$`, 'i');
   const processStarted = Date.parse(creationTimeUtc);
+  if (!Number.isFinite(processStarted)) {
+    throw new Error('The connected Desktop process has no verified start time.');
+  }
   const candidates = logFiles
     .filter(file => expectedName.test(path.basename(file)))
     .map(file => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
     .sort((left, right) => right.mtimeMs - left.mtimeMs);
 
+  const pipes = new Map();
   for (const candidate of candidates) {
-    const handle = fs.openSync(candidate.file, 'r');
-    try {
-      const buffer = Buffer.alloc(256 * 1024);
-      const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
-      const content = buffer.subarray(0, bytesRead).toString('utf8');
-      const matches = [...content.matchAll(
-        /^(\S+)\s+info\s+\[dynamic-app-tools-native-pipe\]\s+dynamic_app_tools_listening\s+pipePath=(\\\\\.\\pipe\\codex-browser-use-[0-9a-f-]+)\s*$/gim,
-      )];
-      if (matches.length !== 1) continue;
-      const eventTime = Date.parse(matches[0][1]);
-      if (
-        !Number.isFinite(eventTime)
-        || eventTime < processStarted - 5_000
-        || eventTime > processStarted + 120_000
-      ) {
-        continue;
+    const content = fs.readFileSync(candidate.file, 'utf8');
+    for (const match of content.matchAll(
+      /^(\S+)\s+info\s+\[dynamic-app-tools-native-pipe\]\s+dynamic_app_tools_listening\s+pipePath=(\\\\\.\\pipe\\codex-(?:app-tools|browser-use)-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\s*$/gim,
+    )) {
+      const eventTime = Date.parse(match[1]);
+      if (!Number.isFinite(eventTime) || eventTime < processStarted) continue;
+      const pipePath = match[2];
+      const key = pipePath.toLowerCase();
+      if (!pipes.has(key)) {
+        pipes.set(key, { logPath: candidate.file, pipePath });
       }
-      return { logPath: candidate.file, pipePath: matches[0][2] };
-    } finally {
-      fs.closeSync(handle);
     }
   }
+  if (pipes.size > 1) {
+    throw new Error('Conflicting native app-tools pipes were announced for the connected Desktop process.');
+  }
+  if (pipes.size === 1) return pipes.values().next().value;
   throw new Error('No current native app-tools pipe was found for the connected Desktop process.');
 }
 
@@ -340,19 +350,7 @@ export function resolveBridgeRuntime(statePath = defaultStatePath) {
   const packageFamilyName = state.packageFamilyName
     ?? derivePackageFamilyName(state.desktopExecutable);
   const localAppData = requireNonEmptyString(process.env.LOCALAPPDATA, 'LOCALAPPDATA');
-  const logRoot = path.win32.join(
-    localAppData,
-    'Packages',
-    packageFamilyName,
-    'LocalCache',
-    'Local',
-    'Codex',
-    'Logs',
-  );
-  if (!fs.statSync(logRoot, { throwIfNoEntry: false })?.isDirectory()) {
-    throw new Error('The current Desktop log directory was not found.');
-  }
-  const logFiles = walkFiles(logRoot, name => name.toLowerCase().endsWith('.log'));
+  const logFiles = findDesktopLogFiles(localAppData, packageFamilyName);
   const nativePipe = selectNativePipeFromLogs(logFiles, desktop.processId, desktop.creationTimeUtc);
   assertNamedPipeExists(nativePipe.pipePath);
   const bundled = resolveBundledPaths(state.desktopExecutable);

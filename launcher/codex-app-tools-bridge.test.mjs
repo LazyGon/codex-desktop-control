@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   assertSharedServerOwner,
   derivePackageFamilyName,
+  findDesktopLogFiles,
   parseRuntimeState,
   resolveBundledPaths,
   selectDesktopConnection,
@@ -104,6 +105,35 @@ test('shared bridge binds the native pipe to the current main-process log', (con
     () => selectNativePipeFromLogs([current], 4321, '2026-08-27T20:46:54.800Z'),
     /No current native app-tools pipe/,
   );
+});
+
+test('shared bridge discovers the modern app-tools pipe in the per-user Desktop log tree', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-app-tools-roots-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const family = 'OpenAI.Codex_2p2nqsd0c76g0';
+  const userLogs = path.join(directory, 'Codex', 'Logs', '2026', '11', '06');
+  const packageLogs = path.join(directory, 'Packages', family, 'LocalCache', 'Local', 'Codex', 'Logs');
+  const basename = 'codex-desktop-id-4928-t0-i1-003411-0.log';
+  const current = path.join(userLogs, basename);
+  const legacy = path.join(packageLogs, basename);
+  fs.mkdirSync(userLogs, { recursive: true });
+  fs.mkdirSync(packageLogs, { recursive: true });
+  const pipe = String.raw`\\.\pipe\codex-app-tools-11111111-2222-3333-4444-555555555555`;
+  const legacyPipe = String.raw`\\.\pipe\codex-browser-use-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
+  const announce = (when, value) => `${when} info [dynamic-app-tools-native-pipe] dynamic_app_tools_listening pipePath=${value}\n`;
+  const currentEvent = announce('2026-11-06T00:34:24.401Z', pipe);
+  fs.writeFileSync(current, currentEvent + `2026-11-06T00:34:36.885Z info [browser-use-native-pipe-server] browser-use pipePath=${legacyPipe}\n`);
+  fs.writeFileSync(legacy, announce('2026-11-06T00:34:09.900Z', legacyPipe));
+  const files = findDesktopLogFiles(directory, family);
+  assert.deepEqual(new Set(files), new Set([current, legacy]));
+  const started = '2026-11-06T00:34:10.187Z';
+  assert.deepEqual(selectNativePipeFromLogs(files, 4928, started), { logPath: current, pipePath: pipe });
+
+  fs.writeFileSync(legacy, currentEvent);
+  assert.equal(selectNativePipeFromLogs(files, 4928, started).pipePath, pipe);
+
+  fs.writeFileSync(legacy, announce('2026-11-06T00:34:24.401Z', legacyPipe));
+  assert.throws(() => selectNativePipeFromLogs(files, 4928, started), /Conflicting native app-tools pipes/);
 });
 
 test('shared bridge derives and verifies the installed Desktop plugin layout', (context) => {
