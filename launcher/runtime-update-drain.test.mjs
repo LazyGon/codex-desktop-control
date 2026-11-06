@@ -312,6 +312,25 @@ test('refresh requests normal application shutdown once and respects a veto', {
   }
 });
 
+test('restart-only admits only the exact same version without installer or force inputs', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const start = source.indexOf('function Assert-RefreshMode {');
+  const end = source.indexOf('\nAssert-RefreshMode\n', start);
+  assert.ok(start >= 0 && end > start);
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    source.slice(start, end),
+    "$FromVersion='26.1029.7803.0'",
+    "function Check-Mode($RestartOnly,$ToVersion,$PackagePath,$PackageSha256,$AllowTargetApplicationShutdown) { try { Assert-RefreshMode; $true } catch { $false } }",
+    "$results=@((Check-Mode $true $FromVersion '' '' $false),(Check-Mode $true '26.1030.1.0' '' '' $false),(Check-Mode $true $FromVersion 'package.msix' '' $false),(Check-Mode $true $FromVersion '' 'hash' $false),(Check-Mode $true $FromVersion '' '' $true),(Check-Mode $false $FromVersion '' '' $false),(Check-Mode $false '26.1030.1.0' '' '' $false))",
+    'ConvertTo-Json -InputObject $results -Compress',
+  ].join('\n');
+  const output = execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true});
+  assert.deepEqual(JSON.parse(output), [true,false,false,false,false,false,true]);
+});
+
 test('encoded scheduled controller is one invocation with all arguments in Windows PowerShell', {
   skip: process.platform !== 'win32',
 }, () => {
@@ -322,6 +341,7 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
     "$refreshScriptPath='C:\\update folder\\Refresh.ps1'",
     "$PackagePath=\"C:\\Owner's folder\\ChatGPT.msix\"",
     "$PackageSha256='" + 'a'.repeat(64) + "'",
+    '$RestartOnly=$false',
     '$AllowTargetApplicationShutdown=$true',
     "$WaitForThreadId='00000000-0000-0000-0000-000000000001'",
     "$WaitForTurnId='00000000-0000-0000-0000-000000000002'",
@@ -338,6 +358,6 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
   assert.equal(result.statements, 1);
   assert.equal(result.errors, 0);
   assert.deepEqual(result.parameters, ['WaitForThreadId','WaitForTurnId','FromVersion','ToVersion',
-    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','AllowTargetApplicationShutdown',
+    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','RestartOnly','AllowTargetApplicationShutdown',
     'ScheduledController','RefreshRequestId','ScheduledTaskName']);
 });

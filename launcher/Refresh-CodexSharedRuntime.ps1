@@ -29,6 +29,8 @@ param(
     [ValidatePattern('^(?:[0-9a-fA-F]{64})?$')]
     [string]$PackageSha256 = '',
 
+    [switch]$RestartOnly,
+
     # Requires explicit Owner approval for this update. Never stop dependency
     # packages or use a general process-kill fallback.
     [switch]$AllowTargetApplicationShutdown,
@@ -201,6 +203,7 @@ function Assert-OwnedRefreshTask {
                 '-RestartTimeoutSeconds [0-9]+ ' +
                 '-DesktopCloseTimeoutSeconds [0-9]+ ' +
                 "(?:-PackagePath '(?:[^']|'')*' -PackageSha256 '(?:[A-Fa-f0-9]{64})?' )?" +
+                '(?:-RestartOnly:\$(?:True|False) )?' +
                 '(?:-AllowTargetApplicationShutdown:\$(?:True|False) )?' +
                 '-ScheduledController ' +
                 "-RefreshRequestId '[0-9a-f-]{36}' " +
@@ -292,6 +295,7 @@ function New-RefreshControllerCommand {
         "-RestartTimeoutSeconds $RestartTimeoutSeconds",
         "-DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds",
         "-PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256'",
+        "-RestartOnly:`$$([bool]$RestartOnly)",
         "-AllowTargetApplicationShutdown:`$$([bool]$AllowTargetApplicationShutdown)",
         '-ScheduledController',
         "-RefreshRequestId '$RequestId'",
@@ -378,6 +382,7 @@ function Start-DetachedRefreshController {
                     $receipt.turnId -eq $WaitForTurnId -and
                     $receipt.fromVersion -eq $FromVersion -and
                     $receipt.toVersion -eq $ToVersion -and
+                    $receipt.restartOnly -eq [bool]$RestartOnly -and
                     $receipt.allowTargetApplicationShutdown -eq [bool]$AllowTargetApplicationShutdown
                 ) {
                     $acceptedAt = [DateTimeOffset]::Now.ToString('o')
@@ -392,6 +397,7 @@ function Start-DetachedRefreshController {
                         turnId = $WaitForTurnId
                         fromVersion = $FromVersion
                         toVersion = $ToVersion
+                        restartOnly = [bool]$RestartOnly
                         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
                         armedAt = $receipt.armedAt
                         controllerAcceptedAt = $acceptedAt
@@ -654,16 +660,18 @@ function Send-CompletionCallback {
     $resultDetails = if ($FailureMessage) { "Refresh failed: $FailureMessage" } else {
         "new server PID: $($NewState.serverProcessId)`nnew server SHA-256: $($NewState.serverSha256)"
     }
+    $operation = if ($RestartOnly) { 'same-version restart' } else { 'package update' }
     $message = @"
 Shared Codex runtime refresh settled. Verify the receipt before claiming success.
 
 from package: $FromVersion
 to package: $ToVersion
+operation: $operation
 request id: $RefreshRequestId
 $resultDetails
 receipt: $resultPath
 
-Verify the receipt, installed package, shared Desktop connection and Discord Bridge, then continue the requested Desktop and shared App Server update. Do not rerun an uncertain operation merely because this callback arrived. No Windows restart or credit policy activation was authorized.
+Verify the receipt, installed package, shared Desktop connection and Discord Bridge, then report the requested operation's result. Do not rerun an uncertain operation merely because this callback arrived. No Windows restart or credit policy activation was authorized.
 "@
     $output = @(
         & $nodeExecutable $drainScript deliver --thread $WaitForThreadId `
@@ -681,6 +689,18 @@ Verify the receipt, installed package, shared Desktop connection and Discord Bri
     $delivery
 }
 
+function Assert-RefreshMode {
+    if ($RestartOnly) {
+        if ($FromVersion -ne $ToVersion -or $PackagePath -or $PackageSha256 -or $AllowTargetApplicationShutdown) {
+            throw 'Restart-only requires the same exact version and disallows installation inputs and forced shutdown.'
+        }
+    }
+    elseif ([version]$ToVersion -le [version]$FromVersion) {
+        throw 'The update target must be newer. For a same-version restart, select RestartOnly explicitly.'
+    }
+}
+
+Assert-RefreshMode
 New-Item -ItemType Directory -Path (Split-Path -Parent $resultPath) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
 
@@ -725,6 +745,7 @@ try {
         turnId = $WaitForTurnId
         fromVersion = $FromVersion
         toVersion = $ToVersion
+        restartOnly = [bool]$RestartOnly
         allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
         armedAt = [DateTimeOffset]::Now.ToString('o')
         logPath = $logPath
@@ -744,13 +765,13 @@ try {
         }
 
         if ((Get-OptionalObjectProperty $oldState 'appServerGracefulShutdown') -ne $true) {
+            if ($RestartOnly) { throw 'The running AppServer does not support a verified normal shutdown.' }
             if (-not $AllowTargetApplicationShutdown -or -not $PackagePath) {
                 throw 'The legacy runtime requires an official update artifact and explicit Owner approval for package-targeted shutdown.'
             }
             $legacyUpdate = $true
             Write-RefreshLog 'Owner-approved legacy migration: wait for loaded work to become idle, then let the existing supervisor release its own runtime.'
         }
-        if ([version]$ToVersion -le [version]$FromVersion) { throw 'The refresh target must be newer.' }
         $installed = Get-AppxPackage -Name OpenAI.Codex
         if ($PackagePath) { Assert-OfficialUpdateArtifact $installed }
         elseif ([string]$installed.Version -ne $ToVersion) {
@@ -834,6 +855,7 @@ try {
             newServerProcessId = [int]$newState.serverProcessId
             fromVersion = $FromVersion
             toVersion = $ToVersion
+            restartOnly = [bool]$RestartOnly
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             serverSha256 = $newState.serverSha256
             desktopConnectionVerified = $newState.desktopConnectionVerified
@@ -882,6 +904,7 @@ try {
             turnId = $WaitForTurnId
             fromVersion = $FromVersion
             toVersion = $ToVersion
+            restartOnly = [bool]$RestartOnly
             allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             error = $message
             recoveredVersion = $recoveredVersion

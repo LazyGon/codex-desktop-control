@@ -126,6 +126,11 @@ delivered once to the requesting task; its receipt is
 inspect the actual registered version before any other install attempt.
 Optional observation limits default to zero (no deadline).
 
+For an explicitly authorized normal restart without a package update, use the
+same controller with `-RestartOnly` and identical `-FromVersion` and
+`-ToVersion`. Omit package inputs and forced shutdown. This reuses the same
+clean-exit and one-shot same-task continuation checks, without installing an MSIX.
+
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.
 This uses `ForceTargetApplicationShutdown` only for the verified Codex package,
