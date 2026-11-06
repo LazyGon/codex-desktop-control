@@ -12,6 +12,8 @@
    starts Desktop.
 4. Wait for two ascending tones. They mean the Desktop connection to the
    shared app-server was verified.
+   The launcher reads the current size from an open Desktop log handle; the
+   directory listing can lag behind handshake records already in the file.
 5. Two descending tones on exit mean an app-server owned by that launcher
    session and its transient environment were cleaned up. A Desktop-only attach
    does not take over or clean up the existing server.

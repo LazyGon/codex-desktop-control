@@ -80,3 +80,34 @@ test('startup requires both a WebSocket handshake and local initialization from 
   fs.rmSync(temporary,{recursive:true,force:true});
  }
 });
+
+test('Desktop readiness reads appended handshake lines even when the directory listing still reports the old size', () => {
+ const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'codex-startup-stale-size-'));
+ try {
+  const created=new Date(Date.now()-1000), stamp=new Date().toISOString();
+  const day=[created.getFullYear(),String(created.getMonth()+1).padStart(2,'0'),String(created.getDate()).padStart(2,'0')].join('/');
+  const dir=path.join(temporary,'Codex','Logs',day);
+  fs.mkdirSync(dir,{recursive:true});
+  const log=path.join(dir,'codex-desktop-fixture-101-t0-0.log');
+  const initial=stamp+' info [AppServerConnection] Starting app-server connection hostId=local transport=websocket\n';
+  const ready=stamp+' info [AppServerConnection] initialize_handshake_result outcome=success transportKind=websocket\n'
+    +stamp+' info [AppServerConnection] app_server_connection.state_changed hostId=local initialized=true next=connected pendingClientRequests=0\n';
+  fs.writeFileSync(log,initial);
+  const result=JSON.parse(run([
+   `$env:LOCALAPPDATA=${literal(temporary)}`,
+   `$roots=@([pscustomobject]@{ProcessId=101;CreationDate=[DateTimeOffset]${literal(created.toISOString())}})`,
+   `$script:entry=[pscustomobject]@{FullName=${literal(log)};Length=${Buffer.byteLength(initial)}}`,
+   'function Get-ChildItem { param($LiteralPath,[switch]$Force,[switch]$File,$Filter) $script:entry }',
+   "$package=[pscustomobject]@{PackageFamilyName='fixture'}; $offsets=@{}; $states=@{}",
+   '$before=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   `[IO.File]::AppendAllText(${literal(log)},${literal(ready)})`,
+   '$after=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   '$again=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   "@{stages=@($before,$after,$again);ready=($states.Values -contains 'local-connected')}|ConvertTo-Json",
+  ].join('; ')));
+  assert.deepEqual(result,{stages:[20,50,0],ready:true});
+ } finally {
+  assert.equal(path.dirname(path.resolve(temporary)),path.resolve(os.tmpdir()));
+  fs.rmSync(temporary,{recursive:true,force:true});
+ }
+});

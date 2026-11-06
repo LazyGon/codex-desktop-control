@@ -84,10 +84,11 @@ function Read-CodexDesktopStartupProgress {
             if(-not (Test-Path -LiteralPath $directory -PathType Container)){continue}
             foreach($file in @(Get-ChildItem -LiteralPath $directory -Force -File -Filter ('codex-desktop-*-'+$root.ProcessId+'-t0-*.log'))){
                 $offset=if($Offsets.ContainsKey($file.FullName)){[long]$Offsets[$file.FullName]}else{0L}
-                if($file.Length -le $offset){continue}
                 $stream=[IO.File]::Open($file.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
                 $reader=$null
                 try {
+                    # Directory listings can report an old size while Desktop keeps the log open.
+                    if($stream.Length -le $offset){continue}
                     [void]$stream.Seek($offset,[IO.SeekOrigin]::Begin)
                     $reader=[IO.StreamReader]::new($stream)
                     while(-not $reader.EndOfStream){
