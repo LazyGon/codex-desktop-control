@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, REST } from 'discord.js';
 import {
   bridgeRoot,
   dataDir,
@@ -90,6 +90,7 @@ const controller = new DiscordController({
   config,
   logDir,
   deliveryOutboxDirectory: path.join(dataDir, 'delivery-outbox'),
+  taskMirrorRest: new REST({ ...discordRestOptions(config, discordRestAgent), retries: 0 }).setToken(token),
 });
 const taskListFederation = config.multiPcEnabled ? new TaskListFederation({
   config, token, getLocalTasks: (search) => controller.localTaskInventory(search),

@@ -661,6 +661,12 @@ time is deferred before execution.
   deduplication but are not mentioned automatically.
 - Mentions are disabled in general bot output. Completion notifications allow
   only configured `completionMentionUserIds`; an empty list disables mentions.
+- A confirmed AppServer `thread/deleted` notification is saved before Discord
+  work. The Bridge removes only the exact recorded local task channel after a
+  fresh guild, topic, and task check. A missing task listing alone is not a
+  deletion event. Uncertain channel DELETEs stay fenced in
+  `data/task-mirror-deletions/`; a later read can confirm absence without
+  issuing another DELETE.
 - app-server remains loopback-only and is never tunneled to Discord or a LAN.
 - The app-server protocol and `CODEX_APP_SERVER_WS_URL` integration are
   experimental. The formal launcher and bridge verify connectivity on every

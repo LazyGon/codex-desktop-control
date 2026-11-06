@@ -22,6 +22,7 @@ import {
   ModalBuilder,
   OverwriteType,
   PermissionFlagsBits,
+  Routes,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   TextInputBuilder,
@@ -107,6 +108,7 @@ import {
 } from './split-archive.mjs';
 import { LatestUpdateQueue } from './latest-update-queue.mjs';
 import { TaskChannelCreateJournal } from './task-channel-create-journal.mjs';
+import { TaskMirrorDeletions, missingDeletedThread } from './task-mirror-deletions.mjs';
 import { deliverCardWithSizeFallback } from './card-size-fallback.mjs';
 import { ImageReplayQueue, isPublishedImageCopy } from './published-image.mjs';
 import { codexRetryStatusText } from './communication-error.mjs';
@@ -686,6 +688,7 @@ export class DiscordController {
     deliveryOutbox = null,
     deliveryOutboxDirectory = path.join(logDir, 'delivery-outbox'),
     channelCreateJournal = null,
+    taskMirrorRest = client.rest,
   }) {
     this.client = client;
     this.codex = codex;
@@ -725,6 +728,11 @@ export class DiscordController {
     this.channelCreateJournal = channelCreateJournal ?? new TaskChannelCreateJournal(
       path.join(path.dirname(deliveryOutboxDirectory), 'channel-create-journal'),
     );
+    this.taskMirrorRest = taskMirrorRest;
+    this.taskMirrorDeletions = new TaskMirrorDeletions(
+      path.join(path.dirname(deliveryOutboxDirectory), 'task-mirror-deletions'), config.guildId,
+    );
+    this.deletedMirrorNoticeCleanup = new Set();
     this.discordRecoveryCursorExistedAtConstruction = Boolean(this.deliveryOutbox.recoveryCursor());
     this.deliveryOutbox.initializeRecoveryCursor(discordSnowflakeAt());
     this.transferTextChannelId = stateStore.snapshot?.().infrastructure?.transferTextChannelId ?? null;
@@ -852,6 +860,20 @@ export class DiscordController {
     }));
     this.codex.on('notification', (message) => {
       const eventSequence = ++this.codexEventSequence;
+      if (message.method === 'thread/deleted') {
+        const threadId = message.params?.threadId ?? message.params?.thread?.id;
+        if (this.stopping || !threadId) return;
+        const binding = this.stateStore.binding(threadId);
+        if (binding?.isSubagent) return;
+        try {
+          this.taskMirrorDeletions.observe(threadId, binding);
+          if (binding && !binding.channelId && this.#isBindingHidden(binding)) {
+            this.stateStore.removeBinding(threadId);
+          }
+          this.#queueDeletedTaskMirrors();
+        } catch { this.#log('task-mirror-deletion-record-error', { threadId }); }
+        return;
+      }
       if (!this.stopping && message.method === 'item/completed') {
         try { this.browserInitialization.observe(message.params); }
         catch { this.#log('browser-init-observation-failed', { threadId: message.params?.threadId }); }
@@ -910,6 +932,8 @@ export class DiscordController {
     this.completionRecoveryJobs.clear();
     const pending = [
       ['task-sync', this.taskSyncPromise],
+      ['deleted-task-mirrors', this.deletedMirrorDrain],
+      ...[...this.deletedMirrorNoticeCleanup].map(promise => ['deleted-task-notices', promise]),
       ['browser-initialization', this.browserInitializationPromise],
       ...this.deliveryWorker.pendingWork(),
       ['discord-recovery', this.discordRecoveryPromise],
@@ -969,6 +993,7 @@ export class DiscordController {
     if (removedStaleTransfers > 0) this.#log('file-transfer-cleanup', { removed: removedStaleTransfers });
     this.infrastructureReady = this.#ensureInfrastructure();
     const infrastructure = await this.infrastructureReady;
+    this.#queueDeletedTaskMirrors();
     await infrastructure.guild.commands.set(commandPayload);
     const state = this.stateStore.snapshot();
     if (state.announcedVersion !== '2.0.0') {
@@ -4284,6 +4309,7 @@ export class DiscordController {
     let pollPending = false;
     const run = () => {
       if (this.stopping || !this.codex.connected || pollPending) return;
+      this.#queueDeletedTaskMirrors();
       if (this.codex.subscriptionRestoreInProgress) {
         this.taskSyncAfterSubscriptionRestore = true;
         this.#log('task-sync-deferred-for-subscription-restore', { reason: 'poll' });
@@ -4545,20 +4571,7 @@ export class DiscordController {
     const staleHiddenEntries = [];
     for (const binding of stateBindingSummaries(this.stateStore, { includeHidden: true })) {
       if (this.stopping) return result;
-      if (binding.deleted) {
-        try {
-          const removed = await this.#removeDeletedBindingMirror(binding, context);
-          result.deleted += removed.deleted;
-          result.completionNoticesDeleted += removed.noticesDeleted;
-        } catch (error) {
-          result.failed += 1;
-          this.#log('deleted-task-stale-mirror-removal-error', {
-            threadId: binding.threadId,
-            error: error.stack ?? error.message,
-          });
-        }
-        continue;
-      }
+      if (binding.deleted || this.taskMirrorDeletions.has(binding.threadId)) continue;
       if (hiddenThreadIds.has(binding.threadId)) continue;
       const staleThread = { id: binding.threadId, cwd: binding.cwd };
       const staleProject = projectDescriptorForThread(
@@ -5232,10 +5245,10 @@ export class DiscordController {
     this.#clearCompletionRecovery(threadId, null);
   }
 
-  async #waitForTaskMirrorOperations(threadId, { includeNotificationQueue = true } = {}) {
+  async #waitForTaskMirrorOperations(threadId) {
     const prefix = `${threadId}:`;
     const pending = [
-      includeNotificationQueue ? this.notificationQueues.get(threadId) : null,
+      this.notificationQueues.get(threadId),
       this.subscriptionSyncPromises.get(threadId),
       this.transcriptSyncPromises.get(threadId),
       this.panelSyncPromises.get(`task:${threadId}`),
@@ -5371,44 +5384,6 @@ export class DiscordController {
     } : binding };
     if (!deferPersistence) this.stateStore.hideBindings([hideEntry]);
     return { deleted, noticesDeleted: noticeCount, hideEntry };
-  }
-
-  async #removeDeletedBindingMirror(
-    binding,
-    context,
-    { includeNotificationQueue = true } = {},
-  ) {
-    const waited = await this.#waitForTaskMirrorOperations(
-      binding.threadId,
-      { includeNotificationQueue },
-    );
-    if (!context.completionMessages || waited > 0) {
-      context.completionMessages = await context.completions.messages.fetch({ limit: 100 })
-        .catch(() => context.completionMessages ?? new Map());
-    }
-    binding = this.stateStore.binding(binding.threadId) ?? binding;
-    let channel = binding.channelId ? context.channels.get(binding.channelId) : null;
-    if (!channel && binding.channelId) {
-      channel = await this.client.channels.fetch(binding.channelId).catch(() => null);
-    }
-    if (!channel) {
-      channel = context.channels.find((candidate) => candidate?.type === ChannelType.GuildText
-        && candidate.topic?.includes(`Codex task: ${binding.threadId}`));
-    }
-    const noticesDeleted = await this.#deleteCompletionNoticesForBinding(binding, context);
-    let deleted = 0;
-    if (channel) {
-      await channel.delete('Remove the Discord mirror for a deleted Codex task');
-      context.channels.delete(channel.id);
-      deleted = 1;
-    }
-    for (const subagent of this.stateStore.subagentThreads?.() ?? []) {
-      if (subagent.topLevelParentThreadId !== binding.threadId) continue;
-      this.stateStore.removeSubagentThread(subagent.threadId);
-    }
-    this.#clearHiddenTaskRuntime(binding.threadId);
-    this.stateStore.removeBinding(binding.threadId);
-    return { deleted, noticesDeleted };
   }
 
   async #deleteHiddenProjectCategories(context) {
@@ -5548,7 +5523,7 @@ export class DiscordController {
 
   async #syncTaskChannel(thread, archived, context, onProgress = () => {}) {
     onProgress('channelLookup');
-    if (this.stopping) return { channel: null, created: false, moved: false };
+    if (this.stopping || this.taskMirrorDeletions.has(thread.id)) return { channel: null, created: false, moved: false };
     const existingBinding = stateBindingSummary(this.stateStore, thread.id);
     thread = taskThreadForDisplay(thread, existingBinding);
     let channel = existingBinding?.channelId ? context.channels.get(existingBinding.channelId) : null;
@@ -5565,7 +5540,7 @@ export class DiscordController {
     if (!channel) this.channelCreateJournal.assertCreateAllowed(thread.id, this.config.guildId);
     onProgress('targetCategory');
     const target = await this.#targetCategory(thread, archived, channel?.parentId, context);
-    if (this.stopping) return { channel, created: false, moved: false };
+    if (this.stopping || this.taskMirrorDeletions.has(thread.id)) return { channel, created: false, moved: false };
     const desiredName = taskChannelName(thread);
     const turnState = thread.status?.type === 'active' ? 'running' : 'stopped';
     const desiredTopic = truncate(
@@ -5585,6 +5560,11 @@ export class DiscordController {
         topic: desiredTopic,
       }));
       created = true;
+      if (this.taskMirrorDeletions.has(thread.id)) {
+        this.taskMirrorDeletions.observe(thread.id, { channelId: channel.id, categoryId: target.category.id });
+        this.#queueDeletedTaskMirrors();
+        return { channel: null, created: false, moved: false };
+      }
     } else {
       if (channel.parentId !== target.category.id) {
         onProgress('channelMove');
@@ -5600,9 +5580,16 @@ export class DiscordController {
         );
       }
     }
-    if (this.stopping) return { channel, created, moved };
+    if (this.stopping || this.taskMirrorDeletions.has(thread.id)) return { channel, created, moved };
     onProgress('channelPermissions');
     if (!channel.permissionsLocked) await channel.lockPermissions();
+    if (this.taskMirrorDeletions.has(thread.id)) {
+      if (created) {
+        this.taskMirrorDeletions.observe(thread.id, { channelId: channel.id, categoryId: target.category.id });
+        this.#queueDeletedTaskMirrors();
+      }
+      return { channel: null, created: false, moved: false };
+    }
     if (this.stopping) return { channel, created, moved };
 
     onProgress('channelBinding');
@@ -5614,7 +5601,7 @@ export class DiscordController {
       subscribe: !archived && (!existingBinding || existingBinding.archived || existingBinding.hidden),
       onProgress,
     });
-    if (this.stopping) return { channel, created, moved };
+    if (this.stopping || this.taskMirrorDeletions.has(thread.id)) return { channel, created, moved };
     onProgress('taskPanel');
     await this.#ensureTaskPanel(thread, channel, archived);
     const recoveryBinding = stateBindingSummary(this.stateStore, thread.id) ?? existingBinding;
@@ -6023,6 +6010,7 @@ export class DiscordController {
     archived = false, categoryId = channel.parentId, projectKey = null, projectId = null, subscribe = false,
     onProgress = () => {},
   } = {}) {
+    if (this.taskMirrorDeletions.has(thread.id)) return;
     const colliding = this.stateStore.bindingByChannel(channel.id);
     if (colliding && colliding.threadId !== thread.id) this.stateStore.removeBinding(colliding.threadId);
     const existing = stateBindingSummary(this.stateStore, thread.id);
@@ -6050,6 +6038,14 @@ export class DiscordController {
         ?? null
       : null;
     const forkChannelPatch = forkedFromThreadId ? { forkedFromChannelId } : {};
+    if (this.taskMirrorDeletions.has(thread.id)) {
+      const created = this.channelCreateJournal.read(thread.id);
+      if (created?.phase === 'confirmed' && created.channelId === channel.id && created.categoryId === categoryId) {
+        this.taskMirrorDeletions.observe(thread.id, { channelId: channel.id, categoryId });
+        this.#queueDeletedTaskMirrors();
+      }
+      return;
+    }
     this.stateStore.setBinding(thread.id, {
       channelId: channel.id,
       categoryId,
@@ -7363,27 +7359,16 @@ export class DiscordController {
         }
         return;
       }
-      if (!threadId) return;
+      if (!threadId || this.taskMirrorDeletions.has(threadId)) return;
       const hiddenBinding = this.stateStore.binding(threadId);
       if (this.#isBindingHidden(hiddenBinding)) {
-        if (message.method === 'thread/deleted') {
-          this.stateStore.removeBinding(threadId);
-          for (const subagent of this.stateStore.subagentThreads?.() ?? []) {
-            if (subagent.topLevelParentThreadId === threadId) {
-              this.stateStore.removeSubagentThread(subagent.threadId);
-            }
-          }
-        } else if (['thread/archived', 'thread/unarchived', 'thread/name/updated'].includes(message.method)) {
+        if (['thread/archived', 'thread/unarchived', 'thread/name/updated'].includes(message.method)) {
           this.#scheduleTaskSync(message.method);
         }
         return;
       }
       if (['thread/archived', 'thread/unarchived', 'thread/name/updated'].includes(message.method)) {
         this.#scheduleTaskSync(message.method);
-        return;
-      }
-      if (message.method === 'thread/deleted') {
-        await this.#deleteDeletedTaskMirror(threadId);
         return;
       }
       let binding = this.stateStore.binding(threadId);
@@ -7714,26 +7699,66 @@ export class DiscordController {
     this.taskSyncDebounceTimer.unref?.();
   }
 
-  async #deleteDeletedTaskMirror(threadId) {
-    const binding = this.stateStore.binding(threadId);
-    if (!binding) return;
-    const { guild, completions } = await this.infrastructureReady;
-    const context = {
-      guild,
-      completions,
-      channels: await guild.channels.fetch(),
-      completionMessages: await completions.messages.fetch({ limit: 100 }).catch(() => new Map()),
-    };
-    const removed = await this.#removeDeletedBindingMirror(
-      binding,
-      context,
-      { includeNotificationQueue: false },
-    );
-    this.#log('deleted-task-mirror-removed', {
-      threadId,
-      channelDeleted: removed.deleted > 0,
-      noticesDeleted: removed.noticesDeleted,
+  #queueDeletedTaskMirrors() {
+    if (this.stopping || !this.codex.connected || !this.taskMirrorRest) return;
+    if (this.deletedMirrorDrain) { this.deletedMirrorDrainRequested = true; return; }
+    const pending = this.taskMirrorDeletions.pending();
+    if (!pending.length) return;
+    this.deletedMirrorDrain = Promise.resolve().then(async () => {
+      for (const { threadId, channelId } of pending) {
+        if (this.stopping || !this.codex.connected) return;
+        try {
+          const result = await this.taskMirrorDeletions.reconcile(threadId, {
+            readChannel: (id) => this.taskMirrorRest.get(Routes.channel(id)),
+            deleteChannel: (id) => this.taskMirrorRest.delete(Routes.channel(id), {
+              reason: 'Remove the Discord mirror for a deleted Codex task',
+            }),
+            canDelete: (entry) => this.#verifyDeletedMirrorOwner(entry),
+            finish: (entry) => this.#finalizeDeletedMirror(entry),
+          });
+          if (result === 'settled') this.#log('deleted-task-mirror-removed', { threadId, channelId });
+          else if (result !== 'skipped') this.#log('deleted-task-mirror-deferred', { threadId, channelId, reason: result });
+        } catch (error) {
+          this.#log('deleted-task-mirror-error', { threadId, channelId,
+            status: Number.isInteger(error.status) ? error.status : null });
+        }
+      }
+    }).finally(() => {
+      this.deletedMirrorDrain = null;
+      if (this.deletedMirrorDrainRequested) {
+        this.deletedMirrorDrainRequested = false;
+        this.#queueDeletedTaskMirrors();
+      }
     });
+  }
+
+  async #verifyDeletedMirrorOwner({ threadId, channelId, categoryId }) {
+    try { await this.codex.readThreadMetadata(threadId); return false; }
+    catch (error) { if (!missingDeletedThread(error, threadId)) return false; }
+    if (this.stopping || !this.codex.connected) return false;
+    const binding = this.stateStore.binding(threadId);
+    if (binding) return !binding.isSubagent && binding.channelId === channelId
+      && (binding.categoryId ?? null) === categoryId;
+    const created = this.channelCreateJournal.read(threadId);
+    return created?.phase === 'confirmed' && created.guildId === this.config.guildId
+      && created.channelId === channelId && created.categoryId === categoryId;
+  }
+
+  #finalizeDeletedMirror({ threadId, channelId }) {
+    const binding = this.stateStore.binding(threadId);
+    if (binding?.channelId !== channelId) return;
+    this.#clearHiddenTaskRuntime(threadId);
+    this.stateStore.removeBinding(threadId);
+    for (const subagent of this.stateStore.subagentThreads?.() ?? []) {
+      if (subagent.topLevelParentThreadId === threadId) this.stateStore.removeSubagentThread(subagent.threadId);
+    }
+    // The channel write is already settled. Historical notices are best effort
+    // and must never hold up channel deletion or lead to replaying its DELETE.
+    const cleanup = Promise.resolve(this.infrastructureReady)
+      .then(context => this.#deleteCompletionNoticesForBinding(binding, context ?? {}))
+      .catch(() => this.#log('deleted-task-notice-cleanup-error', { threadId, channelId }))
+      .finally(() => this.deletedMirrorNoticeCleanup.delete(cleanup));
+    this.deletedMirrorNoticeCleanup.add(cleanup);
   }
 
   async #turnStarted(binding, params) {
@@ -9349,6 +9374,7 @@ export class DiscordController {
 
   #handleSubscriptionsReady() {
     if (this.stopping || !this.codex.connected) return;
+    this.#queueDeletedTaskMirrors();
     const deferred = this.taskSyncAfterSubscriptionRestore;
     this.taskSyncAfterSubscriptionRestore = false;
     void this.deliveryWorker.request('subscriptions-ready');

@@ -2459,12 +2459,12 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
-  assert.match(interaction.lastReply, /Discord削除 6/);
+  assert.match(interaction.lastReply, /Discord削除 5/);
   assert.equal(taskDeleted, true);
   assert.equal(archivedTaskDeleted, true);
   assert.equal(nativeTaskDeleted, true);
   assert.equal(staleTaskDeleted, true);
-  assert.equal(deletedTaskDeleted, true);
+  assert.equal(deletedTaskDeleted, false, 'A legacy flag alone is not confirmed task deletion.');
   assert.equal(categoryDeleted, true);
   assert.equal(noticeDeleted, true);
   assert.equal(archivedNoticeDeleted, true);
@@ -2484,7 +2484,7 @@ test('task sync deletes active and archived Discord mirrors for a hidden project
   assert.equal(stateStore.binding('thread-native-hidden').projectKey, nativeProjectKey);
   assert.equal(stateStore.binding('thread-native-hidden').projectId, nativeProjectId);
   assert.equal(stateStore.binding('thread-native-hidden').channelId, null);
-  assert.equal(stateStore.binding('thread-deleted-stale'), null);
+  assert.equal(stateStore.binding('thread-deleted-stale').channelId, 'deleted-task-channel');
   assert.equal(stateStore.projectCategory(hiddenProjectId), null);
 
   const settledState = fs.readFileSync(stateStore.filePath, 'utf8');
@@ -2513,8 +2513,8 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
     archiveCategoryIds: ['archive-category'],
   });
   stateStore.setBinding('thread-deleted', {
-    channelId: 'task-channel',
-    categoryId: 'project-category',
+    channelId: '111111111111111111',
+    categoryId: '222222222222222222',
     projectKey: 'local-project',
     projectId: 'local-project',
     cwd: 'C:\\git\\project',
@@ -2531,6 +2531,9 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
   client.user = { id: 'bot-user', tag: 'bot#0001' };
   const codex = new EventEmitter();
   codex.connected = true;
+  codex.readThreadMetadata = async (id) => {
+    throw new Error(`thread/read: ${JSON.stringify({ code: -32600, message: `thread not loaded: ${id}` })}`);
+  };
   const channels = new Map();
   const discordCollection = (source) => Object.assign(new Map(source), {
     find: (predicate) => [...source.values()].find(predicate),
@@ -2538,12 +2541,12 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
   });
   let channelDeleted = false;
   const taskChannel = {
-    id: 'task-channel',
+    id: '111111111111111111',
     type: ChannelType.GuildText,
     topic: 'Codex task: thread-deleted',
     delete: async () => {
       channelDeleted = true;
-      channels.delete('task-channel');
+      channels.delete('111111111111111111');
     },
   };
   channels.set(taskChannel.id, taskChannel);
@@ -2552,7 +2555,7 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
   completionMessages.set('notice-1', {
     id: 'notice-1',
     author: { id: 'bot-user' },
-    content: 'https://discord.com/channels/guild-1/task-channel/final-1',
+    content: 'https://discord.com/channels/guild-1/111111111111111111/final-1',
     delete: async () => {
       noticeDeleted = true;
       completionMessages.delete('notice-1');
@@ -2566,8 +2569,19 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
         : discordCollection(completionMessages)),
     },
   };
-  const guild = { channels: { fetch: async () => discordCollection(channels) } };
+  const guild = { channels: { fetch: () => new Promise(() => {}) } };
   client.channels = { fetch: async (channelId) => channels.get(channelId) ?? null };
+  client.rest = {
+    get: async (route) => {
+      assert.equal(route, '/channels/111111111111111111');
+      return { id: taskChannel.id, guild_id: 'guild-1', parent_id: '222222222222222222',
+        type: taskChannel.type, topic: taskChannel.topic };
+    },
+    delete: async (route) => {
+      assert.equal(route, '/channels/111111111111111111');
+      await taskChannel.delete();
+    },
+  };
   const controller = new DiscordController({
     client,
     codex,
@@ -2582,7 +2596,7 @@ test('Codex task deletion removes its Discord mirror instead of archiving it', a
     method: 'thread/deleted',
     params: { threadId: 'thread-deleted' },
   });
-  for (let attempt = 0; attempt < 200 && stateStore.binding('thread-deleted'); attempt += 1) {
+  for (let attempt = 0; attempt < 200 && (!noticeDeleted || stateStore.binding('thread-deleted')); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
