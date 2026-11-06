@@ -10,6 +10,7 @@ import {
   restoreLiveActivity,
 } from './live-activity.mjs';
 import { isEmptyMcpToolApproval, emptyMcpToolApprovalResponse } from './mcp-empty-approval.mjs';
+import { BrowserInitialization, browserFailureItem } from './browser-initialization.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import {
   ActionRowBuilder,
@@ -731,6 +732,23 @@ export class DiscordController {
     this.asyncUserInput = new AsyncUserInputController({ client, codex, stateStore,
       instanceId: config.instanceId, log: (event, details) => this.#log(event, details) });
     this.pendingClientToolRequests = new Map();
+    this.browserInitialization = new BrowserInitialization({
+      directory: path.join(path.dirname(deliveryOutboxDirectory), 'browser-initialization'),
+      codex,
+      binding: (threadId) => {
+        const binding = this.stateStore.binding(threadId);
+        return this.#isBindingHidden(binding) ? null : binding;
+      },
+      isBusy: (threadId) => this.stopping || this.codex.isResumingThread(threadId)
+        || this.notificationQueues.has(threadId)
+        || this.discordMessageQueues.has(this.stateStore.binding(threadId)?.channelId)
+        || [...this.pendingRequests.values(), ...this.pendingClientToolRequests.values()]
+          .some((request) => request.threadId === threadId)
+        || this.deliveryOutbox.listWork({ states: ['queued', 'attempting', 'uncertain'] })
+          .some((entry) => entry.threadId === threadId),
+      log: (event, details) => this.#log(event, details),
+    });
+    this.browserInitializationPromise = null;
     this.codexEventSequence = 0;
     this.pendingActions = new Map();
     this.turnViews = new Map();
@@ -832,6 +850,10 @@ export class DiscordController {
     }));
     this.codex.on('notification', (message) => {
       const eventSequence = ++this.codexEventSequence;
+      if (!this.stopping && message.method === 'item/completed') {
+        try { this.browserInitialization.observe(message.params); }
+        catch { this.#log('browser-init-observation-failed', { threadId: message.params?.threadId }); }
+      }
       if (isControllerCodexNotification(message)) {
         this.#queueCodexNotification(message, eventSequence);
       }
@@ -842,7 +864,17 @@ export class DiscordController {
     ));
     this.codex.on('connectionState', (status) => this.#handleConnectionState(status));
     this.codex.on('subscriptionsReady', () => this.#handleSubscriptionsReady());
-    this.codex.on('subscriptionRestored', (event) => this.#queueSubscriptionRestored(event));
+    this.codex.on('subscriptionRestored', (event) => {
+      if (!this.stopping) {
+        const turn = event.missedCompletion?.turn;
+        const item = browserFailureItem(turn);
+        if (item) {
+          try { this.browserInitialization.observe({ threadId: event.binding.threadId, turnId: turn.id, item }); }
+          catch { this.#log('browser-init-observation-failed', { threadId: event.binding.threadId }); }
+        }
+      }
+      this.#queueSubscriptionRestored(event);
+    });
     this.codex.on('subscriptionError', (event) => {
       if (this.stopping) return;
       if (this.#isBindingHidden(this.stateStore.binding(event.binding.threadId) ?? event.binding)) return;
@@ -876,6 +908,7 @@ export class DiscordController {
     this.completionRecoveryJobs.clear();
     const pending = [
       ['task-sync', this.taskSyncPromise],
+      ['browser-initialization', this.browserInitializationPromise],
       ...this.deliveryWorker.pendingWork(),
       ['discord-recovery', this.discordRecoveryPromise],
       ['transcript-tail', this.transcriptSyncTail],
@@ -4257,7 +4290,12 @@ export class DiscordController {
       pollPending = true;
       this.codex.restoreChangedSubscriptions().then(() => (
         this.deliveryWorker.request('task-sync-poll')
-      )).then(() => {
+      )).then(async () => {
+        if (this.stopping) return;
+        this.browserInitializationPromise = this.browserInitialization.run();
+        try { await this.browserInitializationPromise; }
+        finally { this.browserInitializationPromise = null; }
+      }).then(() => {
         if (this.stopping || !this.codex.connected || this.codex.subscriptionRestoreInProgress) return null;
         return this.#syncAllTasks();
       }).then(async (result) => {

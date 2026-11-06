@@ -155,6 +155,24 @@ flag is limited to this exact build; verify ordinary `@Chrome` from the
 Desktop UI after a package update before changing the version gate. A turn
 started entirely outside Desktop is not covered by this check.
 
+On that verified shared Desktop runtime, the Discord Bridge can prepare a
+task after the built-in Computer Use tool reports `The browser access host is
+unavailable`. It uses the latest finished turn's tool result, not text from
+Discord or a web page. It skips unrelated, active, hidden, and archived tasks.
+When the Bridge owns a subscription to that idle task, it releases only its
+own subscription. If Desktop or another client still holds the task, it waits
+for the App Server to report `notLoaded`. It then opens just that task in the
+official Desktop app via `codex://threads/<id>`. This may switch the visible
+Desktop view.
+
+Only one open is attempted per task and shared server generation, including
+when the Windows dispatch outcome is unknown. Local receipts are in
+`discord-bridge/data/browser-initialization/`. `dispatched` means Windows
+accepted the link; a subsequent successful Computer Use call is the proof of
+browser access. The Bridge never copies credentials, closes another client's
+subscription, or replays the failed turn. Tasks without an observed failure
+do not get a Desktop view opened by this feature.
+
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.
 This uses `ForceTargetApplicationShutdown` only for the verified Codex package,

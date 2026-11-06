@@ -11,6 +11,7 @@ import {
   completionTextFromSession,
   finalTextFromTurn,
   needsSessionCompletionFallback,
+  readJsonIfPresent,
   sleep,
   threadStatusLabel,
 } from './util.mjs';
@@ -18,6 +19,7 @@ import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
 import { inspectDesktopClientOwner } from './client-tool-ownership.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
 import { turnTimestampMs } from './recent-history.mjs';
+import { DESKTOP_PACKAGE_FAMILY } from './browser-initialization.mjs';
 
 function attachmentValues(attachments) {
   if (!attachments) return [];
@@ -124,6 +126,8 @@ export class CodexService extends EventEmitter {
     this.connectedAt = null;
     this.subscriptionRestoreInProgress = false;
     this.subscribedThreadIds = new Set();
+    this.browserSubscriptionReleases = new Map();
+    this.resumingThreadCounts = new Map();
     this.restoredHistoryTurnIds = new Map();
     this.subscriptionChangePollPromise = null;
     this.lastLauncherStartAt = 0;
@@ -231,6 +235,44 @@ export class CodexService extends EventEmitter {
     return this.client.call('thread/read', { threadId, includeTurns: true }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
+  async readThreadMetadata(threadId) {
+    this.#requireClient();
+    const result = await this.client.call('thread/read', { threadId, includeTurns: false });
+    return result.thread;
+  }
+
+  browserInitializationGeneration() {
+    if (process.platform !== 'win32' || this.stopping || !this.connected || !this.clientGeneration) return null;
+    const state = readJsonIfPresent(this.config.launcherStatePath);
+    if (state?.packageFamilyName !== DESKTOP_PACKAGE_FAMILY) return null;
+    const compatible = state.desktopBrowserAccessCompatibility === true
+      || (state.desktopBrowserAccessCompatibility === undefined && state.desktopBrowserAccessTrial === true
+        && state.packageVersion === '26.1029.7803.0');
+    if (!compatible) return null;
+    const owner = this.#desktopOwner(this.endpoint);
+    return owner.state === 'present' && owner.generation === this.clientGeneration ? owner.generation : null;
+  }
+
+  isResumingThread(threadId) {
+    return this.resumingThreadCounts.has(threadId);
+  }
+
+  async releaseBrowserInitializationSubscription(threadId, generation) {
+    if (this.browserInitializationGeneration() !== generation || this.isResumingThread(threadId)
+      || !this.isSubscribed(threadId) || this.browserSubscriptionReleases.has(threadId)) return;
+    const client = this.client;
+    const request = client.call('thread/unsubscribe', { threadId });
+    this.browserSubscriptionReleases.set(threadId, request);
+    try {
+      const { status } = await request;
+      if (this.client === client && ['unsubscribed', 'notSubscribed', 'notLoaded'].includes(status)) {
+        this.subscribedThreadIds.delete(threadId);
+      }
+    } finally {
+      this.browserSubscriptionReleases.delete(threadId);
+    }
+  }
+
   async readRecentThread(threadId) {
     return this.readThreadWindow(threadId, { maxTurns: 2 });
   }
@@ -324,14 +366,24 @@ export class CodexService extends EventEmitter {
   }
 
   async resumeThread(threadId) {
-    this.#requireClient();
-    const result = await this.client.call(
-      'thread/resume',
-      { threadId, excludeTurns: true },
-      APP_SERVER_OPERATION_TIMEOUT_MS,
-    );
-    this.subscribedThreadIds.add(threadId);
-    return result;
+    this.resumingThreadCounts.set(threadId, (this.resumingThreadCounts.get(threadId) ?? 0) + 1);
+    try {
+      const releasing = this.browserSubscriptionReleases.get(threadId);
+      if (releasing) await releasing.catch(() => {});
+      this.#requireClient();
+      const client = this.client;
+      const result = await client.call(
+        'thread/resume',
+        { threadId, excludeTurns: true },
+        APP_SERVER_OPERATION_TIMEOUT_MS,
+      );
+      if (this.client === client) this.subscribedThreadIds.add(threadId);
+      return result;
+    } finally {
+      const count = this.resumingThreadCounts.get(threadId) - 1;
+      if (count) this.resumingThreadCounts.set(threadId, count);
+      else this.resumingThreadCounts.delete(threadId);
+    }
   }
 
   isSubscribed(threadId) {
