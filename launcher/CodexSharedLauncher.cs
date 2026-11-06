@@ -340,6 +340,13 @@ internal sealed class SharedLaunchProgressForm : Form
         return value != null && value.TryGetValue(key, out entry) ? entry as string ?? String.Empty : String.Empty;
     }
 
+    private static string ReadBridgeStateFile(string path)
+    {
+        using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream))
+            return reader.ReadToEnd();
+    }
+
     internal static void ReadBridgeObservation(string root, SharedRuntimeObservation observation)
     {
         observation.BridgeConfigured = File.Exists(Path.Combine(root, "config", "config.json"));
@@ -347,14 +354,24 @@ internal sealed class SharedLaunchProgressForm : Form
         if (!observation.BridgeConfigured) return;
         try
         {
+            string dataRoot = Path.Combine(root, "data");
             var runtime = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
-                File.ReadAllText(Path.Combine(root, "data", "runtime.json")));
-            if (GetString(runtime, "phase") != "running") return;
-            using (Process process = Process.GetProcessById(Convert.ToInt32(runtime["pid"], CultureInfo.InvariantCulture)))
+                ReadBridgeStateFile(Path.Combine(dataRoot, "runtime.json")));
+            if (GetString(runtime, "phase") != "running" ||
+                !String.Equals(Path.GetFullPath(GetString(runtime, "bridgeRoot")), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+                return;
+            int pid = Convert.ToInt32(runtime["pid"], CultureInfo.InvariantCulture);
+            int lockPid;
+            if (!Int32.TryParse(ReadBridgeStateFile(Path.Combine(dataRoot, "bridge.lock")), NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out lockPid) || lockPid != pid) return;
+            using (Process process = Process.GetProcessById(pid))
             {
                 DateTimeOffset startedAt;
-                if (process.HasExited || !DateTimeOffset.TryParse(GetString(runtime, "startedAt"), out startedAt) ||
-                    Math.Abs((process.StartTime.ToUniversalTime() - startedAt.UtcDateTime).TotalSeconds) > 60)
+                // Node may take longer to initialize than the launcher takes to start it.
+                // A reused PID starts after the previous runtime record.
+                if (process.HasExited || !String.Equals(process.ProcessName, "node", StringComparison.OrdinalIgnoreCase) ||
+                    !DateTimeOffset.TryParse(GetString(runtime, "startedAt"), CultureInfo.InvariantCulture, DateTimeStyles.None, out startedAt) ||
+                    process.StartTime.ToUniversalTime() > startedAt.UtcDateTime)
                     return;
             }
             observation.BridgeAlive = true;
@@ -362,8 +379,10 @@ internal sealed class SharedLaunchProgressForm : Form
             var codex = runtime.ContainsKey("codex") ? runtime["codex"] as Dictionary<string, object> : null;
             bool connected = codex != null && codex.ContainsKey("connected") && codex["connected"] is bool && (bool)codex["connected"];
             string endpoint = GetString(codex, "endpoint");
+            Uri serverUri;
             observation.BridgeReady = observation.DiscordReady && connected &&
-                endpoint == observation.Endpoint && observation.ServerReady;
+                endpoint == observation.Endpoint && observation.ServerReady && Uri.TryCreate(endpoint, UriKind.Absolute, out serverUri) &&
+                HasOwnedLoopbackTcp(new[] { pid }, serverUri.Port, true);
             observation.BridgeStatus = observation.BridgeReady ? "Discord・共有接続済み"
                 : observation.DiscordReady ? "Discord 接続済み／共有待ち"
                 : "起動済み／Discord 接続待ち";

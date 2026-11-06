@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +42,67 @@ async function waitForFile(filePath, timeoutMs = 300_000) {
   }
   throw new Error(`Timed out waiting for ${filePath}`);
 }
+
+test('a Bridge that finishes initializing late is connected only while its own live socket and state agree', async context => {
+  if (process.platform !== 'win32') { context.skip('Windows-only launcher.'); return; }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bridge-status-'));
+  const harness = path.join(directory, 'BridgeStatusHarness.cs');
+  const exe = path.join(directory, 'BridgeStatusHarness.exe');
+  const config = path.join(directory, 'config');
+  const data = path.join(directory, 'data');
+  const configFile = path.join(config, 'config.json');
+  const lockFile = path.join(data, 'bridge.lock');
+  const runtimeFile = path.join(data, 'runtime.json');
+  context.after(() => {
+    for (const file of [configFile, lockFile, runtimeFile, harness, exe]) fs.rmSync(file, { force: true });
+    for (const dir of [config, data, directory]) fs.rmdirSync(dir);
+  });
+  fs.mkdirSync(config);
+  fs.mkdirSync(data);
+  fs.writeFileSync(configFile, '{}');
+  fs.writeFileSync(harness, `
+using System;
+internal static class BridgeStatusHarness {
+    static void Main(string[] args) {
+        var observation = new SharedRuntimeObservation { ServerReady = true, Endpoint = args[1] };
+        SharedLaunchProgressForm.ReadBridgeObservation(args[0], observation);
+        Console.Write(observation.BridgeAlive + ":" + observation.BridgeReady);
+    }
+}`);
+  compile(compilerPath(), exe, [sourcePath, harness], 'BridgeStatusHarness');
+
+  const server = net.createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  context.after(() => server.close());
+  const port = server.address().port;
+  const socket = net.connect(port, '127.0.0.1');
+  context.after(() => socket.destroy());
+  await once(socket, 'connect');
+  const endpoint = `ws://127.0.0.1:${port}`;
+  const processStarted = Date.now() - process.uptime() * 1000;
+  const delayedRecord = new Date(processStarted + 120_000).toISOString();
+  const writeRuntime = startedAt => fs.writeFileSync(runtimeFile, JSON.stringify({
+    phase: 'running', pid: process.pid, bridgeRoot: directory, startedAt,
+    discordReady: true, codex: { connected: true, endpoint },
+  }));
+  const status = () => execFileSync(exe, [directory, endpoint], { encoding: 'utf8' });
+  fs.writeFileSync(lockFile, String(process.pid));
+  writeRuntime(delayedRecord);
+  assert.equal(status(), 'True:True');
+
+  writeRuntime(new Date(processStarted - 120_000).toISOString());
+  assert.equal(status(), 'False:False', 'A stale record must not verify a newer process with the same PID.');
+  writeRuntime(delayedRecord);
+  fs.writeFileSync(lockFile, String(process.pid + 1));
+  assert.equal(status(), 'False:False', 'A different Bridge lock must not verify the runtime record.');
+  fs.writeFileSync(lockFile, String(process.pid));
+
+  const closed = once(socket, 'close');
+  socket.destroy();
+  await closed;
+  assert.equal(status(), 'True:False', 'A cached connected flag is insufficient without the real loopback connection.');
+});
 
 test('PowerShell resolver honors all four supported search tiers', context => {
   if (process.platform !== 'win32') {
