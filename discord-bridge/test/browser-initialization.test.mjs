@@ -20,9 +20,11 @@ function fixture(t) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dir = path.join(root, 'receipts');
   const state = {
-    thread: { id: THREAD, source: 'vscode', ephemeral: false, path: '/sessions/thread.jsonl', status: { type: 'active' } },
+    thread: { id: THREAD, source: 'vscode', ephemeral: false, canAcceptDirectInput: true,
+      path: '/sessions/thread.jsonl', status: { type: 'active' } },
     turn: { id: TURN, status: 'completed', items: [ITEM] },
     generation: 'one', busy: false, subscribed: true, binding: { channelId: '42' }, opened: [], released: [],
+    archive: [], goal: null, terminals: [], related: false, grace: 60_000, now: 1,
   };
   const codex = {
     browserInitializationGeneration: () => state.generation,
@@ -33,11 +35,27 @@ function fixture(t) {
     releaseBrowserInitializationSubscription: async (id, generation) => {
       state.released.push([id, generation]);
       state.subscribed = false;
+      return state.releaseAck;
+    },
+    browserUnloadGraceMs: async () => state.grace,
+    withBrowserArchive: async (_id, run) => run(),
+    getGoal: async () => ({ goal: state.goal }),
+    listBackgroundTerminals: async () => state.terminals,
+    browserArchiveHasRelations: async () => state.related,
+    archiveThread: async (id) => {
+      state.archive.push(['archive', id]);
+      state.thread = { ...state.thread, path: '/archived_sessions/thread.jsonl', status: { type: 'notLoaded' } };
+      return { threadId: id };
+    },
+    unarchiveThread: async (id) => {
+      state.archive.push(['unarchive', id]);
+      state.thread = { ...state.thread, path: '/sessions/thread.jsonl' };
+      return { thread: state.thread };
     },
   };
   const make = (overrides = {}) => new BrowserInitialization({
     directory: dir, codex, binding: () => state.binding, isBusy: () => state.busy,
-    ...overrides,
+    clock: () => state.now, ...overrides,
   });
   const read = () => JSON.parse(fs.readFileSync(path.join(dir, `${THREAD}.json`), 'utf8'));
   return { state, make, read, codex };
@@ -136,4 +154,86 @@ test('failure recovery does not consume its handoff before the shared coordinato
   await init.run();
   assert.equal(read().state, 'handed-off');
   assert.deepEqual(state.opened, [THREAD]);
+});
+
+test('uses one archive and restore when the normal grace is long, then delegates the exact cold load', async (t) => {
+  const { state, make, read, codex } = fixture(t);
+  state.thread.status.type = 'idle';
+  state.releaseAck = 'unsubscribed';
+  const archive = codex.archiveThread;
+  codex.archiveThread = (id) => {
+    assert.equal(read().state, 'archive-claimed');
+    return archive(id);
+  };
+  const unarchive = codex.unarchiveThread;
+  codex.unarchiveThread = (id) => {
+    assert.equal(read().state, 'unarchive-claimed');
+    assert.equal(state.thread.status.type, 'notLoaded');
+    return unarchive(id);
+  };
+  const init = make();
+  init.observe(EVENT);
+  await init.run();
+  await make().run();
+  assert.deepEqual(state.released, [[THREAD, 'one']]);
+  assert.deepEqual(state.archive, [['archive', THREAD], ['unarchive', THREAD]]);
+  assert.deepEqual(state.opened, [THREAD]);
+  assert.equal(read().state, 'handed-off');
+});
+
+test('lets the server unload naturally when the configured grace is only a few seconds', async (t) => {
+  const { state, make, read } = fixture(t);
+  state.thread.status.type = 'idle';
+  state.releaseAck = 'unsubscribed';
+  state.grace = 3_000;
+  const init = make();
+  init.observe(EVENT);
+  await init.run();
+  assert.equal(read().state, 'released');
+  assert.deepEqual(state.archive, []);
+  state.thread.status.type = 'notLoaded';
+  await init.run();
+  assert.deepEqual(state.archive, []);
+  assert.deepEqual(state.opened, [THREAD]);
+});
+
+test('related tasks, goals, terminals, and a newly active turn prevent the archive', async (t) => {
+  const { state, make, codex } = fixture(t);
+  state.thread.status.type = 'idle';
+  state.subscribed = false;
+  const init = make();
+  init.observe(EVENT);
+  state.related = true;
+  await init.run();
+  state.related = false;
+  state.goal = { status: 'paused' };
+  await init.run();
+  state.goal = null;
+  state.terminals = [{ id: 'terminal' }];
+  await init.run();
+  state.terminals = [];
+  codex.browserArchiveHasRelations = async () => { state.thread.status.type = 'active'; return false; };
+  await init.run();
+  assert.deepEqual(state.archive, []);
+  assert.deepEqual(state.opened, []);
+});
+
+test('uncertain archive or restore leaves a durable fence without another mutation', async (t) => {
+  for (const [method, stateName, actions] of [
+    ['archiveThread', 'archive-claimed', [['archive', THREAD]]],
+    ['unarchiveThread', 'unarchive-claimed', [['archive', THREAD], ['unarchive', THREAD]]],
+  ]) {
+    const { state, make, read, codex } = fixture(t);
+    state.thread.status.type = 'idle';
+    state.subscribed = false;
+    const call = codex[method];
+    codex[method] = async (id) => { await call(id); throw new Error('lost acknowledgement'); };
+    const init = make();
+    init.observe(EVENT);
+    await init.run();
+    assert.equal(read().state, stateName);
+    await make().run();
+    assert.deepEqual(state.archive, actions);
+    assert.deepEqual(state.opened, []);
+  }
 });

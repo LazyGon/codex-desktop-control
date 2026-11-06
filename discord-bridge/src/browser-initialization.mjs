@@ -10,7 +10,10 @@ const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const LOCAL_SOURCES = new Set(['vscode', 'cli', 'exec', 'appServer']);
 const FINISHED = new Set(['completed', 'failed']);
 const OPEN_STATES = ['handed-off', 'open-claimed', 'dispatched', 'unknown'];
-const STATES = new Set(['pending', 'release-claimed', 'superseded', ...OPEN_STATES]);
+const ARCHIVE_STATES = ['archive-claimed', 'archived', 'unarchive-claimed', 'restored'];
+const ADVANCE_STATES = ['pending', 'release-claimed', 'released', 'restored'];
+const STATES = new Set([...ADVANCE_STATES, ...ARCHIVE_STATES, 'superseded', ...OPEN_STATES]);
+const archivedPath = (value) => typeof value === 'string' && /[\\/]archived_sessions[\\/]/i.test(value);
 export const DESKTOP_PACKAGE_FAMILY = 'OpenAI.Codex_2p2nqsd0c76g0';
 
 function computerUseCode(item) {
@@ -69,8 +72,9 @@ function eligibleBinding(binding) {
 }
 
 export class BrowserInitialization {
-  constructor({ directory, codex, binding, isBusy, log = () => {} }) {
-    Object.assign(this, { directory, codex, binding, isBusy, log });
+  constructor({ directory, codex, binding, isBusy, canArchive = () => true, clock = Date.now, log = () => {} }) {
+    Object.assign(this, { directory, codex, binding, isBusy, canArchive, clock, log });
+    this.archiveCompletion = null;
   }
 
   #recordPath(threadId) {
@@ -103,11 +107,12 @@ export class BrowserInitialization {
     if (!eligibleBinding(binding) || !generation) return false;
     const existing = this.#read(threadId);
     if (existing?.generation === generation) {
-      if (OPEN_STATES.includes(existing.state)) return false;
+      if (OPEN_STATES.includes(existing.state) || ARCHIVE_STATES.includes(existing.state)) return false;
       // A replayed notification cannot replace more recent work or reset a release claim.
       if (turnId <= existing.turnId) return false;
     }
-    this.#write({ threadId, turnId, itemId: item.id, channelId: binding.channelId, generation }, 'pending');
+    this.#write({ threadId, turnId, itemId: item.id, channelId: binding.channelId, generation,
+      observedAt: this.clock() }, 'pending');
     return true;
   }
 
@@ -122,7 +127,7 @@ export class BrowserInitialization {
       if (!filename.endsWith('.json') || !UUID.test(threadId)) continue;
       try {
         const record = this.#read(threadId);
-        if (record?.generation !== generation || !['pending', 'release-claimed'].includes(record.state)) continue;
+        if (record?.generation !== generation || !ADVANCE_STATES.includes(record.state)) continue;
         if (await this.#advance(record)) return; // One visible navigation per existing sync cycle.
       } catch {
         this.log('browser-init-check-failed', { threadId });
@@ -130,21 +135,24 @@ export class BrowserInitialization {
     }
   }
 
+  #sameEpisode(record) {
+    const { threadId, turnId, channelId, generation } = record;
+    const binding = this.binding(threadId);
+    const latest = this.#read(threadId);
+    return eligibleBinding(binding) && binding.channelId === channelId
+      && latest?.generation === generation && latest?.turnId === turnId && latest?.state === record.state
+      && this.codex.browserInitializationGeneration() === generation;
+  }
+
   async #advance(record) {
-    const { threadId, turnId, itemId, channelId, generation } = record;
-    const stillCurrent = () => {
-      const binding = this.binding(threadId);
-      const latest = this.#read(threadId);
-      return eligibleBinding(binding) && binding.channelId === channelId
-        && latest?.generation === generation && latest?.turnId === turnId && latest?.state === record.state
-        && this.codex.browserInitializationGeneration() === generation && !this.isBusy(threadId);
-    };
+    const { threadId, turnId, itemId, generation } = record;
+    const stillCurrent = () => this.#sameEpisode(record) && !this.isBusy(threadId);
     if (!stillCurrent()) return false;
     const canAdvance = (thread) => thread?.id === threadId && thread.ephemeral === false
       && !thread.parentThreadId && LOCAL_SOURCES.has(thread.source)
-      && thread.path && !/[\\/]archived_sessions[\\/]/i.test(thread.path)
+      && thread.path && !archivedPath(thread.path)
       && (thread.status?.type === 'notLoaded'
-        || (thread.status?.type === 'idle' && record.state === 'pending' && this.codex.isSubscribed(threadId)));
+        || (thread.status?.type === 'idle' && ['pending', 'released'].includes(record.state)));
     if (!canAdvance(await this.codex.readThreadMetadata(threadId)) || !stillCurrent()) return false;
     const preview = (await this.codex.recentTurns(threadId, { limit: 1, itemsView: 'notLoaded' })).data?.[0];
     if (!stillCurrent() || !preview || preview.status === 'inProgress') return false;
@@ -162,16 +170,75 @@ export class BrowserInitialization {
     const thread = await this.codex.readThreadMetadata(threadId);
     if (!stillCurrent() || !canAdvance(thread)) return false;
     if (thread.status?.type === 'idle' && record.state === 'pending' && this.codex.isSubscribed(threadId)) {
-      this.#write(record, 'release-claimed');
-      // Release only this Bridge connection. Desktop or another client may
-      // still own the loaded task; wait for the server to report notLoaded.
-      await this.codex.releaseBrowserInitializationSubscription(threadId, generation);
+      const claim = this.#write(record, 'release-claimed');
+      const status = await this.codex.releaseBrowserInitializationSubscription(threadId, generation);
+      if (['unsubscribed', 'notSubscribed', 'notLoaded'].includes(status) && this.#sameEpisode(claim)) {
+        return this.#advance(this.#write({ ...claim, releasedAt: this.clock() }, 'released'));
+      }
       return false;
     }
-    if (thread.status?.type !== 'notLoaded') return false;
-    const outcome = await this.codex.prepareDesktopThread(threadId);
+    if (thread.status?.type === 'notLoaded') return this.#handoff(record);
+    if (thread.canAcceptDirectInput !== true || this.codex.isSubscribed(threadId) || !this.canArchive(threadId)) return false;
+    const grace = await this.codex.browserUnloadGraceMs();
+    if (!stillCurrent() || !Number.isSafeInteger(grace)) return false;
+    const observedAt = record.releasedAt ?? record.observedAt ?? fs.statSync(this.#recordPath(threadId)).mtimeMs;
+    // The owner elected to wait only for a few seconds (single-digit seconds).
+    // The verified server's normal 60-second grace does not fit that policy.
+    if (grace < 10_000 && this.clock() < observedAt + grace) return false;
+    return this.#archiveAndRestore(record, thread.path, stillCurrent);
+  }
+
+  async #handoff(record) {
+    if (!this.#sameEpisode(record)) return false;
+    const outcome = await this.codex.prepareDesktopThread(record.threadId);
     if (outcome !== 'opening') return false;
-    if (stillCurrent()) this.#write(record, 'handed-off');
+    if (this.#sameEpisode(record)) this.#write(record, 'handed-off');
     return true;
+  }
+
+  async #archiveAndRestore(record, originalPath, stillCurrent) {
+    const { threadId, turnId } = record;
+    if (this.archiveCompletion || !this.canArchive(threadId)) return false;
+    const operation = Promise.resolve().then(() => this.codex.withBrowserArchive(threadId, async () => {
+      // An archived descendant is also affected by restore. Include it in the
+      // related-task preflight rather than treating the round trip as one row.
+      const [goal, terminals, related] = await Promise.all([
+        this.codex.getGoal(threadId), this.codex.listBackgroundTerminals(threadId, { strict: true }),
+        this.codex.browserArchiveHasRelations(threadId),
+      ]);
+      if (goal?.goal !== null || !Array.isArray(terminals) || terminals.length || related !== false) return false;
+      const latest = (await this.codex.recentTurns(threadId, { limit: 1, itemsView: 'notLoaded' })).data?.[0];
+      const live = await this.codex.readThreadMetadata(threadId);
+      if (!stillCurrent() || !this.canArchive(threadId) || latest?.id !== turnId || !FINISHED.has(latest.status)
+        || live?.id !== threadId || live.path !== originalPath || live.status?.type !== 'idle'
+        || live.canAcceptDirectInput !== true || this.codex.isSubscribed(threadId)) return false;
+
+      // Record each irreversible request before dispatch. An interrupted or
+      // uncertain attempt is never replayed or automatically reversed.
+      let receipt = this.#write({ ...record, originalPath }, 'archive-claimed');
+      const accepted = await this.codex.archiveThread(threadId, { browserRecovery: true });
+      if (accepted?.threadId !== threadId || !this.#sameEpisode(receipt)) return true;
+      const archived = await this.codex.readThreadMetadata(threadId);
+      if (!this.#sameEpisode(receipt) || archived?.id !== threadId || archived.status?.type !== 'notLoaded'
+        || !archivedPath(archived.path) || path.basename(archived.path) !== path.basename(originalPath)) {
+        this.log('browser-init-archive-unconfirmed', { threadId, turnId });
+        return true;
+      }
+      receipt = this.#write({ ...receipt, archivedPath: archived.path }, 'archived');
+      receipt = this.#write(receipt, 'unarchive-claimed');
+      const response = await this.codex.unarchiveThread(threadId, { browserRecovery: true });
+      if (response?.thread?.id !== threadId || !this.#sameEpisode(receipt)) return true;
+      const restored = await this.codex.readThreadMetadata(threadId);
+      if (!this.#sameEpisode(receipt) || restored?.id !== threadId || restored.path !== originalPath) {
+        this.log('browser-init-restore-unconfirmed', { threadId, turnId });
+        return true;
+      }
+      receipt = this.#write(receipt, 'restored');
+      if (restored.status?.type === 'notLoaded') await this.#handoff(receipt);
+      return true;
+    }));
+    this.archiveCompletion = operation;
+    try { return await operation; }
+    finally { this.archiveCompletion = null; }
   }
 }

@@ -165,14 +165,26 @@ Only then does the Bridge subscribe and send. Other tasks can keep receiving
 messages. If the receipt is missing, the ordinary Discord message stays in
 the existing delivery queue; immediate controls return without dispatch.
 
-The separate recovery path still detects the exact built-in Computer Use
-host error from the latest finished turn. It can release only the Bridge's
-own idle subscription; if another client holds the task, it waits for
-`notLoaded`. Both paths share the same link attempt. An unknown dispatch is
-not repeated. After a confirmed load, a later cold load may open a new link.
+The separate recovery path detects the exact built-in Computer Use host
+error from the latest finished turn. It releases the Bridge's own idle
+subscription if present, then checks whether the task unloaded. The owner
+chose to wait for a single-digit number of seconds if that is the configured
+grace. The verified App Server defaults to 60 seconds; with that grace, the
+Bridge does not wait a minute. If the task is still idle and loaded, recovery
+can archive it temporarily, verify `notLoaded`, restore the same task and
+history, and hand it to the same Desktop loading path. Before archiving, it
+checks for goals, pending input or approval, background terminals, and
+descendant or attached tasks, including archived ones. Any of these blocks
+automatic archiving. Discord synchronization waits through the round trip.
+
 Receipts are in `discord-bridge/data/desktop-first/` and
-`discord-bridge/data/browser-initialization/`. A Desktop load receipt proves
-the loading order; a successful Computer Use call proves browser access.
+`discord-bridge/data/browser-initialization/`. Archive, restore, and URI
+dispatch each have their own claim. An interrupted or uncertain mutation is
+not automatically repeated or reversed; verify the actual task state from
+the shared App Server before any manual recovery. After a confirmed load, a
+later cold load may open a new link. A Desktop load receipt proves the loading
+order; a successful Computer Use call proves browser access. The Bridge does
+not replay the failed turn.
 
 If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
 explicitly approve `-AllowTargetApplicationShutdown` for one manual update.

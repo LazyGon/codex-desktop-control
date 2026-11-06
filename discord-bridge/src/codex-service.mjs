@@ -22,6 +22,10 @@ import { turnTimestampMs } from './recent-history.mjs';
 import { DESKTOP_PACKAGE_FAMILY, openDesktopThread } from './browser-initialization.mjs';
 import { DesktopFirst, DesktopThreadPendingError } from './desktop-first.mjs';
 
+// All ThreadSourceKind values in the verified App Server's v2 protocol.
+const RELATION_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+  'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'];
+
 function attachmentValues(attachments) {
   if (!attachments) return [];
   return Array.isArray(attachments) ? attachments : [attachments];
@@ -128,6 +132,7 @@ export class CodexService extends EventEmitter {
     this.subscriptionRestoreInProgress = false;
     this.subscribedThreadIds = new Set();
     this.browserSubscriptionReleases = new Map();
+    this.browserArchiveLocks = new Set();
     this.resumingThreadCounts = new Map();
     this.preparedDeliveryOwners = new WeakMap();
     this.desktopFirst = desktopFirst ?? (desktopFirstDirectory && new DesktopFirst({
@@ -285,11 +290,59 @@ export class CodexService extends EventEmitter {
   }
 
   async #ensureDesktopFirst(threadId) {
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     const client = this.client;
     const state = await this.prepareDesktopThread(threadId);
     if (state === 'opening' || state === 'waiting') throw new DesktopThreadPendingError();
     if (this.client !== client) throw new Error('App Server connection closed during Desktop preparation.');
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     this.#requireClient();
+  }
+
+  async withBrowserArchive(threadId, operation) {
+    const generation = this.browserInitializationGeneration();
+    if (!generation || this.browserArchiveLocks.has(threadId) || this.isResumingThread(threadId)
+      || this.desktopFirst?.isWaiting(threadId, generation)) return false;
+    this.browserArchiveLocks.add(threadId);
+    try { return await operation(); }
+    finally { this.browserArchiveLocks.delete(threadId); }
+  }
+
+  async browserUnloadGraceMs() {
+    this.#requireClient();
+    const result = await this.client.call('config/read', { includeLayers: false });
+    if (!result?.config) return null;
+    // The installed v0.166.0-alpha.6 defaults to 60 seconds when omitted.
+    const seconds = result.config.thread_unload_delay_secs ?? 60;
+    const milliseconds = typeof seconds === 'number' ? seconds * 1_000 : NaN;
+    return Number.isSafeInteger(milliseconds) && milliseconds >= 0 ? milliseconds : null;
+  }
+
+  async browserArchiveHasRelations(threadId) {
+    this.#requireClient();
+    // Do not substitute ordinary discovery: it excludes empty/attached and
+    // noninteractive tasks. Check both archival states and all source kinds.
+    const client = this.client;
+    const related = await Promise.all(['ancestorThreadId', 'attachedToThreadId'].flatMap((relation) => (
+      [false, true].map(async (archived) => {
+        const seen = new Set();
+        let cursor = null;
+        do {
+          const result = await client.call('thread/list', {
+            [relation]: threadId, archived, cursor, limit: 1, sourceKinds: RELATION_SOURCE_KINDS,
+            modelProviders: [], useStateDbOnly: true,
+          });
+          if (!Array.isArray(result?.data)) throw new Error('Missing related task inventory.');
+          if (result.data.length) return true;
+          cursor = result.nextCursor ?? null;
+          if (cursor && seen.has(cursor)) throw new Error('Repeated related task inventory cursor.');
+          if (cursor) seen.add(cursor);
+        } while (cursor);
+        return false;
+      })
+    )));
+    if (this.client !== client) throw new Error('App Server connection closed during related task inventory.');
+    return related.some(Boolean);
   }
 
   isResumingThread(threadId) {
@@ -306,7 +359,9 @@ export class CodexService extends EventEmitter {
       const { status } = await request;
       if (this.client === client && ['unsubscribed', 'notSubscribed', 'notLoaded'].includes(status)) {
         this.subscribedThreadIds.delete(threadId);
+        return status;
       }
+      return null;
     } finally {
       this.browserSubscriptionReleases.delete(threadId);
     }
@@ -405,6 +460,7 @@ export class CodexService extends EventEmitter {
   }
 
   async resumeThread(threadId, { monitorOnly = false } = {}) {
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     this.resumingThreadCounts.set(threadId, (this.resumingThreadCounts.get(threadId) ?? 0) + 1);
     try {
       const releasing = this.browserSubscriptionReleases.get(threadId);
@@ -501,9 +557,9 @@ export class CodexService extends EventEmitter {
     return this.client.call('review/start', { threadId, target, delivery }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
-  async listBackgroundTerminals(threadId) {
+  async listBackgroundTerminals(threadId, { strict = false } = {}) {
     this.#requireClient();
-    return this.#collectPages('thread/backgroundTerminals/list', { threadId }, 100);
+    return this.#collectPages('thread/backgroundTerminals/list', { threadId }, 100, { strict });
   }
 
   async terminateBackgroundTerminal(threadId, processId) {
@@ -581,13 +637,16 @@ export class CodexService extends EventEmitter {
     });
   }
 
-  async archiveThread(threadId) {
+  async archiveThread(threadId, { browserRecovery = false } = {}) {
+    if (this.browserArchiveLocks.has(threadId) !== browserRecovery) throw new DesktopThreadPendingError();
     this.#requireClient();
-    await this.client.call('thread/archive', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
+    const result = await this.client.call('thread/archive', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Missing archive acknowledgement.');
     return { threadId };
   }
 
-  async unarchiveThread(threadId) {
+  async unarchiveThread(threadId, { browserRecovery = false } = {}) {
+    if (this.browserArchiveLocks.has(threadId) !== browserRecovery) throw new DesktopThreadPendingError();
     this.#requireClient();
     return this.client.call('thread/unarchive', { threadId }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
@@ -635,6 +694,7 @@ export class CodexService extends EventEmitter {
     target,
   ) {
     this.#requireClient();
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     if (!clientUserMessageId) throw new Error('Prepared delivery requires clientUserMessageId.');
     if (this.preparedDeliveryOwners.has(target) && this.preparedDeliveryOwners.get(target) !== this.client) {
       throw new Error('App Server connection closed after delivery preparation.');
@@ -696,6 +756,7 @@ export class CodexService extends EventEmitter {
       input: textInput(prompt, attachments),
     };
     if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     const result = await this.client.call('turn/start', params, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { mode: 'send', turnId: result.turn?.id ?? null, result };
   }
@@ -716,6 +777,7 @@ export class CodexService extends EventEmitter {
       input: textInput(prompt, attachments),
     };
     if (clientUserMessageId) params.clientUserMessageId = clientUserMessageId;
+    if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
     const result = await this.client.call('turn/steer', params);
     return { mode: 'steer', turnId: currentTurn.id, result };
   }
@@ -756,7 +818,7 @@ export class CodexService extends EventEmitter {
     this.client?.close();
   }
 
-  async #collectPages(method, initialParams, limit) {
+  async #collectPages(method, initialParams, limit, { strict = false } = {}) {
     const data = [];
     const seenCursors = new Set();
     let cursor = null;
@@ -764,6 +826,7 @@ export class CodexService extends EventEmitter {
       const params = { ...initialParams, limit };
       if (cursor) params.cursor = cursor;
       const result = await this.client.call(method, params, APP_SERVER_OPERATION_TIMEOUT_MS);
+      if (strict && !Array.isArray(result?.data)) throw new Error(`${method} omitted its inventory.`);
       data.push(...(result.data ?? []));
       cursor = result.nextCursor ?? null;
       if (cursor && seenCursors.has(cursor)) throw new Error(`${method} repeated cursor: ${cursor}`);

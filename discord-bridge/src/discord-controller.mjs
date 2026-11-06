@@ -746,6 +746,8 @@ export class DiscordController {
           .some((request) => request.threadId === threadId)
         || this.deliveryOutbox.listWork({ states: ['queued', 'attempting', 'uncertain'] })
           .some((entry) => entry.threadId === threadId),
+      canArchive: (threadId) => !this.stopping && !this.taskSyncPromise
+        && !(this.stateStore.asyncQuestions?.(threadId) ?? []).some((question) => question.phase !== 'answered'),
       log: (event, details) => this.#log(event, details),
     });
     this.browserInitializationPromise = null;
@@ -4356,6 +4358,10 @@ export class DiscordController {
   }
 
   async #syncAllTasks() {
+    // Do not mirror a temporary Browser recovery archive as a channel move.
+    while (this.browserInitialization.archiveCompletion) {
+      await this.browserInitialization.archiveCompletion.catch(() => {});
+    }
     if (this.taskSyncPromise) return this.taskSyncPromise;
     this.taskSyncState = { phase: 'starting', startedAt: new Date().toISOString() };
     this.taskSyncPromise = this.#performTaskSync();

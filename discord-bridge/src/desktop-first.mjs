@@ -121,6 +121,11 @@ export class DesktopFirst {
 
   #file(threadId) { return path.join(this.directory, `${threadId}.json`); }
 
+  isWaiting(threadId, generation) {
+    const record = this.#read(threadId);
+    return record?.generation === generation && record.phase === 'waiting';
+  }
+
   #read(threadId) {
     let record;
     try { record = JSON.parse(fs.readFileSync(this.#file(threadId), 'utf8')); }
