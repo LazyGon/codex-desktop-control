@@ -49,3 +49,34 @@ test('exited processes, explicit cancellation and explicitly chosen deadlines fa
  }
  assert.equal(run("try{New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://192.168.1.1:8798';'unexpected'}catch{'rejected'}"),'rejected');
 });
+
+test('startup requires both a WebSocket handshake and local initialization from the same Desktop process', () => {
+ const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'codex-startup-handshake-'));
+ try {
+  const created=new Date(Date.now()-1000), stamp=new Date().toISOString();
+  const day=[created.getFullYear(),String(created.getMonth()+1).padStart(2,'0'),String(created.getDate()).padStart(2,'0')].join('/');
+  const dir=path.join(temporary,'Codex','Logs',day);
+  fs.mkdirSync(dir,{recursive:true});
+  const first=path.join(dir,'codex-desktop-fixture-101-t0-0.log');
+  const other=path.join(dir,'codex-desktop-fixture-202-t0-0.log');
+  const ws=stamp+' info [AppServerConnection] initialize_handshake_result outcome=success transportKind=websocket\n';
+  const local=stamp+' info [AppServerConnection] app_server_connection.state_changed hostId=local initialized=true next=connected pendingClientRequests=0\n';
+  fs.writeFileSync(first,ws);
+  fs.writeFileSync(other,local);
+  const result=JSON.parse(run([
+   `$env:LOCALAPPDATA=${literal(temporary)}`,
+   `$created=[DateTimeOffset]${literal(created.toISOString())}`,
+   '$roots=@([pscustomobject]@{ProcessId=101;CreationDate=$created},[pscustomobject]@{ProcessId=202;CreationDate=$created})',
+   "$package=[pscustomobject]@{PackageFamilyName='fixture'}; $offsets=@{}; $states=@{}",
+   '$null=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   "$before=($states.Values -contains 'local-connected')",
+   `[IO.File]::AppendAllText(${literal(first)},${literal(local)})`,
+   '$null=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   "@($before,($states.Values -contains 'local-connected'))|ConvertTo-Json",
+  ].join('; ')));
+  assert.deepEqual(result,[false,true]);
+ } finally {
+  assert.equal(path.dirname(path.resolve(temporary)),path.resolve(os.tmpdir()));
+  fs.rmSync(temporary,{recursive:true,force:true});
+ }
+});

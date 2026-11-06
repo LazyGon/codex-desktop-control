@@ -114,11 +114,12 @@ function Wait-DesktopSharedConnection {
     $lastProgressSeconds = 0.0
     $lastStage = 0
     $progressOffsets = @{}
+    $sharedHandshakeByDesktop = @{}
     while ($true) {
         Assert-LauncherNotCancelled
         $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
         if ($roots.Count -gt 0) {
-            $stage = Read-CodexDesktopStartupProgress -DesktopRoots $roots -Offsets $progressOffsets -PackageInfo $PackageInfo
+            $stage = Read-CodexDesktopStartupProgress -DesktopRoots $roots -Offsets $progressOffsets -PackageInfo $PackageInfo -SharedHandshakeByDesktop $sharedHandshakeByDesktop
             if ($stage -gt $lastStage) {
                 $lastStage = $stage
                 $lastProgressSeconds = $watch.Elapsed.TotalSeconds
@@ -126,9 +127,14 @@ function Wait-DesktopSharedConnection {
                 Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の初期化が進んでいます。進捗が続く間は接続を待ちます。' -Detail "確認済み段階: $lastStage。進捗停止の確認時間: $TimeoutSeconds 秒。" -ServerStatus '起動済み' -DesktopStatus '初期化進行中…'
             }
         }
+        $desktopInitialized = @($roots | Where-Object {
+            $started = [DateTimeOffset]$_.CreationDate
+            $sharedHandshakeByDesktop["$($_.ProcessId)|$($started.UtcDateTime.Ticks)"] -eq 'local-connected'
+        }).Count -gt 0
+        $sharedSocket = Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber
         $ownedServer = Get-Process -Id $OwnedServerProcessId -ErrorAction SilentlyContinue
         $decision = Get-CodexDesktopConnectionDecision `
-            -Connected (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber) `
+            -Connected ($desktopInitialized -and $sharedSocket) `
             -ServerAlive ($null -ne $ownedServer -and -not $ownedServer.HasExited) `
             -DesktopAlive ($roots.Count -gt 0) -Cancelled $false `
             -ElapsedSeconds ($watch.Elapsed.TotalSeconds - $lastProgressSeconds) -TimeoutSeconds $TimeoutSeconds

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import {
   CodexService,
@@ -373,6 +374,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
     config: { autoStartSharedDesktop: false, taskListLimit: 20 },
     stateStore,
     discoverEndpoint: () => ({ url, source: 'test' }),
+    inspectDesktopOwner: () => ({ state: 'present', generation: 'fixture' }),
     logDir: directory,
   });
   context.after(async () => {
@@ -394,7 +396,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const restored = await restoredPromise;
   const subscriptionsReady = await subscriptionsReadyPromise;
   assert.equal(restored.thread.id, 'thread-1');
-  assert.equal(restored.runtime.thread.id, 'thread-1');
+  assert.equal(restored.runtime, null, 'a missed completion must not acquire a live thread subscription');
   assert.equal(restored.missedCompletion.turn.id, 'new-turn');
   assert.equal(restored.missedCompletion.finalText, 'finished offline');
   assert.equal(restored.missedCompletion.needsCompletionMessage, true);
@@ -417,7 +419,7 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   assert.deepEqual(projectThreads.map((thread) => thread.id), ['thread-1', 'thread-2']);
   assert.deepEqual(listProjectFilters.slice(-2), ['project-1', 'project-1']);
   assert.deepEqual(await service.listAllProjects(), [{ id: 'project-1' }, { id: 'project-2' }]);
-  assert.deepEqual(resumedThreads, ['thread-1']);
+  assert.deepEqual(resumedThreads, []);
   assert.equal(threadReadCalls, 0);
   assert.deepEqual(turnListCalls.filter((call) => call.threadId === 'thread-1'), [{
     threadId: 'thread-1',
@@ -457,14 +459,15 @@ test('CodexService restores subscriptions and forwards live notifications', asyn
   const changedOutcome = await service.restoreChangedSubscriptions();
   const changed = await changedRestored;
   assert.equal(changed.thread.id, 'thread-current');
+  assert.equal(changed.runtime, null);
   assert.equal(changed.missedCompletion.turn.id, 'changed-turn');
   assert.deepEqual(changedOutcome, {
-    total: 1,
+    total: 2,
     restored: 1,
-    skipped: 0,
+    skipped: 1,
     failed: 0,
   });
-  assert.deepEqual(resumedThreads, ['thread-1', 'thread-current']);
+  assert.deepEqual(resumedThreads, []);
 
   const started = await service.startThread('C:\\new-work');
   await service.setThreadName(started.thread.id, 'New work');
@@ -622,6 +625,66 @@ test('complete discovery pages canonical metadata without rollout repair or hist
   assert.deepEqual(await service.listAllThreads({
     archived: true, projectId: 'project-contract', search: 'needle',
   }), [{ id: 'new-task', updatedAt: 2 }, { id: 'older-task', updatedAt: 1 }]);
+});
+
+test('Bridge waits for the verified Desktop generation before connecting or resuming work', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-service-desktop-ready-'));
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  const url = `ws://127.0.0.1:${server.address().port}`;
+  let owner = { state: 'ambiguous', generation: 'starting', reason: 'desktop-connection-unverified' };
+  let connections = 0;
+  const calls = [];
+  server.on('connection', (socket) => {
+    const connection = ++connections;
+    socket.on('message', (data) => {
+      const request = JSON.parse(data.toString());
+      if (request.id == null) return;
+      calls.push([connection, request.method]);
+      let result = {};
+      if (request.method === 'initialize' && connection === 1) {
+        owner = { state: 'present', generation: 'replacement' };
+      }
+      if (request.method === 'thread/turns/list') {
+        result = { data: [{ id: 'active-turn', status: 'inProgress', items: [] }] };
+      }
+      if (request.method === 'thread/resume') {
+        result = { thread: { id: request.params.threadId, status: { type: 'active' } } };
+      }
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+    });
+  });
+  const service = new CodexService({
+    config: { autoStartSharedDesktop: false },
+    stateStore: { bindings: () => [{ threadId: 'active-thread' }], projectCategories: () => [] },
+    discoverEndpoint: () => ({ url, source: 'test' }),
+    inspectDesktopOwner: () => owner,
+    logDir: directory,
+  });
+  context.after(async () => {
+    await service.stop();
+    await new Promise((resolve) => server.close(resolve));
+    const target = path.resolve(directory);
+    assert.equal(path.dirname(target), path.resolve(os.tmpdir()));
+    fs.rmSync(target, { recursive: true, force: true });
+  });
+  const waiting = once(service, 'connectionState');
+  const restored = once(service, 'subscriptionsReady');
+  service.start();
+  const [pending] = await waiting;
+  assert.equal(pending.state, 'waiting');
+  assert.equal(pending.desktopWaitReason, 'desktop-connection-unverified');
+  assert.equal(service.connected, false);
+  assert.equal(connections, 0);
+
+  owner = { state: 'present', generation: 'verified' };
+  const [outcome] = await restored;
+  assert.deepEqual(calls.filter(([connection]) => connection === 1), [[1, 'initialize']]);
+  assert.deepEqual(calls.filter(([connection]) => connection === 2).map(([, method]) => method), [
+    'initialize', 'thread/turns/list', 'thread/resume', 'thread/turns/list',
+  ]);
+  assert.equal(outcome.restored, 1);
+  assert.equal(service.status().desktopWaitReason, null);
 });
 
 test('CodexService fallback starts the shared launcher without interactive dialogs', async (context) => {

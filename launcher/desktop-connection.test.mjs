@@ -30,18 +30,23 @@ test('Desktop bootstrap stdio helper does not abort a subsequently successful sh
 $ErrorActionPreference = 'Stop'
 . ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1'))}
 $script:checks = 0
+$script:created = [DateTimeOffset]::Now.AddSeconds(-1)
 function Assert-LauncherNotCancelled { }
-function Test-DesktopWebSocketConnection { $script:checks += 1; return ($script:checks -ge 3) }
-function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
-function Read-CodexDesktopStartupProgress { return 0 }
+function Test-DesktopWebSocketConnection { $script:checks += 1; return $true }
+function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101; CreationDate = $script:created } }
+function Read-CodexDesktopStartupProgress {
+  param($DesktopRoots, $Offsets, $PackageInfo, $SharedHandshakeByDesktop)
+  if ($script:checks -ge 2) { $SharedHandshakeByDesktop["101|$($script:created.UtcDateTime.Ticks)"] = 'local-connected' }
+  return 0
+}
 function Get-DesktopLocalAppServers { [pscustomobject]@{ ProcessId = 202 } }
 function Write-LauncherLog { }
 . ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopConnection.ps1'))}
 $ok = Wait-DesktopSharedConnection -PackageInfo ([pscustomobject]@{DesktopExecutable='fixture'}) -PortNumber 8798 -OwnedServerProcessId $PID -TimeoutSeconds 15 -PollMilliseconds 1
-[pscustomobject]@{ok=$ok} | ConvertTo-Json -Compress
+[pscustomobject]@{ok=$ok;checks=$script:checks} | ConvertTo-Json -Compress
 `;
   const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
-  assert.equal(JSON.parse(output.trim()).ok, true);
+  assert.deepEqual(JSON.parse(output.trim()), { ok: true, checks: 3 });
 });
 
 test('Desktop connection wait remains cancellable before a shared connection exists', context => {
@@ -52,7 +57,7 @@ $ErrorActionPreference = 'Stop'
 $script:checks = 0
 function Assert-LauncherNotCancelled { if ($script:checks -ge 1) { throw [OperationCanceledException]::new('fixture cancellation') } }
 function Test-DesktopWebSocketConnection { $script:checks += 1; return $false }
-function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101 } }
+function Get-CodexDesktopRootProcesses { [pscustomobject]@{ ProcessId = 101; CreationDate = [DateTimeOffset]::Now } }
 function Read-CodexDesktopStartupProgress { return 0 }
 function Get-DesktopLocalAppServers { }
 function Write-LauncherLog { }

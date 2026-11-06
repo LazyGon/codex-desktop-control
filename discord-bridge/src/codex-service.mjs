@@ -15,6 +15,7 @@ import {
   threadStatusLabel,
 } from './util.mjs';
 import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
+import { inspectDesktopClientOwner } from './client-tool-ownership.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
 import { turnTimestampMs } from './recent-history.mjs';
 
@@ -103,14 +104,19 @@ export function subscriptionRestoreNeedsFullItems(binding, thread) {
 }
 
 export class CodexService extends EventEmitter {
-  constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn }) {
+  constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn,
+    inspectDesktopOwner = inspectDesktopClientOwner }) {
     super();
     this.config = config;
     this.stateStore = stateStore;
     this.discoverEndpoint = discoverEndpoint;
     this.spawnProcess = spawnProcess;
+    this.inspectDesktopOwner = inspectDesktopOwner;
     this.logPath = path.join(logDir, `codex-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}.jsonl`);
     this.client = null;
+    this.connectingClient = null;
+    this.clientGeneration = null;
+    this.desktopWaitReason = null;
     this.stopping = false;
     this.connectLoopPromise = null;
     this.endpoint = null;
@@ -118,6 +124,7 @@ export class CodexService extends EventEmitter {
     this.connectedAt = null;
     this.subscriptionRestoreInProgress = false;
     this.subscribedThreadIds = new Set();
+    this.restoredHistoryTurnIds = new Map();
     this.subscriptionChangePollPromise = null;
     this.lastLauncherStartAt = 0;
     this.stopPromise = new Promise((resolve) => {
@@ -145,6 +152,7 @@ export class CodexService extends EventEmitter {
       endpoint: this.endpoint,
       connectedAt: this.connectedAt,
       reconnectAttempt: this.connectionAttempt,
+      desktopWaitReason: this.desktopWaitReason,
       bindings: bindings.total,
       activeBindings: bindings.active,
       archivedBindings: bindings.archived,
@@ -161,6 +169,7 @@ export class CodexService extends EventEmitter {
     this.stopping = true;
     this.resolveStop();
     this.client?.close();
+    this.connectingClient?.close();
     if (!this.connectLoopPromise) return;
     let timeout;
     const completed = await Promise.race([
@@ -658,22 +667,37 @@ export class CodexService extends EventEmitter {
 
   async #connectLoop() {
     while (!this.stopping) {
-      const endpoint = this.discoverEndpoint(this.config);
+      let endpoint;
+      try {
+        endpoint = this.discoverEndpoint(this.config);
+      } catch {
+        this.endpoint = null;
+        this.connectionAttempt += 1;
+        await this.#waitForDesktop({ reason: 'invalid-shared-endpoint' });
+        continue;
+      }
       this.endpoint = endpoint.url;
       this.connectionAttempt += 1;
+      const owner = this.#desktopOwner(endpoint.url);
+      if (owner.state !== 'present') {
+        await this.#waitForDesktop(owner);
+        continue;
+      }
       this.emit('connectionState', { state: 'connecting', ...this.status(), source: endpoint.source });
       this.#log('connecting', { endpoint: endpoint.url, source: endpoint.source, attempt: this.connectionAttempt });
       const client = new AppServerClient(endpoint.url);
-      this.client = client;
+      this.connectingClient = client;
       let disconnectedResolve;
       const disconnected = new Promise((resolve) => { disconnectedResolve = resolve; });
       client.on('notification', (message) => {
+        if (this.client !== client) return;
         if (!isHighVolumeCodexNotification(message)) {
           this.#log('notification', { method: message.method, threadId: message.params?.threadId, turnId: message.params?.turnId ?? message.params?.turn?.id });
         }
         this.emit('notification', message);
       });
       client.on('request', (message) => {
+        if (this.client !== client) return;
         this.#log('server-request', { method: message.method, requestId: message.id, threadId: message.params?.threadId });
         this.emit('serverRequest', message);
       });
@@ -692,10 +716,24 @@ export class CodexService extends EventEmitter {
           client.connect().then(() => true),
           this.stopPromise.then(() => false),
         ]);
-        if (!connected) break;
+        if (!connected || this.stopping) break;
+        const verified = this.#desktopOwner(endpoint.url);
+        if (verified.state !== 'present' || verified.generation !== owner.generation) {
+          client.close();
+          this.connectingClient = null;
+          await this.#waitForDesktop(verified.state === 'present'
+            ? { reason: 'shared-runtime-changed-during-connect' } : verified);
+          continue;
+        }
+        if (!client.connected) throw new Error('Shared App Server closed during initialization.');
+        this.client = client;
+        this.clientGeneration = verified.generation;
+        this.connectingClient = null;
+        this.desktopWaitReason = null;
         this.connectionAttempt = 0;
         this.connectedAt = new Date().toISOString();
         this.subscribedThreadIds.clear();
+        this.restoredHistoryTurnIds.clear();
         this.subscriptionRestoreInProgress = true;
         this.emit('connectionState', { state: 'connected', ...this.status(), source: endpoint.source });
         this.#log('connected', { endpoint: endpoint.url });
@@ -709,31 +747,50 @@ export class CodexService extends EventEmitter {
       } catch (error) {
         this.#log('connect-failed', { endpoint: endpoint.url, error: error.message });
         this.emit('connectionState', { state: 'disconnected', ...this.status(), error: error.message });
-        this.#maybeStartSharedDesktop();
       } finally {
         client.close();
         if (this.client === client) this.client = null;
+        if (this.connectingClient === client) this.connectingClient = null;
+        this.clientGeneration = null;
         this.connectedAt = null;
         this.subscriptionRestoreInProgress = false;
         this.subscribedThreadIds.clear();
+        this.restoredHistoryTurnIds.clear();
       }
 
       if (this.stopping) break;
-      const delay = Math.min(30_000, 1_000 * (2 ** Math.min(this.connectionAttempt, 5)));
+      const delay = this.#connectionRetryDelay();
       this.emit('connectionState', { state: 'waiting', delayMs: delay, ...this.status() });
       await Promise.race([sleep(delay), this.stopPromise]);
     }
+  }
+
+  #desktopOwner(appServerUrl) {
+    return this.inspectDesktopOwner({ launcherStatePath: this.config.launcherStatePath, appServerUrl });
+  }
+
+  #connectionRetryDelay() {
+    return Math.min(30_000, 1_000 * (2 ** Math.min(this.connectionAttempt, 5)));
+  }
+
+  async #waitForDesktop({ reason }) {
+    if (this.desktopWaitReason !== reason) this.#log('waiting-for-desktop', { reason });
+    this.desktopWaitReason = reason;
+    const delay = this.#connectionRetryDelay();
+    this.emit('connectionState', { state: 'waiting', delayMs: delay, ...this.status() });
+    if (reason === 'launcher-state-unavailable' || reason === 'app-server-generation-unverified') {
+      this.#maybeStartSharedDesktop();
+    }
+    await Promise.race([sleep(delay), this.stopPromise]);
   }
 
   async #restoreSubscriptions() {
     const bindings = subscriptionRestoreBindings(this.stateStore.bindings())
       .filter((binding) => !this.isSubscribed(binding.threadId));
     // A reconnect must not hydrate several unbounded histories on one
-    // WebSocket. Newer app-server builds can close that overloaded connection,
-    // causing every restore to restart from the beginning. Inspect bounded
-    // metadata first, and resume only a task with an active turn or a missed
-    // completion. Unchanged idle tasks remain lazy until delivery or a later
-    // metadata poll observes activity.
+    // WebSocket. Check recent metadata first and subscribe only to active work.
+    // A missed completion can be recovered from stored history without loading
+    // the task ahead of Desktop and its per-task tool configuration.
     const outcome = {
       total: bindings.length,
       restored: 0,
@@ -760,18 +817,38 @@ export class CodexService extends EventEmitter {
             },
           }, summaryResult.data),
         );
-        if (!subscriptionRestoreNeedsFullItems(binding, summaryThread)) {
+        const wasActive = summaryThread.turns.some((turn) => turn.status === 'inProgress');
+        const summaryCompleted = summaryThread.turns.at(-1);
+        if (!subscriptionRestoreNeedsFullItems(binding, summaryThread) ||
+          (!wasActive && summaryCompleted?.id === this.restoredHistoryTurnIds.get(binding.threadId))) {
           outcome.skipped += 1;
           return;
         }
-        const runtime = await this.resumeThread(binding.threadId);
-        const hydratedResult = await this.recentTurns(binding.threadId);
-        const thread = threadForSubscriptionRestore(
+        let runtime = wasActive ? await this.resumeThread(binding.threadId) : null;
+        let hydratedResult = await this.recentTurns(binding.threadId);
+        let thread = threadForSubscriptionRestore(
           binding,
-          subscriptionRestoreThread(runtime.thread, hydratedResult.data),
+          subscriptionRestoreThread(runtime?.thread ?? summaryThread, hydratedResult.data),
         );
+        if (!runtime && thread.turns.some((turn) => turn.status === 'inProgress')) {
+          // A turn may have started between the summary and history reads.
+          runtime = await this.resumeThread(binding.threadId);
+          hydratedResult = await this.recentTurns(binding.threadId);
+          thread = threadForSubscriptionRestore(
+            binding, subscriptionRestoreThread(runtime.thread, hydratedResult.data),
+          );
+        }
         const completed = [...(thread.turns ?? [])].reverse()
           .find((turn) => turn.status !== 'inProgress');
+        if (!runtime && completed?.id) {
+          // Keep the same one-attempt-per-connection behavior as a subscription
+          // while the controller settles the completion and persists its receipt.
+          if (this.restoredHistoryTurnIds.get(binding.threadId) === completed.id) {
+            outcome.skipped += 1;
+            return;
+          }
+          this.restoredHistoryTurnIds.set(binding.threadId, completed.id);
+        }
         const finalText = finalTextFromTurn(completed, needsSessionCompletionFallback(completed)
           ? completionTextFromSession(thread.path, completed?.id)
           : '');
@@ -789,6 +866,7 @@ export class CodexService extends EventEmitter {
         this.#log('subscription-restored', {
           threadId: binding.threadId,
           status: threadStatusLabel(thread.status),
+          subscribed: Boolean(runtime),
           missedTurnId: needsCompletionMessage || needsCompletionNotice ? completed?.id : null,
         });
         outcome.restored += 1;
@@ -818,6 +896,12 @@ export class CodexService extends EventEmitter {
 
   #requireClient() {
     if (!this.client?.connected) throw new Error('Codex app-server is offline. The bridge will retry automatically.');
+    if (this.clientGeneration !== null) {
+      const owner = this.#desktopOwner(this.endpoint);
+      if (owner.state !== 'present' || owner.generation !== this.clientGeneration) {
+        throw new Error('Waiting for Desktop to connect to the shared App Server.');
+      }
+    }
   }
 
   #maybeStartSharedDesktop() {

@@ -55,8 +55,9 @@ function Get-CodexDesktopStartupLogStage {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
     if($Line -match '\[StdioConnection\] stdio_transport_spawned '){return 10}
     if($Line -notmatch '\[AppServerConnection\]'){return 0}
+    if($Line -match 'initialize_handshake_result .*outcome=success .*transportKind=websocket(?: |$)' -and
+        ($Line -notmatch '(?:^| )hostId=' -or $Line -match '(?:^| )hostId=local(?: |$)')){return 40}
     if($Line -notmatch '(?:^| )hostId=local(?: |$)'){return 0}
-    if($Line -match 'initialize_handshake_result .*outcome=success .*transportKind=websocket'){return 40}
     if($Line -match 'app_server_connection\.state_changed .*initialized=true .*next=connected '){return 50}
     if($Line -match 'Transport start success '){return 30}
     if($Line -match 'Starting app-server connection '){return 20}
@@ -64,7 +65,12 @@ function Get-CodexDesktopStartupLogStage {
 }
 
 function Read-CodexDesktopStartupProgress {
-    param([Parameter(Mandatory)][object[]]$DesktopRoots,[Parameter(Mandatory)][hashtable]$Offsets,[Parameter(Mandatory)][object]$PackageInfo)
+    param(
+        [Parameter(Mandatory)][object[]]$DesktopRoots,
+        [Parameter(Mandatory)][hashtable]$Offsets,
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [hashtable]$SharedHandshakeByDesktop
+    )
     $logRoots=@(
         (Join-Path $env:LOCALAPPDATA 'Codex\Logs'),
         (Join-Path $env:LOCALAPPDATA ('Packages\'+$PackageInfo.PackageFamilyName+'\LocalCache\Local\Codex\Logs'))
@@ -90,6 +96,15 @@ function Read-CodexDesktopStartupProgress {
                         $eventTime=[DateTimeOffset]::MinValue
                         if(-not [DateTimeOffset]::TryParse($Matches[1],[ref]$eventTime) -or $eventTime -lt $started){continue}
                         $stage=Get-CodexDesktopStartupLogStage -Line $line
+                        if($null -ne $SharedHandshakeByDesktop){
+                            $actor = "$($root.ProcessId)|$($started.UtcDateTime.Ticks)"
+                            if($stage -eq 40 -and -not $SharedHandshakeByDesktop.ContainsKey($actor)){
+                                $SharedHandshakeByDesktop[$actor] = 'websocket-initialized'
+                            }
+                            elseif($stage -eq 50 -and $SharedHandshakeByDesktop[$actor] -eq 'websocket-initialized'){
+                                $SharedHandshakeByDesktop[$actor] = 'local-connected'
+                            }
+                        }
                         if($stage -gt $maxStage){$maxStage=$stage}
                     }
                     $Offsets[$file.FullName]=$stream.Position

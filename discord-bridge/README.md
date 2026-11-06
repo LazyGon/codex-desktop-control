@@ -428,6 +428,15 @@ Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
 after the shared launcher has already been installed.
 
+The Bridge waits for the shared launcher's verified Desktop connection before
+connecting to the AppServer and restoring task subscriptions. The AppServer
+listener alone does not make Desktop ready. Any explicitly configured
+`appServerUrl` must match that launcher record. After reconnecting, the Bridge
+can recover a missed completion from stored history without loading the task.
+An active turn still gets a live subscription. Desktop's browser authorization
+is applied per task; waiting for Desktop startup does not add it to a task
+already loaded by another client.
+
 The host appears as **Codex Discord Remote** in the notification area and as
 `CodexDiscordRemoteHost.exe` in Task Manager, instead of leaving the Bridge
 identified only by generic PowerShell and Node processes. Its notification-area
