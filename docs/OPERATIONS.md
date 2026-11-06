@@ -180,8 +180,10 @@ automatic archiving. Discord synchronization waits through the round trip.
 Receipts are in `discord-bridge/data/desktop-first/` and
 `discord-bridge/data/browser-initialization/`. Archive, restore, and URI
 dispatch each have their own claim. An interrupted or uncertain mutation is
-not automatically repeated or reversed; verify the actual task state from
-the shared App Server before any manual recovery. After a confirmed load, a
+not automatically repeated or reversed. If a direct read proves the same
+task and history are already restored and unloaded, the Bridge can continue
+with the Desktop handoff alone. Verify the actual task state from the shared
+App Server before any manual recovery. After a confirmed load, a
 later cold load may open a new link. A Desktop load receipt proves the loading
 order; a successful Computer Use call proves browser access. The Bridge does
 not replay the failed turn.

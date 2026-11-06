@@ -11,10 +11,18 @@ const LOCAL_SOURCES = new Set(['vscode', 'cli', 'exec', 'appServer']);
 const FINISHED = new Set(['completed', 'failed']);
 const OPEN_STATES = ['handed-off', 'open-claimed', 'dispatched', 'unknown'];
 const ARCHIVE_STATES = ['archive-claimed', 'archived', 'unarchive-claimed', 'restored'];
-const ADVANCE_STATES = ['pending', 'release-claimed', 'released', 'restored'];
+const ADVANCE_STATES = ['pending', 'release-claimed', 'released', 'unarchive-claimed', 'restored'];
 const STATES = new Set([...ADVANCE_STATES, ...ARCHIVE_STATES, 'superseded', ...OPEN_STATES]);
 const archivedPath = (value) => typeof value === 'string' && /[\\/]archived_sessions[\\/]/i.test(value);
 export const DESKTOP_PACKAGE_FAMILY = 'OpenAI.Codex_2p2nqsd0c76g0';
+
+function sameSessionPath(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const normalize = (value) => path.win32.normalize(value.startsWith('\\\\?\\UNC\\')
+    ? '\\\\' + value.slice(8)
+    : value.startsWith('\\\\?\\') ? value.slice(4) : value);
+  return normalize(left) === normalize(right);
+}
 
 function computerUseCode(item) {
   if (item?.type !== 'mcpToolCall' || item.server !== 'cua_repl' || item.tool !== 'js') return null;
@@ -177,7 +185,15 @@ export class BrowserInitialization {
       }
       return false;
     }
-    if (thread.status?.type === 'notLoaded') return this.#handoff(record);
+    if (thread.status?.type === 'notLoaded') {
+      if (record.state === 'unarchive-claimed') {
+        // Reconcile a verified restore without repeating either mutation.
+        // The Windows store can return the same path with or without \\?\.
+        if (!archivedPath(record.archivedPath) || !sameSessionPath(thread.path, record.originalPath)) return false;
+        return this.#handoff(this.#write(record, 'restored'));
+      }
+      return this.#handoff(record);
+    }
     if (thread.canAcceptDirectInput !== true || this.codex.isSubscribed(threadId) || !this.canArchive(threadId)) return false;
     const grace = await this.codex.browserUnloadGraceMs();
     if (!stillCurrent() || !Number.isSafeInteger(grace)) return false;
@@ -210,7 +226,7 @@ export class BrowserInitialization {
       const latest = (await this.codex.recentTurns(threadId, { limit: 1, itemsView: 'notLoaded' })).data?.[0];
       const live = await this.codex.readThreadMetadata(threadId);
       if (!stillCurrent() || !this.canArchive(threadId) || latest?.id !== turnId || !FINISHED.has(latest.status)
-        || live?.id !== threadId || live.path !== originalPath || live.status?.type !== 'idle'
+        || live?.id !== threadId || !sameSessionPath(live.path, originalPath) || live.status?.type !== 'idle'
         || live.canAcceptDirectInput !== true || this.codex.isSubscribed(threadId)) return false;
 
       // Record each irreversible request before dispatch. An interrupted or
@@ -220,7 +236,7 @@ export class BrowserInitialization {
       if (accepted?.threadId !== threadId || !this.#sameEpisode(receipt)) return true;
       const archived = await this.codex.readThreadMetadata(threadId);
       if (!this.#sameEpisode(receipt) || archived?.id !== threadId || archived.status?.type !== 'notLoaded'
-        || !archivedPath(archived.path) || path.basename(archived.path) !== path.basename(originalPath)) {
+        || !archivedPath(archived.path) || path.win32.basename(archived.path) !== path.win32.basename(originalPath)) {
         this.log('browser-init-archive-unconfirmed', { threadId, turnId });
         return true;
       }
@@ -229,7 +245,7 @@ export class BrowserInitialization {
       const response = await this.codex.unarchiveThread(threadId, { browserRecovery: true });
       if (response?.thread?.id !== threadId || !this.#sameEpisode(receipt)) return true;
       const restored = await this.codex.readThreadMetadata(threadId);
-      if (!this.#sameEpisode(receipt) || restored?.id !== threadId || restored.path !== originalPath) {
+      if (!this.#sameEpisode(receipt) || restored?.id !== threadId || !sameSessionPath(restored.path, originalPath)) {
         this.log('browser-init-restore-unconfirmed', { threadId, turnId });
         return true;
       }

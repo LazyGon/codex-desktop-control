@@ -227,7 +227,11 @@ test('uncertain archive or restore leaves a durable fence without another mutati
     state.thread.status.type = 'idle';
     state.subscribed = false;
     const call = codex[method];
-    codex[method] = async (id) => { await call(id); throw new Error('lost acknowledgement'); };
+    codex[method] = async (id) => {
+      if (method === 'archiveThread') await call(id);
+      else state.archive.push(['unarchive', id]); // No restore is independently visible.
+      throw new Error('lost acknowledgement');
+    };
     const init = make();
     init.observe(EVENT);
     await init.run();
@@ -236,4 +240,26 @@ test('uncertain archive or restore leaves a durable fence without another mutati
     assert.deepEqual(state.archive, actions);
     assert.deepEqual(state.opened, []);
   }
+});
+
+test('reconciles a restored Windows path without resending archive or unarchive', async (t) => {
+  const { state, make, read, codex } = fixture(t);
+  state.thread.status.type = 'idle';
+  state.subscribed = false;
+  state.thread.path = '\\\\?\\C:\\Codex\\sessions\\thread.jsonl';
+  const unarchive = codex.unarchiveThread;
+  codex.unarchiveThread = async (id) => {
+    await unarchive(id);
+    state.thread.path = 'C:\\Codex\\sessions\\thread.jsonl';
+    throw new Error('lost acknowledgement');
+  };
+  const init = make();
+  init.observe(EVENT);
+  await init.run();
+  assert.equal(read().state, 'unarchive-claimed');
+  assert.deepEqual(state.opened, []);
+  await make().run();
+  assert.deepEqual(state.archive, [['archive', THREAD], ['unarchive', THREAD]]);
+  assert.deepEqual(state.opened, [THREAD]);
+  assert.equal(read().state, 'handed-off');
 });
