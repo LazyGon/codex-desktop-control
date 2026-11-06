@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { DeliveryOutbox } from '../src/delivery-outbox.mjs';
 import { DeliveryOutboxWorker } from '../src/delivery-outbox-worker.mjs';
+import { DesktopThreadPendingError } from '../src/desktop-first.mjs';
 
 test('a new input is picked up during dispatch without waiting for uncertain-history reconciliation', { timeout: 5000 }, async (context) => {
   const temp = path.resolve(os.tmpdir());
@@ -72,4 +73,44 @@ test('a new input is picked up during dispatch without waiting for uncertain-his
     await Promise.all(worker.pendingWork().map(([, promise]) => promise));
   }
   assert.equal(outbox.get('second').callback.state, 'delivered');
+});
+
+test('an unconfirmed Desktop load holds that task in order while other tasks can send', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-delivery-desktop-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const outbox = new DeliveryOutbox(directory);
+  for (const [requestId, threadId] of [['01', 'cold'], ['02', 'cold'], ['03', 'loaded']]) {
+    outbox.enqueue({ requestId, threadId, prompt: requestId, source: { channelId: threadId } });
+  }
+  let ready = false;
+  const sent = [];
+  const prepared = [];
+  const worker = new DeliveryOutboxWorker({
+    outbox,
+    codex: {
+      connected: true,
+      prepareDelivery: async (threadId) => {
+        prepared.push(threadId);
+        if (threadId === 'cold' && !ready) throw new DesktopThreadPendingError();
+        return { mode: 'send' };
+      },
+      executePreparedDelivery: async (_threadId, _prompt, _attachments, requestId) => {
+        sent.push(requestId);
+        return { mode: 'send', turnId: `turn-${requestId}` };
+      },
+    },
+    staleReason: () => null,
+    present: async () => {},
+    isStopping: () => false,
+    log: () => {},
+  });
+  await worker.request('discord-message');
+  assert.deepEqual(prepared, ['cold', 'loaded']);
+  assert.deepEqual(sent, ['03']);
+  assert.equal(outbox.get('01').state, 'queued');
+  assert.equal(outbox.get('02').state, 'queued');
+  ready = true;
+  await worker.request('task-sync-poll');
+  assert.deepEqual(sent, ['03', '01', '02']);
+  assert.equal(outbox.get('01').receipt.turnId, 'turn-01');
 });

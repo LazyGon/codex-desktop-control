@@ -75,14 +75,20 @@ export class DeliveryOutboxWorker {
 
   async #deliver(reason) {
     this.log('delivery-outbox-drain-start', { reason });
+    const waitingThreads = new Set();
     for (const entry of this.outbox.listWork({ states: ['queued'] })) {
       if (!this.#canDeliver()) break;
+      if (waitingThreads.has(entry.threadId)) continue;
       if (this.#rejectStale(entry, reason)) continue;
 
       let target;
       try {
         target = await this.codex.prepareDelivery(entry.threadId);
       } catch (error) {
+        if (error.code === 'DESKTOP_THREAD_PENDING') {
+          waitingThreads.add(entry.threadId);
+          continue;
+        }
         if (!this.codex.connected || isTransientCommunicationError(error)) {
           this.log('delivery-outbox-prepare-deferred', {
             requestId: entry.requestId,

@@ -9,7 +9,8 @@ const HOST_UNAVAILABLE = 'The browser access host is unavailable';
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const LOCAL_SOURCES = new Set(['vscode', 'cli', 'exec', 'appServer']);
 const FINISHED = new Set(['completed', 'failed']);
-const STATES = new Set(['pending', 'release-claimed', 'open-claimed', 'dispatched', 'unknown', 'superseded']);
+const OPEN_STATES = ['handed-off', 'open-claimed', 'dispatched', 'unknown'];
+const STATES = new Set(['pending', 'release-claimed', 'superseded', ...OPEN_STATES]);
 export const DESKTOP_PACKAGE_FAMILY = 'OpenAI.Codex_2p2nqsd0c76g0';
 
 function computerUseCode(item) {
@@ -68,8 +69,8 @@ function eligibleBinding(binding) {
 }
 
 export class BrowserInitialization {
-  constructor({ directory, codex, binding, isBusy, open = openDesktopThread, log = () => {} }) {
-    Object.assign(this, { directory, codex, binding, isBusy, open, log });
+  constructor({ directory, codex, binding, isBusy, log = () => {} }) {
+    Object.assign(this, { directory, codex, binding, isBusy, log });
   }
 
   #recordPath(threadId) {
@@ -102,7 +103,7 @@ export class BrowserInitialization {
     if (!eligibleBinding(binding) || !generation) return false;
     const existing = this.#read(threadId);
     if (existing?.generation === generation) {
-      if (['open-claimed', 'dispatched', 'unknown'].includes(existing.state)) return false;
+      if (OPEN_STATES.includes(existing.state)) return false;
       // A replayed notification cannot replace more recent work or reset a release claim.
       if (turnId <= existing.turnId) return false;
     }
@@ -168,10 +169,9 @@ export class BrowserInitialization {
       return false;
     }
     if (thread.status?.type !== 'notLoaded') return false;
-    this.#write(record, 'open-claimed');
-    try { await this.open(threadId); }
-    catch { this.#write(record, 'unknown'); return true; }
-    this.#write(record, 'dispatched');
+    const outcome = await this.codex.prepareDesktopThread(threadId);
+    if (outcome !== 'opening') return false;
+    if (stillCurrent()) this.#write(record, 'handed-off');
     return true;
   }
 }

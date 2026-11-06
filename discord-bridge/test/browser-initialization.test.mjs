@@ -29,6 +29,7 @@ function fixture(t) {
     readThreadMetadata: async () => state.thread,
     recentTurns: async () => ({ data: [state.turn] }),
     isSubscribed: () => state.subscribed,
+    prepareDesktopThread: async (id) => { state.opened.push(id); return 'opening'; },
     releaseBrowserInitializationSubscription: async (id, generation) => {
       state.released.push([id, generation]);
       state.subscribed = false;
@@ -36,7 +37,7 @@ function fixture(t) {
   };
   const make = (overrides = {}) => new BrowserInitialization({
     directory: dir, codex, binding: () => state.binding, isBusy: () => state.busy,
-    open: async (id) => state.opened.push(id), ...overrides,
+    ...overrides,
   });
   const read = () => JSON.parse(fs.readFileSync(path.join(dir, `${THREAD}.json`), 'utf8'));
   return { state, make, read, codex };
@@ -78,7 +79,7 @@ test('waits for the exact failed task, releases only the Bridge subscription, th
   state.thread.status.type = 'notLoaded';
   await init.run();
   assert.deepEqual(state.opened, [THREAD]);
-  assert.equal(read().state, 'dispatched');
+  assert.equal(read().state, 'handed-off');
   assert.equal(make().observe(EVENT), false);
   await make().run();
   assert.deepEqual(state.opened, [THREAD]);
@@ -121,17 +122,18 @@ test('rechecks binding, owner and task activity immediately before dispatch', as
   assert.deepEqual(state.opened, []);
 });
 
-test('an uncertain URI dispatch is durably fenced and not tried again', async (t) => {
-  const { state, make, read } = fixture(t);
+test('failure recovery does not consume its handoff before the shared coordinator claims an open', async (t) => {
+  const { state, make, read, codex } = fixture(t);
   state.thread.status.type = 'notLoaded';
-  const init = make({ open: async () => {
-    assert.equal(read().state, 'open-claimed');
-    throw new Error('lost result');
-  } });
+  const init = make();
   init.observe(EVENT);
+  const prepare = codex.prepareDesktopThread;
+  codex.prepareDesktopThread = async () => 'waiting';
   await init.run();
-  assert.equal(read().state, 'unknown');
-  await make().run();
-  assert.equal(make().observe({ ...EVENT, turnId: '01a1af48-0000-7000-8000-000000000001' }), false);
+  assert.equal(read().state, 'pending');
   assert.deepEqual(state.opened, []);
+  codex.prepareDesktopThread = prepare;
+  await init.run();
+  assert.equal(read().state, 'handed-off');
+  assert.deepEqual(state.opened, [THREAD]);
 });

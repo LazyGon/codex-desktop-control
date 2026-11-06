@@ -4292,7 +4292,8 @@ export class DiscordController {
         this.deliveryWorker.request('task-sync-poll')
       )).then(async () => {
         if (this.stopping) return;
-        this.browserInitializationPromise = this.browserInitialization.run();
+        this.browserInitializationPromise = Promise.resolve(this.codex.reconcileDesktopThreads?.())
+          .then(() => this.browserInitialization.run());
         try { await this.browserInitializationPromise; }
         finally { this.browserInitializationPromise = null; }
       }).then(() => {

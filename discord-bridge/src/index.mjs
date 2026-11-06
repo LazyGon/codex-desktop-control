@@ -80,7 +80,9 @@ const client = new Client({
 });
 const channelCreateRest = attachChannelCreateDiagnostics(client.rest, config.guildId,
   (event, metadata) => appendJsonLine(processLog, event, metadata));
-const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir });
+const codex = new CodexService({ config, stateStore, discoverEndpoint, logDir,
+  desktopFirstDirectory: path.join(dataDir, 'desktop-first'),
+});
 const controller = new DiscordController({
   client,
   codex,

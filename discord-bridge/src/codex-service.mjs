@@ -16,10 +16,11 @@ import {
   threadStatusLabel,
 } from './util.mjs';
 import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
-import { inspectDesktopClientOwner } from './client-tool-ownership.mjs';
+import { inspectDesktopClientOwner, processIsAlive } from './client-tool-ownership.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
 import { turnTimestampMs } from './recent-history.mjs';
-import { DESKTOP_PACKAGE_FAMILY } from './browser-initialization.mjs';
+import { DESKTOP_PACKAGE_FAMILY, openDesktopThread } from './browser-initialization.mjs';
+import { DesktopFirst, DesktopThreadPendingError } from './desktop-first.mjs';
 
 function attachmentValues(attachments) {
   if (!attachments) return [];
@@ -107,7 +108,7 @@ export function subscriptionRestoreNeedsFullItems(binding, thread) {
 
 export class CodexService extends EventEmitter {
   constructor({ config, stateStore, discoverEndpoint, logDir, spawnProcess = spawn,
-    inspectDesktopOwner = inspectDesktopClientOwner }) {
+    inspectDesktopOwner = inspectDesktopClientOwner, desktopFirstDirectory = null, desktopFirst = null }) {
     super();
     this.config = config;
     this.stateStore = stateStore;
@@ -128,6 +129,14 @@ export class CodexService extends EventEmitter {
     this.subscribedThreadIds = new Set();
     this.browserSubscriptionReleases = new Map();
     this.resumingThreadCounts = new Map();
+    this.preparedDeliveryOwners = new WeakMap();
+    this.desktopFirst = desktopFirst ?? (desktopFirstDirectory && new DesktopFirst({
+      directory: desktopFirstDirectory,
+      runtime: () => this.#browserInitializationRuntime(),
+      readThread: (id) => this.readThreadMetadata(id),
+      open: openDesktopThread,
+      log: (event, details) => this.#log(event, details),
+    }));
     this.restoredHistoryTurnIds = new Map();
     this.subscriptionChangePollPromise = null;
     this.lastLauncherStartAt = 0;
@@ -242,6 +251,10 @@ export class CodexService extends EventEmitter {
   }
 
   browserInitializationGeneration() {
+    return this.#browserInitializationRuntime()?.generation ?? null;
+  }
+
+  #browserInitializationRuntime() {
     if (process.platform !== 'win32' || this.stopping || !this.connected || !this.clientGeneration) return null;
     const state = readJsonIfPresent(this.config.launcherStatePath);
     if (state?.packageFamilyName !== DESKTOP_PACKAGE_FAMILY) return null;
@@ -250,7 +263,33 @@ export class CodexService extends EventEmitter {
         && state.packageVersion === '26.1029.7803.0');
     if (!compatible) return null;
     const owner = this.#desktopOwner(this.endpoint);
-    return owner.state === 'present' && owner.generation === this.clientGeneration ? owner.generation : null;
+    if (owner.state !== 'present' || owner.generation !== this.clientGeneration) return null;
+    const local = process.env.LOCALAPPDATA;
+    return {
+      generation: owner.generation,
+      desktopPids: state.desktopProcessIds.filter(processIsAlive),
+      startedAt: state.startedAt,
+      logRoots: local ? [
+        path.join(local, 'Codex', 'Logs'),
+        path.join(local, 'Packages', DESKTOP_PACKAGE_FAMILY, 'LocalCache', 'Local', 'Codex', 'Logs'),
+      ] : [],
+    };
+  }
+
+  prepareDesktopThread(threadId) {
+    return this.desktopFirst?.prepare(threadId);
+  }
+
+  reconcileDesktopThreads() {
+    return this.desktopFirst?.reconcile();
+  }
+
+  async #ensureDesktopFirst(threadId) {
+    const client = this.client;
+    const state = await this.prepareDesktopThread(threadId);
+    if (state === 'opening' || state === 'waiting') throw new DesktopThreadPendingError();
+    if (this.client !== client) throw new Error('App Server connection closed during Desktop preparation.');
+    this.#requireClient();
   }
 
   isResumingThread(threadId) {
@@ -365,13 +404,21 @@ export class CodexService extends EventEmitter {
     }
   }
 
-  async resumeThread(threadId) {
+  async resumeThread(threadId, { monitorOnly = false } = {}) {
     this.resumingThreadCounts.set(threadId, (this.resumingThreadCounts.get(threadId) ?? 0) + 1);
     try {
       const releasing = this.browserSubscriptionReleases.get(threadId);
       if (releasing) await releasing.catch(() => {});
       this.#requireClient();
       const client = this.client;
+      if (monitorOnly) {
+        if (this.browserInitializationGeneration()) {
+          const thread = await this.readThreadMetadata(threadId);
+          if (this.client !== client || thread?.id !== threadId || thread.status?.type !== 'active') {
+            throw new DesktopThreadPendingError();
+          }
+        }
+      } else await this.#ensureDesktopFirst(threadId);
       const result = await client.call(
         'thread/resume',
         { threadId, excludeTurns: true },
@@ -392,6 +439,7 @@ export class CodexService extends EventEmitter {
 
   async updateThreadSettings(threadId, patch) {
     this.#requireClient();
+    await this.#ensureDesktopFirst(threadId);
     await this.client.call('thread/settings/update', { threadId, ...patch }, APP_SERVER_OPERATION_TIMEOUT_MS);
     return { threadId, patch };
   }
@@ -449,6 +497,7 @@ export class CodexService extends EventEmitter {
 
   async startReview(threadId, target, delivery = 'inline') {
     this.#requireClient();
+    await this.#ensureDesktopFirst(threadId);
     return this.client.call('review/start', { threadId, target, delivery }, APP_SERVER_OPERATION_TIMEOUT_MS);
   }
 
@@ -568,10 +617,14 @@ export class CodexService extends EventEmitter {
 
   async prepareDelivery(threadId) {
     await this.resumeThread(threadId);
+    const client = this.client;
     const currentTurn = await this.activeTurn(threadId);
-    return currentTurn
+    if (this.client !== client) throw new Error('App Server connection closed during delivery preparation.');
+    const target = currentTurn
       ? { mode: 'steer', expectedTurnId: currentTurn.id }
       : { mode: 'send', expectedTurnId: null };
+    this.preparedDeliveryOwners.set(target, client);
+    return target;
   }
 
   async executePreparedDelivery(
@@ -583,6 +636,9 @@ export class CodexService extends EventEmitter {
   ) {
     this.#requireClient();
     if (!clientUserMessageId) throw new Error('Prepared delivery requires clientUserMessageId.');
+    if (this.preparedDeliveryOwners.has(target) && this.preparedDeliveryOwners.get(target) !== this.client) {
+      throw new Error('App Server connection closed after delivery preparation.');
+    }
     if (target?.mode === 'send') {
       const result = await this.client.call('turn/start', {
         threadId,
@@ -665,7 +721,6 @@ export class CodexService extends EventEmitter {
   }
 
   async interrupt(threadId) {
-    await this.resumeThread(threadId);
     const currentTurn = await this.activeTurn(threadId);
     if (!currentTurn) throw new Error('Task has no active turn to interrupt.');
     await this.client.call('turn/interrupt', { threadId, turnId: currentTurn.id });
@@ -876,7 +931,7 @@ export class CodexService extends EventEmitter {
           outcome.skipped += 1;
           return;
         }
-        let runtime = wasActive ? await this.resumeThread(binding.threadId) : null;
+        let runtime = wasActive ? await this.resumeThread(binding.threadId, { monitorOnly: true }) : null;
         let hydratedResult = await this.recentTurns(binding.threadId);
         let thread = threadForSubscriptionRestore(
           binding,
@@ -884,7 +939,7 @@ export class CodexService extends EventEmitter {
         );
         if (!runtime && thread.turns.some((turn) => turn.status === 'inProgress')) {
           // A turn may have started between the summary and history reads.
-          runtime = await this.resumeThread(binding.threadId);
+          runtime = await this.resumeThread(binding.threadId, { monitorOnly: true });
           hydratedResult = await this.recentTurns(binding.threadId);
           thread = threadForSubscriptionRestore(
             binding, subscriptionRestoreThread(runtime.thread, hydratedResult.data),
@@ -923,6 +978,10 @@ export class CodexService extends EventEmitter {
         });
         outcome.restored += 1;
       } catch (error) {
+        if (error instanceof DesktopThreadPendingError) {
+          outcome.skipped += 1;
+          return;
+        }
         outcome.failed += 1;
         this.#log('subscription-restore-failed', { threadId: binding.threadId, error: error.message });
         this.emit('subscriptionError', { binding, error });
