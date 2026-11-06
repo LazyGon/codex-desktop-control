@@ -126,9 +126,19 @@ delivered once to the requesting task; its receipt is
 inspect the actual registered version before any other install attempt.
 Optional observation limits default to zero (no deadline).
 
+If normal shutdown still leaves Windows reporting `0x80073D02`, an Owner may
+explicitly approve `-AllowTargetApplicationShutdown` for one manual update.
+This uses `ForceTargetApplicationShutdown` only for the verified Codex package,
+not its dependencies or Windows. Without this option, installation retains
+deferred registration. For a legacy running supervisor, the same explicit
+approval permits migration only after the source turn and loaded work are idle
+and the existing supervisor has released its own server. Actual exit codes and
+the legacy approval are recorded in both handoff receipts; automatic handoffs
+still require a clean exit. This does not authorize a Windows restart.
+
 The new handoff loads on the next normal shared startup. An older running
-supervisor is preserved, and the manual updater refuses to close it without
-the new graceful-shutdown capability. Historical `package-update-drain.json`
+supervisor is preserved unless the explicit manual migration above is approved;
+ordinary updates require the new graceful-shutdown capability. Historical `package-update-drain.json`
 records are retained and are never applied by the new launcher.
 
 ## Discover and catch up a phone-created task

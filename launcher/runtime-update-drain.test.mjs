@@ -184,6 +184,8 @@ test('refresh task ownership rejects foreign actions, principals, triggers and a
     "$payload=" + quotePowerShell(encodedPowerShell(command)),
     "$task=[pscustomobject]@{ State='Ready'; Description=$scheduledTaskDescription; Principal=[pscustomobject]@{UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}; Triggers=@(); Actions=@([pscustomobject]@{Execute=" + quotePowerShell(windowsPowerShell()) + ";Arguments=('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand '+$payload);WorkingDirectory=$repositoryRoot}) }",
     'Assert-OwnedRefreshTask $task',
+    "$task.Actions[0].Arguments='-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($payload))).Replace('-ScheduledController','-AllowTargetApplicationShutdown:$True -ScheduledController')))",
+    'Assert-OwnedRefreshTask $task',
     '$rejected=@()',
     "foreach($kind in @('action','principal','trigger','state','directory')) {",
     ' $foreign=$task | ConvertTo-Json -Depth 5 | ConvertFrom-Json',
@@ -250,6 +252,44 @@ test('default turn wait has no agent deadline and observes terminal readback', a
   assert.equal((await waitForTurnCompletion(client, 'THREAD', 'TURN')).status, 'completed');
 });
 
+test('update installation follows normal shutdown and requires opt-in for package-targeted shutdown', () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const close = extractPowerShellFunction(source, 'Request-DesktopClose', 'Wait-ForOldRuntimeExit');
+  assert.doesNotMatch(close, /Stop-Process/);
+  assert.match(close, /Invoke-CodexDesktopNormalShutdown/);
+  assert.doesNotMatch(close, /CloseMainWindow/);
+  assert.match(source, /\[int\]\$TurnTimeoutSeconds = 0/);
+  assert.match(source, /\[int\]\$RestartTimeoutSeconds = 0/);
+  assert.match(source, /\[int\]\$DesktopCloseTimeoutSeconds = 0/);
+  const install = source.indexOf('Add-AppxPackage @installParameters');
+  assert.ok(install > source.indexOf('Old shared runtime exited under its owning supervisor.'));
+  assert.ok(install < source.indexOf('$newState = Complete-RegisteredRefresh'));
+  assert.match(source.slice(0, install), /Assert-OfficialUpdateArtifact \$installed/);
+  assert.doesNotMatch(source, /ReasoningVM MVP-833/);
+  assert.match(source, /uncertain-no-resend/);
+  assert.match(source, /if \(\$AllowTargetApplicationShutdown\) \{\s*\$parameters\.ForceTargetApplicationShutdown = \$true/);
+  assert.doesNotMatch(source, /\.ForceApplicationShutdown\s*=/);
+  assert.match(source, /\$remaining.Count -gt 0 -and -not \$AllowTargetApplicationShutdown/);
+  assert.match(source, /\$recovered = Complete-RegisteredRefresh/);
+});
+
+test('package installation never forces shutdown by default or closes dependency packages', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const source = fs.readFileSync(refreshScriptPath, 'utf8');
+  const helper = extractPowerShellFunction(source, 'New-DesktopPackageInstallParameters', 'Assert-OfficialUpdateArtifact');
+  const script = [
+    "$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest",
+    helper,
+    "$normal=New-DesktopPackageInstallParameters -Path 'C:\\signed.msix'",
+    "$approved=New-DesktopPackageInstallParameters -Path 'C:\\signed.msix' -AllowTargetApplicationShutdown",
+    '[pscustomobject]@{normal=$normal;approved=$approved} | ConvertTo-Json -Compress',
+  ].join('\n');
+  const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true}));
+  assert.deepEqual(result.normal, {Path:'C:\\signed.msix',ErrorAction:'Stop',DeferRegistrationWhenPackagesAreInUse:true});
+  assert.deepEqual(result.approved, {Path:'C:\\signed.msix',ErrorAction:'Stop',ForceTargetApplicationShutdown:true});
+});
+
 test('refresh requests normal application shutdown once and respects a veto', {
   skip: process.platform !== 'win32',
 }, () => {
@@ -282,6 +322,7 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
     "$refreshScriptPath='C:\\update folder\\Refresh.ps1'",
     "$PackagePath=\"C:\\Owner's folder\\ChatGPT.msix\"",
     "$PackageSha256='" + 'a'.repeat(64) + "'",
+    '$AllowTargetApplicationShutdown=$true',
     "$WaitForThreadId='00000000-0000-0000-0000-000000000001'",
     "$WaitForTurnId='00000000-0000-0000-0000-000000000002'",
     "$FromVersion='26.1007.2314.0'; $ToVersion='26.1029.7803.0'",
@@ -297,6 +338,6 @@ test('encoded scheduled controller is one invocation with all arguments in Windo
   assert.equal(result.statements, 1);
   assert.equal(result.errors, 0);
   assert.deepEqual(result.parameters, ['WaitForThreadId','WaitForTurnId','FromVersion','ToVersion',
-    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256',
+    'TurnTimeoutSeconds','RestartTimeoutSeconds','DesktopCloseTimeoutSeconds','PackagePath','PackageSha256','AllowTargetApplicationShutdown',
     'ScheduledController','RefreshRequestId','ScheduledTaskName']);
 });

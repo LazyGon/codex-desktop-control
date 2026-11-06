@@ -88,7 +88,7 @@ try {
         Start-Sleep -Seconds 1
     }
     $drain = Read-CodexHandoffJson (Join-Path $directory 'drain.json')
-    if (-not $drain -or $drain.phase -ne 'exited' -or $drain.exitCode -ne 0) {
+    if (-not (Test-CodexHandoffExitAccepted $request $drain)) {
         throw 'The old AppServer did not record a clean exit. No replacement was started.'
     }
 

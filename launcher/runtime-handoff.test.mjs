@@ -28,6 +28,24 @@ function fixture(t) {
   return folder;
 }
 
+test('nonzero legacy exit requires approval in both the manual request and observed drain', { skip: !windows }, () => {
+  const output = run(`
+    . ${quote(path.join(launcher, 'CodexRuntimeHandoff.ps1'))}
+    $results=@()
+    foreach($requested in @($false,$true)) {
+      foreach($observed in @($false,$true)) {
+        $request=[pscustomobject]@{ownerApprovedLegacyUpdate=$requested}
+        $drain=[pscustomobject]@{phase='exited';exitCode=1;ownerApprovedLegacyUpdate=$observed}
+        $results+= [bool](Test-CodexHandoffExitAccepted $request $drain)
+      }
+    }
+    $results+= [bool](Test-CodexHandoffExitAccepted ([pscustomobject]@{}) ([pscustomobject]@{phase='exited';exitCode=0}))
+    $results+= [bool](Test-CodexHandoffExitAccepted ([pscustomobject]@{ownerApprovedLegacyUpdate=$true}) ([pscustomobject]@{phase='shutdown-requested';exitCode=1;ownerApprovedLegacyUpdate=$true}))
+    ConvertTo-Json -InputObject $results -Compress
+  `);
+  assert.deepEqual(JSON.parse(output), [false,false,false,true,true,false]);
+});
+
 test('the scheduled handoff starts only after a clean exit and does not repeat an unconfirmed launch', { skip: !windows }, t => {
   const dir = fixture(t);
   for (const file of ['Complete-CodexRuntimeHandoff.ps1', 'CodexRuntimeHandoff.ps1', 'CodexDesktopPackage.ps1', 'CodexRuntimeCache.ps1']) {

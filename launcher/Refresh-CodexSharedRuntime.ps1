@@ -29,6 +29,10 @@ param(
     [ValidatePattern('^(?:[0-9a-fA-F]{64})?$')]
     [string]$PackageSha256 = '',
 
+    # Requires explicit Owner approval for this update. Never stop dependency
+    # packages or use a general process-kill fallback.
+    [switch]$AllowTargetApplicationShutdown,
+
     [switch]$ScheduledController,
 
     [ValidatePattern('^[0-9a-f-]{36}$')]
@@ -197,6 +201,7 @@ function Assert-OwnedRefreshTask {
                 '-RestartTimeoutSeconds [0-9]+ ' +
                 '-DesktopCloseTimeoutSeconds [0-9]+ ' +
                 "(?:-PackagePath '(?:[^']|'')*' -PackageSha256 '(?:[A-Fa-f0-9]{64})?' )?" +
+                '(?:-AllowTargetApplicationShutdown:\$(?:True|False) )?' +
                 '-ScheduledController ' +
                 "-RefreshRequestId '[0-9a-f-]{36}' " +
                 "-ScheduledTaskName '$([regex]::Escape($ScheduledTaskName))'$"
@@ -287,6 +292,7 @@ function New-RefreshControllerCommand {
         "-RestartTimeoutSeconds $RestartTimeoutSeconds",
         "-DesktopCloseTimeoutSeconds $DesktopCloseTimeoutSeconds",
         "-PackagePath '$escapedPackagePath' -PackageSha256 '$PackageSha256'",
+        "-AllowTargetApplicationShutdown:`$$([bool]$AllowTargetApplicationShutdown)",
         '-ScheduledController',
         "-RefreshRequestId '$RequestId'",
         "-ScheduledTaskName '$ScheduledTaskName'"
@@ -371,7 +377,8 @@ function Start-DetachedRefreshController {
                     $receipt.threadId -eq $WaitForThreadId -and
                     $receipt.turnId -eq $WaitForTurnId -and
                     $receipt.fromVersion -eq $FromVersion -and
-                    $receipt.toVersion -eq $ToVersion
+                    $receipt.toVersion -eq $ToVersion -and
+                    $receipt.allowTargetApplicationShutdown -eq [bool]$AllowTargetApplicationShutdown
                 ) {
                     $acceptedAt = [DateTimeOffset]::Now.ToString('o')
                     Write-RefreshResult -Result ([ordered]@{
@@ -385,6 +392,7 @@ function Start-DetachedRefreshController {
                         turnId = $WaitForTurnId
                         fromVersion = $FromVersion
                         toVersion = $ToVersion
+                        allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
                         armedAt = $receipt.armedAt
                         controllerAcceptedAt = $acceptedAt
                         logPath = $logPath
@@ -574,7 +582,7 @@ function Request-DesktopClose {
 }
 
 function Wait-ForOldRuntimeExit {
-    param([Diagnostics.Process]$Server, [Diagnostics.Process]$Supervisor)
+    param([Diagnostics.Process]$Server, [Diagnostics.Process]$Supervisor, [switch]$AllowLegacyExit)
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (-not $Server.HasExited -or -not $Supervisor.HasExited -or (Get-CodexHandoffDesktopProcesses)) {
         if ($RestartTimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -ge $RestartTimeoutSeconds) {
@@ -582,9 +590,21 @@ function Wait-ForOldRuntimeExit {
         }
         Start-Sleep -Milliseconds 500
     }
-    if ($Server.ExitCode -ne 0 -or $Supervisor.ExitCode -ne 0) {
+    Write-RefreshLog "Old runtime exit observed. serverExit=$($Server.ExitCode) supervisorExit=$($Supervisor.ExitCode) ownerApprovedLegacyUpdate=$([bool]$AllowLegacyExit)"
+    if (($Server.ExitCode -ne 0 -or $Supervisor.ExitCode -ne 0) -and -not $AllowLegacyExit) {
         throw 'The old runtime did not exit cleanly; no install or launch was attempted.'
     }
+}
+
+function New-DesktopPackageInstallParameters {
+    param([Parameter(Mandatory)][string]$Path, [switch]$AllowTargetApplicationShutdown)
+
+    $parameters = @{ Path = $Path; ErrorAction = 'Stop' }
+    if ($AllowTargetApplicationShutdown) {
+        $parameters.ForceTargetApplicationShutdown = $true
+    }
+    else { $parameters.DeferRegistrationWhenPackagesAreInUse = $true }
+    $parameters
 }
 
 function Assert-OfficialUpdateArtifact {
@@ -619,6 +639,7 @@ function Complete-RegisteredRefresh {
         desktop = $Package.DesktopExecutable; family = $Package.PackageFamilyName
         serverSha256 = Get-CodexFileSha256 $Package.BundledServerExecutable
         oldServer = $OldServer; oldSupervisor = $OldSupervisor; bridgeWasRunning = $bridgeWasRunning
+        ownerApprovedLegacyUpdate = [bool]$legacyUpdate
         startupStallSeconds = $RestartTimeoutSeconds
     }
     & (Join-Path $launcherRoot 'Complete-CodexRuntimeHandoff.ps1') -RequestPath $handoffPath
@@ -704,13 +725,15 @@ try {
         turnId = $WaitForTurnId
         fromVersion = $FromVersion
         toVersion = $ToVersion
+        allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
         armedAt = [DateTimeOffset]::Now.ToString('o')
         logPath = $logPath
     })
     Write-RefreshLog "Runtime refresh armed. threadId=$WaitForThreadId turnId=$WaitForTurnId"
 
     $directory = $null
-    $oldCleanExit = $false
+    $oldExitVerified = $false
+    $legacyUpdate = $false
     try {
         $null = Wait-ForControllerAcceptance
         Write-RefreshLog 'Detached controller receipt was positively acknowledged by the entry process.'
@@ -721,7 +744,11 @@ try {
         }
 
         if ((Get-OptionalObjectProperty $oldState 'appServerGracefulShutdown') -ne $true) {
-            throw 'Open the updated shared launcher normally first; the running supervisor does not support safe handoff.'
+            if (-not $AllowTargetApplicationShutdown -or -not $PackagePath) {
+                throw 'The legacy runtime requires an official update artifact and explicit Owner approval for package-targeted shutdown.'
+            }
+            $legacyUpdate = $true
+            Write-RefreshLog 'Owner-approved legacy migration: wait for loaded work to become idle, then let the existing supervisor release its own runtime.'
         }
         if ([version]$ToVersion -le [version]$FromVersion) { throw 'The refresh target must be newer.' }
         $installed = Get-AppxPackage -Name OpenAI.Codex
@@ -754,9 +781,9 @@ try {
         }
         Write-CodexHandoffJson $drainPath @{ phase = 'desktop-close-requested' }
         Request-DesktopClose -DesktopExecutable $oldState.desktopExecutable
-        Wait-ForOldRuntimeExit $server $supervisor
-        Write-CodexHandoffJson $drainPath @{ phase = 'exited'; exitCode = $server.ExitCode }
-        $oldCleanExit = $true
+        Wait-ForOldRuntimeExit $server $supervisor -AllowLegacyExit:$legacyUpdate
+        Write-CodexHandoffJson $drainPath @{ phase = 'exited'; exitCode = $server.ExitCode; supervisorExitCode = $supervisor.ExitCode; ownerApprovedLegacyUpdate = $legacyUpdate }
+        $oldExitVerified = $true
         Write-RefreshLog 'Old shared runtime exited under its owning supervisor.'
 
         $installed = Get-AppxPackage -Name OpenAI.Codex
@@ -766,8 +793,23 @@ try {
                 throw 'Package or process state changed after preflight; no installation was attempted.'
             }
             $installReceipt = Join-Path $directory 'install.json'
-            Write-CodexHandoffJson $installReceipt @{ phase = 'requested'; toVersion = $ToVersion; packageSha256 = $PackageSha256 }
-            Add-AppxPackage -Path $PackagePath -DeferRegistrationWhenPackagesAreInUse -ErrorAction Stop
+            Write-CodexHandoffJson $installReceipt @{ phase = 'requested'; toVersion = $ToVersion; packageSha256 = $PackageSha256; allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown }
+            $installParameters = New-DesktopPackageInstallParameters -Path $PackagePath `
+                -AllowTargetApplicationShutdown:$AllowTargetApplicationShutdown
+            if ($AllowTargetApplicationShutdown) {
+                Write-RefreshLog 'Owner-approved package-targeted shutdown enabled for installation; dependency packages are excluded.'
+            }
+            $packageRoot = Split-Path -Parent (Split-Path -Parent $oldState.desktopExecutable)
+            $remaining = @(Get-CimInstance Win32_Process | Where-Object {
+                $_.ExecutablePath -and $_.ExecutablePath.StartsWith(
+                    "$packageRoot\", [StringComparison]::OrdinalIgnoreCase)
+            })
+            $remainingIds = @($remaining | ForEach-Object { [int]$_.ProcessId })
+            Write-RefreshLog "Package processes before installation: count=$($remaining.Count) ids=$($remainingIds -join ',')"
+            if ($remaining.Count -gt 0 -and -not $AllowTargetApplicationShutdown) {
+                throw 'Old package processes remain after normal shutdown. No forced shutdown was authorized or attempted.'
+            }
+            Add-AppxPackage @installParameters
             $installed = Get-AppxPackage -Name OpenAI.Codex
             Write-CodexHandoffJson $installReceipt @{ phase = 'observed'; registeredVersion = [string]$installed.Version }
         }
@@ -792,6 +834,7 @@ try {
             newServerProcessId = [int]$newState.serverProcessId
             fromVersion = $FromVersion
             toVersion = $ToVersion
+            allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             serverSha256 = $newState.serverSha256
             desktopConnectionVerified = $newState.desktopConnectionVerified
             bridgeRestored = $bridgeWasRunning
@@ -815,7 +858,7 @@ try {
         $message = $_.Exception.Message
         Write-RefreshLog "ERROR $message"
         $recoveredVersion = $null
-        if ($oldCleanExit -and -not (Test-Path -LiteralPath (Join-Path $directory 'request.json'))) {
+        if ($oldExitVerified -and -not (Test-Path -LiteralPath (Join-Path $directory 'request.json'))) {
             try {
                 # Registration may have changed despite a deployment error. Read it;
                 # never repeat Add-AppxPackage or start a second replacement.
@@ -839,6 +882,7 @@ try {
             turnId = $WaitForTurnId
             fromVersion = $FromVersion
             toVersion = $ToVersion
+            allowTargetApplicationShutdown = [bool]$AllowTargetApplicationShutdown
             error = $message
             recoveredVersion = $recoveredVersion
             failedAt = [DateTimeOffset]::Now.ToString('o')

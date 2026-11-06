@@ -61,6 +61,19 @@ function Get-CodexHandoffDesktopProcesses {
     Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session
 }
 
+function Test-CodexHandoffExitAccepted {
+    param([object]$Request, [object]$Drain)
+    if (-not $Drain -or $Drain.phase -ne 'exited') { return $false }
+    if ($Drain.exitCode -eq 0) { return $true }
+    # Legacy supervisors terminate their owned job on normal Desktop exit.
+    # Only an explicitly approved manual migration may accept that observed
+    # nonzero exit; automatic handoffs keep their clean-exit requirement.
+    return $Request.PSObject.Properties['ownerApprovedLegacyUpdate'] -and
+        $Request.ownerApprovedLegacyUpdate -eq $true -and
+        $Drain.PSObject.Properties['ownerApprovedLegacyUpdate'] -and
+        $Drain.ownerApprovedLegacyUpdate -eq $true
+}
+
 function Test-CodexManualRefreshActive {
     $mutex = [Threading.Mutex]::new($false, 'Local\CodexSharedRuntimeRefreshController')
     try {
