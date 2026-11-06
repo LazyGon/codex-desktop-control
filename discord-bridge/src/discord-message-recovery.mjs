@@ -21,17 +21,18 @@ export async function recoverDiscordMessages({
         if (isStopping()) return outcome;
         outcome.scanned += 1;
         if (shouldRecover(message)) {
-          await enqueueMessage(message);
-          const advanced = outbox.channelRecoveryCursor(binding.channelId);
-          if (BigInt(advanced) < BigInt(message.id)) {
-            throw new Error(`Recovered Discord message did not advance its cursor: ${message.id}`);
+          const admission = await enqueueMessage(message);
+          if (!admission?.cursorSafe) {
+            throw new Error(`Recovered Discord message was not durably admitted: ${message.id}`);
           }
           outcome.recovered += 1;
         } else {
-          outbox.advanceChannelRecoveryCursor(binding.channelId, message.id);
           outcome.ignored += 1;
         }
-        cursor = outbox.channelRecoveryCursor(binding.channelId);
+        // Only the ordered scan owns the checkpoint. A new Gateway event can
+        // be admitted immediately without skipping an earlier missed message.
+        outbox.advanceChannelRecoveryCursor(binding.channelId, message.id);
+        cursor = message.id;
       }
       if (messages.length < 100) break;
     }

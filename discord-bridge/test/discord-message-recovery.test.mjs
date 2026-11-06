@@ -59,7 +59,7 @@ test('recovery queues only eligible newer inputs in message order and persists t
     shouldRecover: m => m.eligible,
     enqueueMessage: async m => {
       queued.push(m.text);
-      outbox.advanceChannelRecoveryCursor('channel', m.id);
+      return { cursorSafe: true };
     },
     isStopping: () => false,
   };
@@ -80,7 +80,7 @@ test('an input not durably admitted never advances the cursor or skips the next 
     shouldRecover: () => true,
     enqueueMessage: async m => { queued.push(m.id); },
     isStopping: () => false,
-  }), /did not advance its cursor: 101/);
+  }), /was not durably admitted: 101/);
   assert.deepEqual(queued, ['101']);
   assert.equal(outbox.channelRecoveryCursor('channel'), '100');
 });
@@ -96,8 +96,8 @@ test('a shutdown during catch-up leaves remaining messages available for the nex
     shouldRecover: () => true,
     enqueueMessage: async m => {
       queued.push(m.id);
-      outbox.advanceChannelRecoveryCursor('channel', m.id);
       stopping = true;
+      return { cursorSafe: true };
     },
     isStopping: () => stopping,
   });

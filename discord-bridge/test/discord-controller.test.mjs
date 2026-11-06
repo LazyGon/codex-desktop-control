@@ -3987,6 +3987,13 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   };
   const first = makeMessage('user-message-1', 'implement the first part');
   const second = makeMessage('user-message-2', 'then verify it');
+  let finishFirstReaction;
+  const firstReaction = new Promise((resolve) => { finishFirstReaction = resolve; });
+  const firstReact = first.message.react;
+  first.message.react = async (reaction) => {
+    await firstReact(reaction);
+    if (reaction === '⏳') await firstReaction;
+  };
   client.emit('messageCreate', first.message);
   client.emit('messageCreate', second.message);
 
@@ -3995,7 +4002,20 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
   releaseTaskListing();
   controller.taskListBarrier = null;
 
-  for (let attempt = 0; attempt < 300 && !second.reactions.includes('✅'); attempt += 1) {
+  try {
+    const secondRequestId = 'discord-message:guild-1:new-channel:user-message-2';
+    for (let attempt = 0; attempt < 100
+      && deliveryOutbox.get(secondRequestId)?.state !== 'accepted'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(deliveryOutbox.get(secondRequestId)?.state, 'accepted');
+    assert.deepEqual(first.reactions, ['⏳']);
+    assert.deepEqual(second.reactions, ['⏳']);
+  } finally {
+    finishFirstReaction();
+  }
+
+  for (let attempt = 0; attempt < 300 && channelMessages.has(second.message.id); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.deepEqual(started, ['C:\\work']);
@@ -4064,15 +4084,25 @@ test('ordinary messages in an unbound managed-project channel create and reuse o
     attempt.clientUserMessageId === uncertainRequestId
   )).length, attemptsBeforeReconcile);
 
+  await controller.discordRecoveryPromise;
   const cutover = BigInt(deliveryOutbox.channelRecoveryCursor(channel.id));
   const alreadyHandled = makeMessage((cutover - 1n).toString(), 'already handled before cutover');
   const missedAfterRestart = makeMessage((cutover + 1n).toString(), 'recover after Bridge restart');
+  const laterLive = makeMessage((cutover + 2n).toString(), 'later live input must not skip missed input');
+  client.emit('messageCreate', laterLive.message);
+  for (let attempt = 0; attempt < 100
+    && channelMessages.has(laterLive.message.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(delivered.at(-1).prompt, 'later live input must not skip missed input');
+  assert.equal(deliveryOutbox.channelRecoveryCursor(channel.id), cutover.toString());
   codex.emit('subscriptionsReady');
   for (let attempt = 0; attempt < 100
     && !missedAfterRestart.reactions.includes('✅'); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(delivered.at(-1).prompt, 'recover after Bridge restart');
+  assert.equal(delivered.filter((entry) => entry.prompt === 'later live input must not skip missed input').length, 1);
   assert.deepEqual(missedAfterRestart.reactions, ['⏳', '✅']);
   assert.deepEqual(alreadyHandled.reactions, []);
   assert.equal(

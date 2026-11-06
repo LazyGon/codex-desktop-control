@@ -327,6 +327,8 @@ so the first outbox-enabled start writes a `recovery-cursor.json` cutover and
 does not execute messages at or before it. Later app-server reconnects, Discord
 gateway resumes, and Bridge restarts scan each visible active task channel
 after its persisted cursor and enqueue missed post-cutover messages in order.
+Only this ordered catch-up advances the cursor. A newer live message is
+admitted immediately without skipping earlier messages missed during a reconnect.
 
 Before mutation, the drain reads the exact target and active turn. It then
 persists one `attempting` record and issues exactly one `turn/start` or
@@ -341,7 +343,12 @@ overlapping, corrupt, and request-ID/payload-mismatch cases fail closed.
 
 The terminal Discord reaction callback has its own persisted attempt and can
 be claimed only once. A crash during that callback becomes callback
-`uncertain`, rather than repeating an external effect. After accepted delivery,
+`uncertain`, rather than repeating an external effect. Input delivery does not
+wait for reactions, panel updates, or the history read that reconciles an
+uncertain attempt. A new input arriving during dispatch requests another pass.
+The Bridge builds a working index from the outbox on startup and reads only
+the relevant pending records on each pass; completed records remain on disk
+to identify duplicate Discord messages. After accepted delivery,
 the orange user card is posted even if the persisted `userMessage` notification
 is delayed by active tool work. When that notification arrives, its `clientId`
 replaces the provisional identity with the server item ID on the existing card.

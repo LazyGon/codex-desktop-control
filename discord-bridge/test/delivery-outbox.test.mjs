@@ -162,6 +162,38 @@ test('DeliveryOutbox never overwrites or skips a corrupt entry', (context) => {
   assert.equal(fs.readFileSync(outbox.filePath(corrupt.requestId), 'utf8'), '{not-json');
 });
 
+test('active work survives reopening without rereading completed delivery records', (context) => {
+  const original = fixture(context);
+  const done = original.enqueue(request());
+  const sending = original.beginAttempt(done.requestId, { mode: 'send' });
+  original.accept(done.requestId, { attemptId: sending.attempt.attemptId, mode: 'send', turnId: 'turn-done' });
+  const feedback = original.beginCallback(done.requestId);
+  original.completeCallback(done.requestId, { attemptId: feedback.callback.attemptId, outcome: 'reaction:✅' });
+  const active = original.enqueue(request({ requestId: 'discord-message:guild:channel:active' }));
+  const reopened = new DeliveryOutbox(original.directory);
+  assert.equal(reopened.workSummary().entries, 2);
+  assert.equal(reopened.get(done.requestId).receipt.turnId, 'turn-done');
+
+  const read = fs.readFileSync;
+  const donePath = original.filePath(done.requestId);
+  const reads = context.mock.method(fs, 'readFileSync', (...args) => {
+    assert.notEqual(args[0], donePath, 'a terminal record was opened by the working queue');
+    return read(...args);
+  });
+  try {
+    assert.deepEqual(reopened.listWork({ states: ['queued'] }).map((entry) => entry.requestId), [active.requestId]);
+    const attempt = reopened.beginAttempt(active.requestId, { mode: 'send' });
+    reopened.accept(active.requestId, { attemptId: attempt.attempt.attemptId, mode: 'send', turnId: 'turn-active' });
+    assert.deepEqual(reopened.listWork({ states: ['queued'] }), []);
+    assert.deepEqual(
+      reopened.listWork({ callbackStates: ['pending'] }).map((entry) => entry.receipt.turnId),
+      ['turn-active'],
+    );
+  } finally {
+    reads.mock.restore();
+  }
+});
+
 test('Discord recovery cursor establishes one cutover and advances per channel monotonically', (context) => {
   const outbox = fixture(context);
   const cutover = discordSnowflakeAt(Date.UTC(2026, 7, 28, 0, 0, 0));

@@ -81,6 +81,9 @@ export class DeliveryOutboxLockedError extends Error {
 }
 
 export class DeliveryOutbox {
+  #work = null;
+  #entryCount = 0;
+
   constructor(directory, {
     ownerPid = process.pid,
     clock = () => nowIso(),
@@ -184,6 +187,59 @@ export class DeliveryOutbox {
         && (!callbackFilter || callbackFilter.has(entry.callback.state)))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)
         || left.requestId.localeCompare(right.requestId));
+  }
+
+  // Bridge holds its process lock for the lifetime of this view. Records remain
+  // authoritative: rebuild once on startup and reread an entry before using it.
+  #workIndex() {
+    if (!this.#work) {
+      const entries = this.list();
+      this.#work = new Map();
+      this.#entryCount = entries.length;
+      for (const entry of entries) this.#updateWork(entry);
+    }
+    return this.#work;
+  }
+
+  #updateWork(entry) {
+    if (['queued', 'attempting', 'uncertain'].includes(entry.state)
+      || ['pending', 'delivering'].includes(entry.callback.state)) {
+      this.#work.set(entry.requestId, {
+        requestId: entry.requestId,
+        state: entry.state,
+        callbackState: entry.callback.state,
+        createdAt: entry.createdAt,
+      });
+    } else {
+      this.#work.delete(entry.requestId);
+    }
+  }
+
+  listWork({ states = null, callbackStates = null } = {}) {
+    return [...this.#workIndex().values()]
+      .filter((entry) => (!states || states.includes(entry.state))
+        && (!callbackStates || callbackStates.includes(entry.callbackState)))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)
+        || left.requestId.localeCompare(right.requestId))
+      .map(({ requestId }) => {
+        const entry = this.get(requestId);
+        if (!entry) throw new Error(`An active delivery record is missing: ${requestId}`);
+        return entry;
+      })
+      .filter((entry) => (!states || states.includes(entry.state))
+        && (!callbackStates || callbackStates.includes(entry.callback.state)));
+  }
+
+  workSummary() {
+    let queued = 0;
+    let uncertain = 0;
+    let callbackPending = 0;
+    for (const entry of this.#workIndex().values()) {
+      if (entry.state === 'queued') queued += 1;
+      if (entry.state === 'uncertain') uncertain += 1;
+      if (entry.callbackState === 'pending') callbackPending += 1;
+    }
+    return { entries: this.#entryCount, queued, uncertain, callbackPending };
   }
 
   enqueue({ requestId, threadId, prompt, attachments = [], source }) {
@@ -379,7 +435,10 @@ export class DeliveryOutbox {
 
   recoverStaleOwnership() {
     const recovered = [];
-    for (const original of this.list()) {
+    for (const original of [
+      ...this.listWork({ states: ['attempting'] }),
+      ...this.listWork({ callbackStates: ['delivering'] }),
+    ]) {
       let kind = null;
       if (original.state === 'attempting' && !this.isProcessAlive(original.attempt?.ownerPid)) {
         kind = 'delivery';
@@ -449,6 +508,10 @@ export class DeliveryOutbox {
       }
       const next = mutation(current);
       if (next !== current) atomicWriteJson(filePath, next);
+      if (this.#work) {
+        if (!current) this.#entryCount += 1;
+        this.#updateWork(next);
+      }
       return next;
     });
   }
