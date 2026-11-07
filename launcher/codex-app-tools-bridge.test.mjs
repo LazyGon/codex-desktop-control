@@ -188,9 +188,10 @@ test('shared bridge derives and verifies the installed Desktop plugin layout', (
   assert.equal(resolveBundledPaths(desktop).definitionPath, modernManifest);
 });
 
-test('shared bridge allows a bounded startup race without accepting uncertainty', async () => {
+test('shared bridge allows a bounded startup race without accepting uncertainty', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   let attempts = 0;
-  const resolved = await waitForBridgeRuntime({
+  const ready = waitForBridgeRuntime({
     resolve: () => {
       attempts += 1;
       if (attempts < 3) throw new Error('Desktop state is not ready yet.');
@@ -199,9 +200,12 @@ test('shared bridge allows a bounded startup race without accepting uncertainty'
     timeoutMilliseconds: 100,
     retryMilliseconds: 1,
   });
-  assert.deepEqual(resolved, { ready: true });
+  t.mock.timers.tick(1);
+  await Promise.resolve();
+  t.mock.timers.tick(1);
+  assert.deepEqual(await ready, { ready: true });
 
-  await assert.rejects(
+  const refusal = assert.rejects(
     waitForBridgeRuntime({
       resolve: () => { throw new Error('ambiguous live owner'); },
       timeoutMilliseconds: 5,
@@ -209,4 +213,6 @@ test('shared bridge allows a bounded startup race without accepting uncertainty'
     }),
     /did not become safe.*ambiguous live owner/,
   );
+  t.mock.timers.tick(5);
+  await refusal;
 });

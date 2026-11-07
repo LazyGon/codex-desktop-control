@@ -158,9 +158,12 @@ Desktop UI after a package update before changing the version gate. A turn
 started entirely outside Desktop is not covered by this check.
 
 On that verified shared Desktop runtime, the Discord Bridge checks the
-existing task before loading it to send input. An already loaded task does
-not need a link. For `notLoaded`, the Bridge opens `codex://threads/<id>` in
-the official Desktop app and may switch the visible Desktop view. It waits
+existing task before loading it to send input. An already loaded task needs
+no navigation. For `notLoaded`, the Bridge calls the Desktop's
+`codex_app.navigate_to_codex_page` through the shared App Server's
+`mcpServer/tool/call` API. This may switch the visible Desktop view. The
+Bridge uses its own in-memory MCP context without starting a turn, since a
+cold task cannot host the tool call itself. It waits
 for a fresh, successful `thread/resume` receipt for that exact task from the
 live Desktop process and for the shared server to report the task loaded.
 Only then does the Bridge subscribe and send. Other tasks can keep receiving
@@ -180,13 +183,13 @@ descendant or attached tasks, including archived ones. Any of these blocks
 automatic archiving. Discord synchronization waits through the round trip.
 
 Receipts are in `discord-bridge/data/desktop-first/` and
-`discord-bridge/data/browser-initialization/`. Archive, restore, and URI
-dispatch each have their own claim. An interrupted or uncertain mutation is
+`discord-bridge/data/browser-initialization/`. Archive, restore, and Desktop
+navigation each have their own claim. An interrupted or uncertain mutation is
 not automatically repeated or reversed. If a direct read proves the same
 task and history are already restored and unloaded, the Bridge can continue
 with the Desktop handoff alone. Verify the actual task state from the shared
 App Server before any manual recovery. After a confirmed load, a
-later cold load may open a new link. A Desktop load receipt proves the loading
+later cold load may request navigation again. A Desktop load receipt proves the loading
 order; a successful Computer Use call proves browser access. The Bridge does
 not replay the failed turn.
 

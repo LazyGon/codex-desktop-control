@@ -6,6 +6,7 @@ import { atomicWriteJson } from './util.mjs';
 const THREAD_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const LOCAL_SOURCES = new Set(['vscode', 'cli', 'exec', 'appServer']);
 const LOADED = new Set(['idle', 'active', 'systemError']);
+const DESKTOP_MCP = 'desktop-mcp';
 
 export class DesktopThreadPendingError extends Error {
   constructor() {
@@ -81,8 +82,8 @@ export class DesktopFirst {
   #waiting = new Set();
   #scannedGeneration = null;
 
-  constructor({ directory, runtime, readThread, open, log = () => {}, clock = Date.now }) {
-    Object.assign(this, { directory, runtime, readThread, open, log, clock });
+  constructor({ directory, runtime, readThread, prepareNavigation, log = () => {}, clock = Date.now }) {
+    Object.assign(this, { directory, runtime, readThread, prepareNavigation, log, clock });
   }
 
   prepare(threadId, { allowOpen = true } = {}) {
@@ -150,32 +151,61 @@ export class DesktopFirst {
     const sameRuntime = () => this.runtime()?.generation === runtime.generation;
     const thread = await this.readThread(threadId);
     if (thread?.id !== threadId || !sameRuntime()) return 'waiting';
-    const notBefore = this.clock();
     if (thread.ephemeral !== false || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)) return 'ready';
     if (!thread.path || /[\\/]archived_sessions[\\/]/i.test(thread.path)) throw new Error('Desktop cannot open this local task.');
     const record = this.#read(threadId);
-    if (record?.generation === runtime.generation && record.phase === 'waiting') {
-      return this.#confirm(record, runtime, sameRuntime);
+    const waiting = record?.generation === runtime.generation && record.phase === 'waiting';
+    if (waiting) {
+      const confirmed = await this.#confirm(record, runtime, sameRuntime);
+      if (confirmed === 'ready' || record.transport === DESKTOP_MCP || !allowOpen
+        || thread.status?.type !== 'notLoaded') return confirmed;
     }
     if (LOADED.has(thread.status?.type)) return 'ready';
     if (thread.status?.type !== 'notLoaded' || !allowOpen) return 'waiting';
+    if (this.#dispatch) return 'waiting';
 
+    // MCP startup is independent of the outbox. Claim only when it is ready,
+    // so a failed handshake cannot consume the one navigation attempt.
+    this.#dispatch = this.#navigate(threadId, runtime, sameRuntime)
+      .catch(() => this.log('desktop-first-api-unavailable', { threadId }))
+      .finally(() => { this.#dispatch = null; });
+    return 'waiting';
+  }
+
+  async #navigate(threadId, runtime, sameRuntime) {
+    if (!sameRuntime()) return;
+    const open = await this.prepareNavigation();
+    if (!sameRuntime()) return;
+    const thread = await this.readThread(threadId);
+    if (thread?.id !== threadId || thread.status?.type !== 'notLoaded' || thread.ephemeral !== false
+      || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)
+      || !thread.path || /[\\/]archived_sessions[\\/]/i.test(thread.path) || !sameRuntime()) return;
+    const previous = this.#read(threadId);
+    const waiting = previous?.generation === runtime.generation && previous.phase === 'waiting';
+    if (waiting && previous.transport === DESKTOP_MCP) return;
+    const notBefore = this.clock();
     const baseline = desktopResumeLogs(runtime, notBefore);
-    if (!baseline.size || !sameRuntime() || this.#dispatch) return 'waiting';
+    if (!baseline.size) return;
     const next = {
       threadId, generation: runtime.generation, attemptId: randomUUID(), notBefore,
-      phase: 'waiting', desktopPids: runtime.desktopPids,
+      phase: 'waiting', transport: DESKTOP_MCP, desktopPids: runtime.desktopPids,
       offsets: [...baseline].map(([file, { size, identity }]) => [file, { cursor: size, identity }]),
+      // A cold task can use the new transport once. Preserve the earlier
+      // URI claim; this does not replay the Discord input or the URI.
+      ...(previous?.previousUriAttempt || waiting
+        ? { previousUriAttempt: previous.previousUriAttempt ?? previous } : {}),
     };
-    // Persist the attempt before the only URI dispatch. A restart can check
+    // Persist the attempt before navigation. A restart can check
     // evidence but never repeats a dispatch whose outcome might be unknown.
     this.#save(next);
-    this.log('desktop-first-claimed', { threadId, attemptId: next.attemptId });
-    this.#dispatch = Promise.resolve().then(() => sameRuntime() && this.open(threadId)).then((dispatched) => {
-      if (dispatched !== false) this.log('desktop-first-uri-dispatched', { threadId, attemptId: next.attemptId });
-    }).catch(() => this.log('desktop-first-uri-unknown', { threadId, attemptId: next.attemptId }))
-      .finally(() => { this.#dispatch = null; });
-    return 'opening';
+    const details = { threadId, attemptId: next.attemptId, transport: DESKTOP_MCP };
+    this.log('desktop-first-claimed', details);
+    try {
+      const opened = await open(threadId);
+      this.log(opened ? 'desktop-first-api-navigated' : 'desktop-first-api-not-confirmed', details);
+    } catch {
+      this.log('desktop-first-api-unknown', details);
+    }
   }
 
   async #confirm(record, runtime, sameRuntime) {

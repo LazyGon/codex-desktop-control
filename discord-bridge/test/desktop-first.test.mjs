@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { CodexService } from '../src/codex-service.mjs';
 import { DesktopFirst, desktopResumeSucceeded } from '../src/desktop-first.mjs';
 
@@ -26,9 +27,10 @@ function fixture(t) {
   const options = {
     directory: path.join(root, 'records'), runtime: () => state.runtime,
     readThread: async (id) => metadata(id), clock: () => state.now,
-    open: async (id) => state.opens.push(id),
+    prepareNavigation: async () => async (id) => { state.opens.push(id); return true; },
   };
-  return { make: (extra) => new DesktopFirst({ ...options, ...extra }), file, logFile, state, metadata };
+  return { make: (extra) => new DesktopFirst({ ...options, ...extra }), file, logFile, state, metadata,
+    record: path.join(options.directory, `${THREAD}.json`) };
 }
 
 test('positive proof requires the exact task, successful local resume, and a fresh request', () => {
@@ -53,6 +55,7 @@ test('Bridge cannot load or send before the Desktop receipt and shared loaded st
   } };
   const deliver = () => service.deliver(THREAD, 'message', null, 'exact-request');
   await assert.rejects(deliver(), { code: 'DESKTOP_THREAD_PENDING' });
+  await setImmediate();
   await assert.rejects(deliver(), { code: 'DESKTOP_THREAD_PENDING' });
   assert.deepEqual(state.opens, [THREAD]);
   assert.deepEqual(calls, []);
@@ -74,10 +77,13 @@ test('Bridge cannot load or send before the Desktop receipt and shared loaded st
   assert.deepEqual(state.opens, [THREAD]);
 });
 
-test('a dispatched link is not repeated after an uncertain result or Bridge restart', async (t) => {
+test('uncertain Desktop navigation is not repeated after a Bridge restart', async (t) => {
   const { make, file, state } = fixture(t);
-  const first = make({ open: async (id) => { state.opens.push(id); throw new Error('lost result'); } });
-  assert.deepEqual(await Promise.all([first.prepare(THREAD), first.prepare(THREAD)]), ['opening', 'opening']);
+  const first = make({
+    prepareNavigation: async () => async (id) => { state.opens.push(id); throw new Error('lost result'); },
+  });
+  assert.deepEqual(await Promise.all([first.prepare(THREAD), first.prepare(THREAD)]), ['waiting', 'waiting']);
+  await setImmediate();
   assert.equal(await make().prepare(THREAD), 'opening');
   assert.deepEqual(state.opens, [THREAD]);
   fs.appendFileSync(file, `${line()}\n`);
@@ -85,11 +91,36 @@ test('a dispatched link is not repeated after an uncertain result or Bridge rest
   await make().reconcile(); // Confirm the prior open even with no message waiting.
   state.status = 'notLoaded';
   state.now += 500;
-  assert.equal(await make().prepare(THREAD), 'opening');
+  assert.equal(await make().prepare(THREAD), 'waiting');
+  await setImmediate();
   assert.deepEqual(state.opens, [THREAD, THREAD]);
 });
 
-test('an existing loaded task or an unavailable runtime does not get a link', async (t) => {
+test('a cold task is not left with a claimed navigation after MCP startup fails', async (t) => {
+  const { make, record, state } = fixture(t);
+  const unavailable = make({ prepareNavigation: async () => { throw new Error('MCP handshake failed'); } });
+  await unavailable.prepare(THREAD);
+  await setImmediate();
+  assert.equal(fs.existsSync(record), false);
+  await make().prepare(THREAD);
+  await setImmediate();
+  assert.deepEqual(state.opens, [THREAD]);
+});
+
+test('an unresolved URI can hand off to the API once while preserving the old receipt', async (t) => {
+  const { make, record, state } = fixture(t);
+  fs.mkdirSync(path.dirname(record));
+  const old = { threadId: THREAD, generation: 'one', phase: 'waiting', attemptId: 'old-uri',
+    notBefore: EPOCH, desktopPids: [17], offsets: [] };
+  fs.writeFileSync(record, JSON.stringify(old));
+  await make().prepare(THREAD);
+  await setImmediate();
+  assert.equal(JSON.parse(fs.readFileSync(record, 'utf8')).previousUriAttempt.attemptId, old.attemptId);
+  assert.equal(await make().prepare(THREAD), 'opening');
+  assert.deepEqual(state.opens, [THREAD]);
+});
+
+test('an existing loaded task or an unavailable runtime does not get navigated', async (t) => {
   const { make, state } = fixture(t);
   state.status = 'idle';
   assert.equal(await make().prepare(THREAD), 'ready');

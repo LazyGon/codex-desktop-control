@@ -1,8 +1,5 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { atomicWriteJson } from './util.mjs';
 
 const HOST_UNAVAILABLE = 'The browser access host is unavailable';
@@ -64,15 +61,6 @@ export function browserFailureItem(turn) {
     }
   }
   return failure;
-}
-
-export async function openDesktopThread(threadId) {
-  if (process.platform !== 'win32' || !UUID.test(threadId)) throw new Error('Invalid Desktop thread activation.');
-  const script = fileURLToPath(new URL('./open-desktop-browser-thread.ps1', import.meta.url));
-  const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  await promisify(execFile)(powershell, [
-    '-NoProfile', '-NonInteractive', '-STA', '-File', script, '-ThreadId', threadId,
-  ], { windowsHide: true });
 }
 
 function eligibleBinding(binding) {
@@ -207,7 +195,7 @@ export class BrowserInitialization {
   async #handoff(record) {
     if (!this.#sameEpisode(record)) return false;
     const outcome = await this.codex.prepareDesktopThread(record.threadId);
-    if (outcome !== 'opening') return false;
+    if (outcome !== 'opening' && outcome !== 'ready') return false;
     if (this.#sameEpisode(record)) this.#write(record, 'handed-off');
     return true;
   }

@@ -252,50 +252,57 @@ $ProgressPreference = 'SilentlyContinue'
 $portNumber = [int]$env:CODEX_BRIDGE_PROBE_PORT
 $expectedExecutable = [IO.Path]::GetFullPath($env:CODEX_BRIDGE_PROBE_DESKTOP)
 $expectedServerProcessId = [int]$env:CODEX_BRIDGE_PROBE_SERVER_PID
-$listenerProcessIds = @(
-    Get-NetTCPConnection -State Listen -LocalPort $portNumber -ErrorAction Stop |
-        Where-Object { $_.LocalAddress -eq '127.0.0.1' } |
-        ForEach-Object { [int]$_.OwningProcess }
-)
-$serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$expectedServerProcessId" -ErrorAction SilentlyContinue
-$server = if (
-    $null -ne $serverProcess -and
-    -not [string]::IsNullOrWhiteSpace([string]$serverProcess.ExecutablePath)
-) {
-    [ordered]@{
-        processId = [int]$serverProcess.ProcessId
-        executablePath = [IO.Path]::GetFullPath([string]$serverProcess.ExecutablePath)
+$localEndpoint = "127.0.0.1:$portNumber"
+$netstatPath = Join-Path $env:SystemRoot 'System32\netstat.exe'
+$tcpLines = & $netstatPath -ano
+if ($LASTEXITCODE -ne 0) { throw 'Could not read the Windows TCP ownership table.' }
+$tcp = @(
+    foreach ($line in $tcpLines) {
+        if (!$line.Contains(":$portNumber")) { continue }
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ne 5 -or $fields[0] -ne 'TCP' -or $fields[4] -notmatch '^\d+$') { continue }
+        [pscustomobject]@{ Local = $fields[1]; Remote = $fields[2]; State = $fields[3]; Owner = [int]$fields[4] }
     }
+)
+$listenerProcessIds = @(
+    $tcp | Where-Object { $_.Local -eq $localEndpoint -and $_.State -eq 'LISTENING' } |
+        ForEach-Object { $_.Owner }
+)
+function Get-Identity([int] $ProcessId) {
+    try {
+        $process = [Diagnostics.Process]::GetProcessById($ProcessId)
+        try {
+            $executable = $process.MainModule.FileName
+            if ($executable -and !$process.HasExited) {
+                [ordered]@{
+                    processId = $process.Id
+                    executablePath = [IO.Path]::GetFullPath($executable)
+                    creationTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+                }
+            }
+        }
+        finally { $process.Dispose() }
+    }
+    catch { return $null }
 }
-else {
-    $null
-}
+$server = Get-Identity $expectedServerProcessId
 $processIds = @(
-    Get-NetTCPConnection -State Established -RemotePort $portNumber -ErrorAction Stop |
+    $tcp |
         Where-Object {
-            $_.LocalAddress -in @('127.0.0.1', '::ffff:127.0.0.1', '::1') -and
-            $_.RemoteAddress -in @('127.0.0.1', '::ffff:127.0.0.1', '::1')
+            $_.State -eq 'ESTABLISHED' -and
+            $_.Local -match '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):\d+$' -and
+            $_.Remote -in @($localEndpoint, "[::ffff:127.0.0.1]:$portNumber", "[::1]:$portNumber")
         } |
-        ForEach-Object { [int]$_.OwningProcess } |
+        ForEach-Object { $_.Owner } |
         Sort-Object -Unique
 )
 $matches = @(
     foreach ($processId in $processIds) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
-        if (
-            $null -ne $process -and
-            $process.Name -eq 'ChatGPT.exe' -and
-            -not [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -and
-            [string]::Equals(
-                [IO.Path]::GetFullPath([string]$process.ExecutablePath),
-                $expectedExecutable,
-                [StringComparison]::OrdinalIgnoreCase)
-        ) {
-            [ordered]@{
-                processId = $processId
-                executablePath = [IO.Path]::GetFullPath([string]$process.ExecutablePath)
-                creationTimeUtc = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
-            }
+        $identity = Get-Identity $processId
+        if ($null -ne $identity -and [string]::Equals(
+            $identity.executablePath, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase
+        )) {
+            $identity
         }
     }
 )
@@ -318,19 +325,9 @@ $matches = @(
 }
 
 function assertNamedPipeExists(pipePath) {
-  const pipeName = pipePath.slice('\\\\.\\pipe\\'.length);
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$pipeName = [string]$env:CODEX_BRIDGE_PROBE_PIPE
-$count = @(
-    Get-ChildItem -LiteralPath '\\.\pipe\' -ErrorAction Stop |
-        Where-Object { [string]$_.Name -ceq $pipeName }
-).Count
-[ordered]@{ count = $count } | ConvertTo-Json -Compress
-`;
-  const result = runPowerShellJson(script, { CODEX_BRIDGE_PROBE_PIPE: pipeName });
-  if (result.count !== 1) {
+  const pipeRoot = '\\\\.\\pipe\\';
+  const pipeName = pipePath.slice(pipeRoot.length).toLowerCase();
+  if (!fs.readdirSync(pipeRoot).some(name => name.toLowerCase() === pipeName)) {
     throw new Error('The connected Desktop native app-tools pipe is not available.');
   }
 }

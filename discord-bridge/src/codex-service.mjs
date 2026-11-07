@@ -19,8 +19,9 @@ import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
 import { inspectDesktopClientOwner, processIsAlive } from './client-tool-ownership.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
 import { turnTimestampMs } from './recent-history.mjs';
-import { DESKTOP_PACKAGE_FAMILY, openDesktopThread } from './browser-initialization.mjs';
+import { DESKTOP_PACKAGE_FAMILY } from './browser-initialization.mjs';
 import { DesktopFirst, DesktopThreadPendingError } from './desktop-first.mjs';
+import { DesktopNavigation } from './desktop-navigation.mjs';
 
 // All ThreadSourceKind values in the verified App Server's v2 protocol.
 const RELATION_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
@@ -135,11 +136,12 @@ export class CodexService extends EventEmitter {
     this.browserArchiveLocks = new Set();
     this.resumingThreadCounts = new Map();
     this.preparedDeliveryOwners = new WeakMap();
+    const navigation = new DesktopNavigation();
     this.desktopFirst = desktopFirst ?? (desktopFirstDirectory && new DesktopFirst({
       directory: desktopFirstDirectory,
       runtime: () => this.#browserInitializationRuntime(),
       readThread: (id) => this.readThreadMetadata(id),
-      open: openDesktopThread,
+      prepareNavigation: () => navigation.prepare(this.client),
       log: (event, details) => this.#log(event, details),
     }));
     this.restoredHistoryTurnIds = new Map();
