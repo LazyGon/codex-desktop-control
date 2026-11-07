@@ -120,6 +120,40 @@ function Initialize-CodexRuntimeCache {
     }
 }
 
+function Save-CodexAppToolsCache {
+    param(
+        [Parameter(Mandatory)][string]$PluginRoot,
+        [Parameter(Mandatory)][string]$VersionCacheRoot,
+        [Parameter(Mandatory)][string]$PackageVersion,
+        [Parameter(Mandatory)][string]$PackageFamilyName,
+        [Parameter(Mandatory)][string]$ServerSha256
+    )
+
+    $manifest = @('.mcp.json', 'desktop-mcp.json') | Where-Object {
+        Test-Path -LiteralPath (Join-Path $PluginRoot $_) -PathType Leaf
+    } | Select-Object -First 1
+    if (!$manifest) { return }
+    $cache = Join-Path $VersionCacheRoot 'desktop-app-tools'
+    New-Item -ItemType Directory -Path (Join-Path $cache 'scripts') -Force | Out-Null
+    $files = [ordered]@{}
+    foreach ($name in @($manifest, 'server.mjs', 'scripts/launch_codex_app_tools_mcp.cmd')) {
+        $files[$name] = Copy-VerifiedCodexRuntimeFile -SourcePath (Join-Path $PluginRoot $name) `
+            -DestinationPath (Join-Path $cache $name) -Description "Desktop app-tools $name"
+    }
+    $receipt = [ordered]@{
+        packageVersion = $PackageVersion; packageFamilyName = $PackageFamilyName
+        serverSha256 = $ServerSha256; manifest = $manifest; files = $files
+    }
+    $destination = Join-Path $cache 'runtime-bundle.json'
+    $temporary = "$destination.$PID.tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, ($receipt | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $destination -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
 function Get-CodexPackageRuntime {
     param([Parameter(Mandatory)][object]$Package, [Parameter(Mandatory)][string]$CacheRoot)
 
@@ -131,6 +165,15 @@ function Get-CodexPackageRuntime {
         -BundledSandboxSetupExecutable $package.BundledSandboxSetupExecutable `
         -CacheRoot $CacheRoot `
         -PackageVersion $package.Version
+
+    $resources = Split-Path -Parent $package.BundledServerExecutable
+    try {
+        Save-CodexAppToolsCache -PluginRoot (Join-Path $resources 'plugins\openai-bundled\plugins\codex-app-tools') `
+            -VersionCacheRoot $runtimeCache.CacheRoot -PackageVersion $package.Version `
+            -PackageFamilyName $package.PackageFamilyName -ServerSha256 $runtimeCache.ServerSha256
+    } catch {
+        Write-Warning 'The optional Desktop app-tools cache could not be refreshed.'
+    }
 
     [pscustomobject]@{
         Version = $package.Version

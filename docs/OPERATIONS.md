@@ -54,6 +54,11 @@ stable bridge resolves the installed Desktop package and native app-tools pipe
 at MCP startup; it does not store a package-version-specific path in the user
 config or open another listener.
 
+The launcher preserves the small bundled Desktop app-tools plugin alongside
+the corresponding cached App Server. If Store servicing removes the plugin
+while that Desktop is still running, the tool bridge verifies and uses the
+copy paired to that exact package and server hash.
+
 If Desktop reports `invalid transport in mcp_servers.codex_app`, do not add a
 `transport` key. Run the shared launcher once. It atomically adds or refreshes
 its marked `mcp_servers.codex_app` command definition and keeps the old config
@@ -163,7 +168,10 @@ no navigation. For `notLoaded`, the Bridge calls the Desktop's
 `codex_app.navigate_to_codex_page` through the shared App Server's
 `mcpServer/tool/call` API. This may switch the visible Desktop view. The
 Bridge uses its own in-memory MCP context without starting a turn, since a
-cold task cannot host the tool call itself. It waits
+cold task cannot host the tool call itself. If the tool catalog cannot be
+loaded, the Bridge releases that temporary context and can prepare a fresh
+one on the next normal sync. This cannot repeat a navigation already sent.
+It waits
 for a fresh, successful `thread/resume` receipt for that exact task from the
 live Desktop process and for the shared server to report the task loaded.
 Only then does the Bridge subscribe and send. Other tasks can keep receiving

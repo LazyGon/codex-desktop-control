@@ -12,23 +12,47 @@ function navigated(result) {
 export class DesktopNavigation {
   #contexts = new WeakMap();
 
-  async prepare(client) {
+  constructor({ retryDelayMs = 0, clock = Date.now, log = () => {} } = {}) {
+    Object.assign(this, { retryDelayMs, clock, log });
+  }
+
+  prepare(client) {
     let context = this.#contexts.get(client);
-    if (!context) {
+    if (!context || (context.retryAt != null && this.clock() >= context.retryAt)) {
       // A cold task cannot host an MCP call. Keep a service-owned, in-memory
       // context on this connection; never borrow a user's task or start a turn.
-      context = { thread: this.#startContext(client), available: false };
+      context = {};
       this.#contexts.set(client, context);
+      context.ready = this.#prepareContext(client, context);
     }
-    const threadId = await context.thread;
-    if (!context.available) {
+    return context.ready;
+  }
+
+  async #prepareContext(client, context) {
+    const threadId = await this.#startContext(client);
+    let server;
+    let reason = 'navigation-tool-unavailable';
+    try {
       const catalog = await client.call('mcpServerStatus/list', {
         threadId, serverName: SERVER, detail: 'toolsAndAuthOnly',
       });
-      const server = catalog?.data?.find(entry => entry.name === SERVER);
-      if (!server?.tools?.[TOOL]) throw new Error('Desktop navigation is unavailable.');
-      context.available = true;
+      server = catalog?.data?.find(entry => entry.name === SERVER);
+    } catch {
+      reason = 'catalog-read-failed';
     }
+    if (!server?.tools?.[TOOL]) {
+      this.log('desktop-navigation-context-unavailable', { contextThreadId: threadId, reason });
+      // No navigation was requested. An MCP startup failure is cached by
+      // this session, so retire it rather than reading its catalog forever.
+      const released = await client.call('thread/unsubscribe', { threadId });
+      if (!['unsubscribed', 'notSubscribed', 'notLoaded'].includes(released?.status)) {
+        throw new Error('Desktop navigation context release was not confirmed.');
+      }
+      context.retryAt = this.clock() + this.retryDelayMs;
+      this.log('desktop-navigation-context-released', { contextThreadId: threadId, status: released.status });
+      return null;
+    }
+    this.log('desktop-navigation-context-ready', { contextThreadId: threadId });
     return async (target) => navigated(await client.call('mcpServer/tool/call', {
       threadId, server: SERVER, tool: TOOL, arguments: { threadId: target },
     }));

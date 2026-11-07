@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -176,29 +177,57 @@ export function selectNativePipeFromLogs(logFiles, processId, creationTimeUtc) {
   throw new Error('No current native app-tools pipe was found for the connected Desktop process.');
 }
 
-export function resolveBundledPaths(desktopExecutable) {
+const appToolsManifestNames = ['.mcp.json', 'desktop-mcp.json'];
+const appToolsEntry = 'server.mjs';
+const appToolsLauncher = 'scripts/launch_codex_app_tools_mcp.cmd';
+const isFile = (file) => fs.statSync(file, { throwIfNoEntry: false })?.isFile();
+
+function loadCachedAppTools(state, packageFamilyName) {
+  const root = path.win32.join(path.win32.dirname(state.serverExecutable), 'desktop-app-tools');
+  const receipt = JSON.parse(fs.readFileSync(path.win32.join(root, 'runtime-bundle.json'), 'utf8'));
+  if (receipt?.packageFamilyName !== packageFamilyName || receipt.packageVersion !== state.packageVersion
+    || !/^[A-F0-9]{64}$/i.test(state.serverSha256 ?? '') || receipt.serverSha256 !== state.serverSha256
+    || !appToolsManifestNames.includes(receipt.manifest)) {
+    throw new Error('The cached Desktop app-tools bundle is not paired to the running version.');
+  }
+  for (const name of [receipt.manifest, appToolsEntry, appToolsLauncher]) {
+    const hash = createHash('sha256').update(fs.readFileSync(path.win32.join(root, name))).digest('hex').toUpperCase();
+    if (hash !== receipt.files?.[name]) throw new Error('The cached Desktop app-tools bundle failed verification.');
+  }
+  return { root, manifest: receipt.manifest };
+}
+
+export function resolveBundledPaths(desktopExecutable, state = null, packageFamilyName = null) {
   const appRoot = path.win32.dirname(desktopExecutable);
   const resourcesRoot = path.win32.join(appRoot, 'resources');
-  const pluginRoot = path.win32.join(
+  let pluginRoot = path.win32.join(
     resourcesRoot,
     'plugins',
     'openai-bundled',
     'plugins',
     'codex-app-tools',
   );
-  const bundledNode = path.win32.join(resourcesRoot, 'cua_node', 'bin', 'node.exe');
-  const serverScript = path.win32.join(pluginRoot, 'server.mjs');
-  const launchScript = path.win32.join(pluginRoot, 'scripts', 'launch_codex_app_tools_mcp.cmd');
+  let bundledNode = path.win32.join(resourcesRoot, 'cua_node', 'bin', 'node.exe');
   // New Desktop packages use the standard plugin manifest name. Prefer it;
   // an invalid new manifest must not be hidden by a legacy fallback.
-  const definitionPath = ['.mcp.json', 'desktop-mcp.json']
-    .map(name => path.win32.join(pluginRoot, name))
-    .find(candidate => fs.statSync(candidate, { throwIfNoEntry: false })?.isFile());
-  if (!definitionPath) {
+  let manifest = appToolsManifestNames.find(name => isFile(path.win32.join(pluginRoot, name)));
+  if ((!manifest || !isFile(path.win32.join(pluginRoot, appToolsEntry))
+    || !isFile(path.win32.join(pluginRoot, appToolsLauncher))) && state) {
+    // Store updates may remove the old plugin files while its Desktop and
+    // pipe are still live. Use only the copy captured for that exact runtime.
+    const cache = loadCachedAppTools(state, packageFamilyName);
+    pluginRoot = cache.root;
+    manifest = cache.manifest;
+    if (!isFile(bundledNode)) bundledNode = process.execPath;
+  }
+  if (!manifest) {
     throw new Error('The installed Desktop package has no recognized codex-app-tools MCP manifest.');
   }
+  const definitionPath = path.win32.join(pluginRoot, manifest);
+  const serverScript = path.win32.join(pluginRoot, appToolsEntry);
+  const launchScript = path.win32.join(pluginRoot, appToolsLauncher);
   for (const candidate of [bundledNode, serverScript, launchScript, definitionPath]) {
-    if (!fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) {
+    if (!isFile(candidate)) {
       throw new Error('The installed Desktop package is missing a required codex-app-tools file.');
     }
   }
@@ -350,7 +379,7 @@ export function resolveBridgeRuntime(statePath = defaultStatePath) {
   const logFiles = findDesktopLogFiles(localAppData, packageFamilyName);
   const nativePipe = selectNativePipeFromLogs(logFiles, desktop.processId, desktop.creationTimeUtc);
   assertNamedPipeExists(nativePipe.pipePath);
-  const bundled = resolveBundledPaths(state.desktopExecutable);
+  const bundled = resolveBundledPaths(state.desktopExecutable, state, packageFamilyName);
   return { state, desktop, nativePipe, bundled };
 }
 
@@ -387,19 +416,9 @@ async function run() {
     return;
   }
 
-  const command = process.env.ComSpec
-    ?? path.win32.join(requireNonEmptyString(process.env.WINDIR, 'WINDIR'), 'System32', 'cmd.exe');
-  if (!fs.statSync(command, { throwIfNoEntry: false })?.isFile()) {
-    throw new Error('cmd.exe was not found.');
-  }
-  const child = spawn(command, [
-    '/d',
-    '/s',
-    '/c',
-    'call',
-    './scripts/launch_codex_app_tools_mcp.cmd',
-    './server.mjs',
-  ], {
+  // The bundled launcher selects this exact Node first. Start the verified
+  // stdio entrypoint directly to avoid another shell during the MCP handshake.
+  const child = spawn(resolved.bundled.bundledNode, [resolved.bundled.serverScript], {
     cwd: resolved.bundled.pluginRoot,
     env: {
       ...process.env,

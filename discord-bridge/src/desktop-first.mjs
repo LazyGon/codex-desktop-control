@@ -175,7 +175,7 @@ export class DesktopFirst {
   async #navigate(threadId, runtime, sameRuntime) {
     if (!sameRuntime()) return;
     const open = await this.prepareNavigation();
-    if (!sameRuntime()) return;
+    if (!open || !sameRuntime()) return;
     const thread = await this.readThread(threadId);
     if (thread?.id !== threadId || thread.status?.type !== 'notLoaded' || thread.ephemeral !== false
       || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)

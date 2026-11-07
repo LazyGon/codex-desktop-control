@@ -44,3 +44,35 @@ test('an uncertain context creation is not resent on the same connection', async
   await assert.rejects(navigator.prepare(client), /No receipt/);
   await assert.rejects(navigator.prepare(client), /No receipt/);
 });
+
+test('a failed MCP startup releases its context and a later sync can open the task', async () => {
+  let now = 0;
+  const events = [];
+  const contexts = ['failed-context', 'working-context'];
+  const client = { async call(method, params) {
+    if (method === 'thread/start') return { thread: { id: contexts.shift(), ephemeral: true, path: null } };
+    if (method === 'mcpServerStatus/list') {
+      return { data: [{ name: 'codex_app',
+        tools: params.threadId === 'working-context' ? { navigate_to_codex_page: {} } : {} }] };
+    }
+    if (method === 'thread/unsubscribe') {
+      assert.deepEqual(params, { threadId: 'failed-context' });
+      events.push('released');
+      return { status: 'unsubscribed' };
+    }
+    if (method === 'mcpServer/tool/call') {
+      assert.equal(params.threadId, 'working-context');
+      events.push(params.arguments.threadId);
+      return { structuredContent: { navigated: true } };
+    }
+    throw new Error('Unexpected RPC');
+  } };
+  const navigator = new DesktopNavigation({ retryDelayMs: 30_000, clock: () => now });
+  assert.equal(await navigator.prepare(client), null);
+  assert.equal(await navigator.prepare(client), null);
+  assert.deepEqual(events, ['released']);
+  now = 30_000;
+  const [open] = await Promise.all([navigator.prepare(client), navigator.prepare(client)]);
+  assert.equal(await open('cold-task'), true);
+  assert.deepEqual(events, ['released', 'cold-task']);
+});

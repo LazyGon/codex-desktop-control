@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   assertSharedServerOwner,
@@ -186,6 +187,39 @@ test('shared bridge derives and verifies the installed Desktop plugin layout', (
     command: 'cmd.exe', args: ['./scripts/launch_codex_app_tools_mcp.cmd', './server.mjs'],
   } } }));
   assert.equal(resolveBundledPaths(desktop).definitionPath, modernManifest);
+});
+
+test('the live package can lose its plugin files without selecting a different or modified bundle', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-app-tools-cache-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const packageFamilyName = 'OpenAI.Codex_2p2nqsd0c76g0';
+  const state = validState({
+    desktopExecutable: path.join(directory, 'install', 'app', 'ChatGPT.exe'),
+    serverExecutable: path.join(directory, 'runtime', 'codex.exe'),
+    serverSha256: 'A'.repeat(64),
+  });
+  const cache = path.join(directory, 'runtime', 'desktop-app-tools');
+  fs.mkdirSync(path.join(cache, 'scripts'), { recursive: true });
+  const assets = {
+    '.mcp.json': JSON.stringify({ mcpServers: { codex_app: {
+      command: 'cmd.exe', args: ['./scripts/launch_codex_app_tools_mcp.cmd', './server.mjs'],
+    } } }),
+    'server.mjs': 'original desktop tool',
+    'scripts/launch_codex_app_tools_mcp.cmd': 'original launcher',
+  };
+  for (const [name, bytes] of Object.entries(assets)) fs.writeFileSync(path.join(cache, name), bytes);
+  fs.writeFileSync(path.join(cache, 'runtime-bundle.json'), JSON.stringify({
+    packageFamilyName, packageVersion: state.packageVersion, manifest: '.mcp.json', serverSha256: state.serverSha256,
+    files: Object.fromEntries(Object.entries(assets).map(([name, bytes]) => [
+      name, createHash('sha256').update(bytes).digest('hex').toUpperCase(),
+    ])),
+  }));
+  assert.equal(resolveBundledPaths(state.desktopExecutable, state, packageFamilyName).serverScript,
+    path.join(cache, 'server.mjs'));
+  assert.throws(() => resolveBundledPaths(state.desktopExecutable, { ...state, packageVersion: '26.901.1.0' },
+    packageFamilyName), /not paired/);
+  fs.writeFileSync(path.join(cache, 'server.mjs'), 'replacement');
+  assert.throws(() => resolveBundledPaths(state.desktopExecutable, state, packageFamilyName), /failed verification/);
 });
 
 test('shared bridge allows a bounded startup race without accepting uncertainty', async (t) => {

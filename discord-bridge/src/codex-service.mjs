@@ -136,7 +136,10 @@ export class CodexService extends EventEmitter {
     this.browserArchiveLocks = new Set();
     this.resumingThreadCounts = new Map();
     this.preparedDeliveryOwners = new WeakMap();
-    const navigation = new DesktopNavigation();
+    const navigation = new DesktopNavigation({
+      retryDelayMs: config.taskSyncIntervalMs,
+      log: (event, details) => this.#log(event, details),
+    });
     this.desktopFirst = desktopFirst ?? (desktopFirstDirectory && new DesktopFirst({
       directory: desktopFirstDirectory,
       runtime: () => this.#browserInitializationRuntime(),
