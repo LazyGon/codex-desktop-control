@@ -224,6 +224,44 @@ function windowsPowerShell() {
   return path.join(process.env.WINDIR ?? String.raw`C:\Windows`, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 }
 
+test('a reader holding progress open cannot abort startup or damage its last snapshot', context => {
+  if (process.platform !== 'win32') { context.skip('Windows file sharing.'); return; }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-progress-sharing-'));
+  const harness = path.join(directory, 'probe.ps1');
+  const quote = value => `'${value.replaceAll("'", "''")}'`;
+  context.after(() => {
+    for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
+    fs.rmdirSync(directory);
+  });
+  fs.writeFileSync(harness, `
+$ErrorActionPreference = 'Stop'
+. ${quote(path.join(launcherRoot, 'CodexRuntimeHandoff.ps1'))}
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(${quote(path.join(launcherRoot, 'Start-CodexShared.ps1'))}, [ref]$null, [ref]$null)
+foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Write-LauncherLog', 'Write-LauncherProgress') }, $false)) {
+    . ([scriptblock]::Create($function.Extent.Text))
+}
+$ProgressPath = Join-Path $PSScriptRoot 'progress.json'
+$logPath = Join-Path $PSScriptRoot 'launcher.log'
+$ProgressOwnerProcessId = 99
+Write-LauncherProgress -Phase 'server-ready' -Summary 'Server ready'
+$legacy = [IO.File]::Open($ProgressPath, 'Open', 'Read', 'Read')
+try {
+    Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Opening Desktop'
+    $held = (Read-CodexHandoffJson $ProgressPath).phase
+} finally { $legacy.Dispose() }
+$reader = [IO.File]::Open($ProgressPath, 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+try {
+    Write-LauncherProgress -Phase 'ready' -Summary 'Connected'
+    $published = Read-CodexHandoffJson $ProgressPath
+    $snapshot = [IO.StreamReader]::new($reader)
+    try { $previous = ($snapshot.ReadToEnd() | ConvertFrom-Json).phase } finally { $snapshot.Dispose() }
+} finally { $reader.Dispose() }
+@{ held=$held; previous=$previous; published=$published.phase; owner=$published.launcherProcessId; logged=(Test-Path $logPath) } | ConvertTo-Json -Compress
+`);
+  const result = JSON.parse(execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-File', harness], { encoding: 'utf8' }));
+  assert.deepEqual(result, { held: 'server-ready', previous: 'server-ready', published: 'ready', owner: 99, logged: true });
+});
+
 function startupFixture(directory, mode) {
   const launcher = path.join(directory, 'launcher');
   fs.mkdirSync(launcher, { recursive: true });

@@ -46,9 +46,14 @@ trap {
             updatedAt = [DateTimeOffset]::Now.ToString('o')
         }
         try {
-            $temporaryFailure = "$ProgressPath.$PID.tmp"
-            [IO.File]::WriteAllText($temporaryFailure, ($failure | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
-            Move-Item -LiteralPath $temporaryFailure -Destination $ProgressPath -Force
+            if (Get-Command Write-CodexHandoffJson -CommandType Function -ErrorAction SilentlyContinue) {
+                Write-CodexHandoffJson $ProgressPath $failure
+            } else {
+                # Dependency failures can occur before the shared writer loads.
+                $temporaryFailure = "$ProgressPath.$PID.tmp"
+                [IO.File]::WriteAllText($temporaryFailure, ($failure | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+                Move-Item -LiteralPath $temporaryFailure -Destination $ProgressPath -Force
+            }
         }
         catch { }
     }
@@ -138,9 +143,18 @@ function Write-LauncherProgress {
         logPath = $logPath
         updatedAt = [DateTimeOffset]::Now.ToString('o')
     }
-    $temporary = "$ProgressPath.$PID.tmp"
-    [IO.File]::WriteAllText($temporary, ($progress | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $ProgressPath -Force
+    # A legacy launcher or external observer may hold the previous snapshot.
+    # Progress reporting must not tear down an otherwise healthy startup.
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            Write-CodexHandoffJson $ProgressPath $progress
+            return
+        }
+        catch [IO.IOException], [UnauthorizedAccessException] {
+            if ($attempt -lt 4) { Start-Sleep -Milliseconds 40 }
+            else { Write-LauncherLog "Progress publication failed. phase=$Phase error=$($_.Exception.Message)" }
+        }
+    }
 }
 
 function Assert-LauncherNotCancelled {
@@ -398,9 +412,7 @@ function Test-DesktopWebSocketConnection {
 function Write-RuntimeState {
     param([Parameter(Mandatory)][object]$State)
 
-    $temporaryPath = "$statePath.tmp"
-    $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
-    Move-Item -LiteralPath $temporaryPath -Destination $statePath -Force
+    Write-CodexHandoffJson $statePath $State
 }
 
 function Set-RuntimeStateValue {
@@ -518,7 +530,7 @@ function Invoke-InteractiveLauncherWorker {
         while (-not $owner.HasExited) {
             if (Test-Path -LiteralPath $ProgressPath -PathType Leaf) {
                 try {
-                    $result = Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $result = Read-CodexHandoffJson $ProgressPath
                     if ([int]$result.launcherProcessId -eq $PID -and [int]$result.supervisorProcessId -eq $owner.Id) {
                         if ($result.phase -in @('ready', 'skipped', 'bridge-ready')) { return 0 }
                         if ($result.phase -in @('failed', 'cancelled')) {

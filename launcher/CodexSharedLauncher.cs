@@ -324,7 +324,7 @@ internal sealed class SharedLaunchProgressForm : Form
     {
         try
         {
-            var value = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
+            var value = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(ReadReplaceableStateFile(path));
             object processId;
             if (value == null || !value.TryGetValue("launcherProcessId", out processId) ||
                 Convert.ToInt32(processId, CultureInfo.InvariantCulture) != expectedProcessId)
@@ -340,7 +340,7 @@ internal sealed class SharedLaunchProgressForm : Form
         return value != null && value.TryGetValue(key, out entry) ? entry as string ?? String.Empty : String.Empty;
     }
 
-    private static string ReadBridgeStateFile(string path)
+    private static string ReadReplaceableStateFile(string path)
     {
         using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         using (var reader = new StreamReader(stream))
@@ -356,13 +356,13 @@ internal sealed class SharedLaunchProgressForm : Form
         {
             string dataRoot = Path.Combine(root, "data");
             var runtime = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
-                ReadBridgeStateFile(Path.Combine(dataRoot, "runtime.json")));
+                ReadReplaceableStateFile(Path.Combine(dataRoot, "runtime.json")));
             if (GetString(runtime, "phase") != "running" ||
                 !String.Equals(Path.GetFullPath(GetString(runtime, "bridgeRoot")), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
                 return;
             int pid = Convert.ToInt32(runtime["pid"], CultureInfo.InvariantCulture);
             int lockPid;
-            if (!Int32.TryParse(ReadBridgeStateFile(Path.Combine(dataRoot, "bridge.lock")), NumberStyles.Integer,
+            if (!Int32.TryParse(ReadReplaceableStateFile(Path.Combine(dataRoot, "bridge.lock")), NumberStyles.Integer,
                 CultureInfo.InvariantCulture, out lockPid) || lockPid != pid) return;
             using (Process process = Process.GetProcessById(pid))
             {
@@ -400,7 +400,7 @@ internal sealed class SharedLaunchProgressForm : Form
         {
             var serializer = new JavaScriptSerializer();
             var state = serializer.Deserialize<Dictionary<string, object>>(
-                File.ReadAllText(stateFilePath));
+                ReadReplaceableStateFile(stateFilePath));
 
             object processValue;
             object readyUrlValue;

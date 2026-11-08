@@ -21,6 +21,7 @@ $repositoryRoot = Split-Path -Parent $launcherRoot
 . (Join-Path $launcherRoot 'CodexRuntimeCache.ps1')
 . (Join-Path $launcherRoot 'CodexDesktopStartup.ps1')
 . (Join-Path $launcherRoot 'CodexDesktopShutdown.ps1')
+. (Join-Path $launcherRoot 'CodexRuntimeHandoff.ps1')
 $nodeExecutable = Initialize-CodexNodeRuntime -StateRoot (Join-Path $launcherRoot 'state')
 $sessionsRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\sessions'
 $inspectionScript = Join-Path $launcherRoot 'private-turn-state.mjs'
@@ -31,9 +32,7 @@ $powerShellExecutable = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\p
 
 function Write-Receipt {
     $receipt.updatedAt = [DateTimeOffset]::UtcNow.ToString('o')
-    $temporary = "$($request.receiptPath).$PID.tmp"
-    [IO.File]::WriteAllText($temporary, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $request.receiptPath -Force
+    Write-CodexHandoffJson $request.receiptPath $receipt
 }
 function Write-BootstrapLog([string]$Message) {
     Add-Content -LiteralPath $request.logPath -Value "$([DateTimeOffset]::UtcNow.ToString('o')) $Message" -Encoding UTF8
@@ -45,7 +44,7 @@ function Get-PrivateSnapshot {
 }
 function Get-VerifiedNewRuntime {
     if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) { return $null }
-    $state = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $state = Read-CodexHandoffJson $runtimePath
     if ($state.websocketUrl -ne 'ws://127.0.0.1:8798' -or $state.desktopConnectionVerified -ne $true) { return $null }
     $listener = @(Get-NetTCPConnection -LocalPort 8798 -State Listen -ErrorAction SilentlyContinue)
     if ($listener.Count -ne 1 -or $listener[0].LocalAddress -ne '127.0.0.1' -or [int]$listener[0].OwningProcess -ne [int]$state.serverProcessId) { return $null }
@@ -114,7 +113,7 @@ if (-not $Controller) {
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
         if (Test-Path -LiteralPath $request.receiptPath) {
-            $armed = Get-Content -LiteralPath $request.receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $armed = Read-CodexHandoffJson $request.receiptPath
             if ($armed.requestId -eq $requestId -and $armed.phase -eq 'waiting-for-source-turn' -and $armed.controllerProcessId -ne $PID) {
                 [pscustomobject]@{Armed=$true;TaskName=$taskName;ControllerPid=$armed.controllerProcessId;RequestPath=$RequestPath;ReceiptPath=$request.receiptPath;LogPath=$request.logPath}
                 return
@@ -227,7 +226,7 @@ try {
         if ($supervisor.HasExited) { throw 'The admitted shared supervisor exited; inspect its startup receipt before any retry.' }
         $stage = 0
         if (Test-Path -LiteralPath $progressPath) {
-            $progress = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $progress = Read-CodexHandoffJson $progressPath
             if ([int]$progress.supervisorProcessId -ne $supervisor.Id) { throw 'Startup progress belongs to a different process.' }
             if ($progress.phase -in @('failed','cancelled','skipped')) { throw "The shared supervisor stopped startup: $($progress.phase). Inspect its progress receipt." }
             if ($phaseRanks.ContainsKey($progress.phase)) { $stage = 100 * $phaseRanks[$progress.phase] }
@@ -247,7 +246,9 @@ try {
     $receipt.serverProcessId = [int]$newState.serverProcessId
     $receipt.sharedProtocolVerified = $true
     $receipt.phase = 'starting-discord-bridge'; Write-Receipt
-    Start-ScheduledTask -TaskName 'Codex Discord Remote'
+    if ((Get-ScheduledTask -TaskName 'Codex Discord Remote').State -ne 'Running') {
+        Start-ScheduledTask -TaskName 'Codex Discord Remote'
+    }
     $bridgeDeadline = [DateTimeOffset]::UtcNow.AddMinutes(3)
     do {
         $status = & $statusScript -Json | ConvertFrom-Json
@@ -282,7 +283,7 @@ if ($null -ne $newState) {
         # utility resumes the same thread and reads its latest active turn.
         $deliveryState = Get-VerifiedNewRuntime
         if ($null -eq $deliveryState) { throw 'The verified canonical runtime is no longer available; no callback was sent.' }
-        $message = "Windows Scheduler bootstrap has finished. Request id: $($request.requestId). Receipt: $($request.receiptPath). Log: $($request.logPath). Read the receipt first. Continue the latest user request: recover failed shared AppServer startup and restore missing local projects/sidebar after the Desktop update. Verify the live shared AppServer, Desktop, DiscordBridge and restored project assignments. Do not rerun this bootstrap solely because of this callback. If startup or Bridge failed, diagnose and complete recovery. Preserve this task's workspace, permissions, model and existing Git changes. No user action is required."
+        $message = "Windows Scheduler bootstrap has finished. Request id: $($request.requestId). Receipt: $($request.receiptPath). Log: $($request.logPath). Read the receipt first. Continue the user request that authorized this switch from the official Desktop to the shared Desktop. Verify the live shared AppServer, Desktop and Discord Bridge. If the receipt reports a failure, diagnose its recorded stage before any retry. Preserve this task's workspace, permissions, model and existing Git changes."
         $output = @(& $nodeExecutable (Join-Path $repositoryRoot 'control\codex-control.mjs') deliver $request.threadId --url $deliveryState.websocketUrl --message $message --compact 2>&1)
         if ($LASTEXITCODE -ne 0) { throw 'Callback delivery was uncertain; it was not automatically retried.' }
         $delivery = ($output -join "`n") | ConvertFrom-Json
