@@ -7,6 +7,7 @@ const THREAD_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const LOCAL_SOURCES = new Set(['vscode', 'cli', 'exec', 'appServer']);
 const LOADED = new Set(['idle', 'active', 'systemError']);
 const DESKTOP_MCP = 'desktop-mcp';
+const DESKTOP_OBSERVED = 'desktop-observed';
 
 export class DesktopThreadPendingError extends Error {
   constructor() {
@@ -86,11 +87,11 @@ export class DesktopFirst {
     Object.assign(this, { directory, runtime, readThread, prepareNavigation, log, clock });
   }
 
-  prepare(threadId, { allowOpen = true, requireResume = false } = {}) {
-    if (!THREAD_ID.test(threadId)) return Promise.resolve(requireResume ? 'unconfirmed' : 'ready');
+  prepare(threadId, { allowOpen = true, observeLoadedSince = null } = {}) {
+    if (!THREAD_ID.test(threadId)) return Promise.resolve(observeLoadedSince === null ? 'ready' : 'unconfirmed');
     const existing = this.#inFlight.get(threadId);
     if (existing) return existing;
-    const work = this.#prepare(threadId, allowOpen, requireResume).finally(() => this.#inFlight.delete(threadId));
+    const work = this.#prepare(threadId, allowOpen, observeLoadedSince).finally(() => this.#inFlight.delete(threadId));
     this.#inFlight.set(threadId, work);
     return work;
   }
@@ -145,14 +146,14 @@ export class DesktopFirst {
     else this.#waiting.delete(record.threadId);
   }
 
-  async #prepare(threadId, allowOpen, requireResume) {
+  async #prepare(threadId, allowOpen, observeLoadedSince) {
     const runtime = this.runtime();
     if (!runtime) return 'disabled';
     const sameRuntime = () => this.runtime()?.generation === runtime.generation;
     const thread = await this.readThread(threadId);
     if (thread?.id !== threadId || !sameRuntime()) return 'waiting';
     if (thread.ephemeral !== false || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)) {
-      return requireResume ? 'unconfirmed' : 'ready';
+      return observeLoadedSince === null ? 'ready' : 'unconfirmed';
     }
     if (!thread.path || /[\\/]archived_sessions[\\/]/i.test(thread.path)) throw new Error('Desktop cannot open this local task.');
     const record = this.#read(threadId);
@@ -163,9 +164,14 @@ export class DesktopFirst {
         || thread.status?.type !== 'notLoaded') return confirmed;
     }
     if (LOADED.has(thread.status?.type)) {
-      if (!requireResume || (record?.generation === runtime.generation && record.phase === 'confirmed'
+      if (observeLoadedSince === null || (record?.generation === runtime.generation && record.phase === 'confirmed'
         && runtime.desktopPids.includes(record.resumePid))) return 'ready';
-      return 'unconfirmed';
+      // A user can open the task during MCP startup. Observe that exact local
+      // resume without issuing another navigation or treating loaded as proof.
+      return this.#confirm({
+        threadId, generation: runtime.generation, attemptId: randomUUID(), notBefore: observeLoadedSince,
+        phase: 'waiting', transport: DESKTOP_OBSERVED, desktopPids: runtime.desktopPids, offsets: [],
+      }, runtime, sameRuntime);
     }
     if (thread.status?.type !== 'notLoaded' || !allowOpen) return 'waiting';
     if (this.#dispatch) return 'waiting';
@@ -198,7 +204,7 @@ export class DesktopFirst {
       offsets: [...baseline].map(([file, { size, identity }]) => [file, { cursor: size, identity }]),
       // A cold task can use the new transport once. Preserve the earlier
       // URI claim; this does not replay the Discord input or the URI.
-      ...(previous?.previousUriAttempt || waiting
+      ...(previous?.previousUriAttempt || (waiting && previous.transport !== DESKTOP_OBSERVED)
         ? { previousUriAttempt: previous.previousUriAttempt ?? previous } : {}),
     };
     // Persist the attempt before navigation. A restart can check

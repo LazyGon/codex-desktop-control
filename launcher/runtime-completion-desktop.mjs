@@ -24,6 +24,7 @@ export function createRuntimeCompletionRoute(client, { endpoint, expectedServerP
     return { state, generation };
   };
   const initialGeneration = readRuntime().generation;
+  const observeLoadedSince = Date.now();
   const verifyRuntime = () => {
     const current = readRuntime();
     if (current.generation !== initialGeneration) {
@@ -32,7 +33,9 @@ export function createRuntimeCompletionRoute(client, { endpoint, expectedServerP
     return current;
   };
   const boundedClient = { call: (method, params) => client.call(method, params, APP_SERVER_OPERATION_TIMEOUT_MS) };
-  const navigation = new DesktopNavigation();
+  // An unavailable catalog has not issued a navigation. Retry with a fresh
+  // context only after DesktopNavigation has confirmed release of the old one.
+  const navigation = new DesktopNavigation({ retryDelayMs: 5_000 });
   let navigationUnavailable = false;
   const coordinator = new DesktopFirst({
     directory: path.join(path.dirname(statePath), 'runtime-handoffs', requestId, 'completion-desktop'),
@@ -48,18 +51,14 @@ export function createRuntimeCompletionRoute(client, { endpoint, expectedServerP
       };
     },
     readThread: async (threadId) => (await boundedClient.call('thread/read', { threadId, includeTurns: false })).thread,
-    prepareNavigation: async () => {
-      const open = await navigation.prepare(boundedClient);
-      if (!open) navigationUnavailable = true;
-      return open;
-    },
+    prepareNavigation: () => navigation.prepare(boundedClient),
     log: (event) => { if (event === 'desktop-first-api-unavailable') navigationUnavailable = true; },
   });
 
   return { verifyRuntime, prepareDesktopThread: async (threadId) => {
     const deadline = performance.now() + APP_SERVER_OPERATION_TIMEOUT_MS;
     while (performance.now() < deadline) {
-      const outcome = await coordinator.prepare(threadId, { requireResume: true });
+      const outcome = await coordinator.prepare(threadId, { observeLoadedSince });
       if (outcome === 'ready') return;
       if (outcome === 'unconfirmed' || outcome === 'disabled' || navigationUnavailable) {
         throw new Error('Desktop could not be confirmed as the completion task loader. No completion was sent.');

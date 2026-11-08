@@ -9,6 +9,7 @@ import { deliverRuntimeCompletion } from './runtime-update-drain.mjs';
 const threadId = '01a1b987-0000-7000-8000-000000000001';
 const otherThreadId = '01a1b987-0000-7000-8000-000000000002';
 const contextId = '01a1b987-0000-7000-8000-000000000003';
+const replacementContextId = '01a1b987-0000-7000-8000-000000000004';
 const endpoint = 'ws://127.0.0.1:8798';
 
 function fixture(t) {
@@ -30,28 +31,33 @@ function fixture(t) {
     fs.appendFileSync(log, `${new Date().toISOString()} info [AppServerConnection] response_routed `
       + `conversationId=${id} method=thread/resume errorCode=${errorCode} hadPending=true hostId=local durationMs=0\n`);
   }
-  const live = { status: 'notLoaded', activeTurn: null, available: true, headlessRace: false,
-    calls: [], deliveries: [], nav: [] };
+  const live = { status: 'notLoaded', activeTurn: null, catalogMisses: 0, releaseUnconfirmed: false,
+    loadedRace: false, contexts: [], releases: [], calls: [], deliveries: [], nav: [] };
   const { promise: afterTwoReads, resolve: readTwice } = Promise.withResolvers();
+  const { promise: loadedWithoutProof, resolve: readLoadedWithoutProof } = Promise.withResolvers();
   let afterNav = 0;
   const client = { async call(method, params) {
     live.calls.push(method);
     if (method === 'thread/read') {
       assert.equal(params.threadId, threadId);
-      if (live.headlessRace && live.calls.length === 2) live.status = 'idle';
+      if (live.loadedRace && live.calls.length === 2) live.status = 'idle';
+      if (live.loadedRace && live.calls.length === 3) readLoadedWithoutProof();
       if (live.nav.length && ++afterNav === 2) readTwice();
       return { thread: { id: threadId, source: 'vscode', path: '/sessions/task.jsonl', ephemeral: false,
         status: { type: live.status } } };
     }
     if (method === 'thread/start') {
       assert.deepEqual(params, { ephemeral: true });
-      return { thread: { id: contextId, ephemeral: true, path: null } };
+      const id = live.contexts.length ? replacementContextId : contextId;
+      live.contexts.push(id);
+      return { thread: { id, ephemeral: true, path: null } };
     }
-    if (method === 'mcpServerStatus/list') return { data: live.available
-      ? [{ name: 'codex_app', tools: { navigate_to_codex_page: {} } }] : [] };
+    if (method === 'mcpServerStatus/list') return { data: live.catalogMisses-- > 0
+      ? [] : [{ name: 'codex_app', tools: { navigate_to_codex_page: {} } }] };
     if (method === 'thread/unsubscribe') {
       assert.equal(params.threadId, contextId);
-      return { status: 'unsubscribed' };
+      live.releases.push(params.threadId);
+      return { status: live.releaseUnconfirmed ? 'unconfirmed' : 'unsubscribed' };
     }
     if (method === 'mcpServer/tool/call') {
       live.nav.push(params);
@@ -73,7 +79,7 @@ function fixture(t) {
     requestId: 'b420a9c1-b3db-43b3-9026-c44763c967a1',
   });
   const deliver = () => deliverRuntimeCompletion(client, threadId, 'update settled', route());
-  return { live, state, writeState, resume, afterTwoReads, deliver };
+  return { live, state, writeState, resume, afterTwoReads, loadedWithoutProof, deliver };
 }
 
 test('an unloaded completion waits for the exact Desktop resume and never retries uncertain navigation', { timeout: 10000 }, async t => {
@@ -92,23 +98,42 @@ test('an unloaded completion waits for the exact Desktop resume and never retrie
       input: [{ type: 'text', text: 'update settled', text_elements: [] }] } }]);
 });
 
-test('an unavailable Desktop route never falls back to a headless resume or notification', async t => {
+test('a catalog still starting releases its context and later navigates and delivers once', { timeout: 15000 }, async t => {
   const f = fixture(t);
-  f.state.desktopBrowserAccessCompatibility = false;
-  f.writeState();
-  f.live.available = false;
+  f.live.catalogMisses = 1;
+  const result = f.deliver();
+  await Promise.race([f.afterTwoReads, result.then(() => assert.fail('Notification arrived before Desktop proof.'))]);
+  assert.deepEqual(f.live.releases, [contextId]);
+  assert.deepEqual(f.live.contexts, [contextId, replacementContextId]);
+  assert.deepEqual(f.live.deliveries, []);
+  f.resume(threadId);
+  assert.equal((await result).turnId, 'accepted-start');
+  assert.equal(f.live.nav.length, 1);
+  assert.equal(f.live.nav[0].threadId, replacementContextId);
+  assert.equal(f.live.deliveries.length, 1);
+});
+
+test('an uncertain catalog context release never starts another context or a headless notification', async t => {
+  const f = fixture(t);
+  f.live.catalogMisses = 1;
+  f.live.releaseUnconfirmed = true;
   await assert.rejects(f.deliver(), /No completion was sent/);
+  assert.deepEqual(f.live.contexts, [contextId]);
   assert.deepEqual(f.live.nav, []);
   assert.deepEqual(f.live.deliveries, []);
   assert.equal(f.live.calls.includes('thread/resume'), false);
 });
 
-test('a task that becomes loaded without a Desktop receipt does not get a pending notification', async t => {
+test('a task loaded concurrently must provide fresh Desktop evidence before delivery', { timeout: 10000 }, async t => {
   const f = fixture(t);
-  f.live.headlessRace = true;
-  await assert.rejects(f.deliver(), /No completion was sent/);
-  assert.deepEqual(f.live.nav, []);
+  f.live.loadedRace = true;
+  const result = f.deliver();
+  await Promise.race([f.loadedWithoutProof, result.then(() => assert.fail('Notification arrived without Desktop proof.'))]);
   assert.deepEqual(f.live.deliveries, []);
+  f.resume(threadId);
+  assert.equal((await result).turnId, 'accepted-start');
+  assert.deepEqual(f.live.nav, []);
+  assert.equal(f.live.deliveries.length, 1);
 });
 
 test('a changed shared runtime prevents a pending notification', { timeout: 10000 }, async t => {

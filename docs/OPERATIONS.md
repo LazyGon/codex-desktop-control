@@ -132,6 +132,10 @@ delivered once to the requesting task. If the task is unloaded, the
 controller uses Desktop navigation and requires
 a successful local resume for that exact task before sending the completion.
 It does not load the task directly if Desktop navigation cannot be verified.
+If the tool catalog is still starting, the controller releases the unused
+MCP context before checking with a fresh one. If Desktop loads the task
+while the controller waits, a fresh Desktop resume can confirm it directly.
+An uncertain navigation or completion delivery is never replayed.
 The refresh receipt is `launcher/state/runtime-refresh-last.json`; Desktop
 load evidence is in the request's `completion-desktop/` directory. If Windows
 defers registration,
