@@ -86,11 +86,11 @@ export class DesktopFirst {
     Object.assign(this, { directory, runtime, readThread, prepareNavigation, log, clock });
   }
 
-  prepare(threadId, { allowOpen = true } = {}) {
-    if (!THREAD_ID.test(threadId)) return Promise.resolve('ready');
+  prepare(threadId, { allowOpen = true, requireResume = false } = {}) {
+    if (!THREAD_ID.test(threadId)) return Promise.resolve(requireResume ? 'unconfirmed' : 'ready');
     const existing = this.#inFlight.get(threadId);
     if (existing) return existing;
-    const work = this.#prepare(threadId, allowOpen).finally(() => this.#inFlight.delete(threadId));
+    const work = this.#prepare(threadId, allowOpen, requireResume).finally(() => this.#inFlight.delete(threadId));
     this.#inFlight.set(threadId, work);
     return work;
   }
@@ -145,13 +145,15 @@ export class DesktopFirst {
     else this.#waiting.delete(record.threadId);
   }
 
-  async #prepare(threadId, allowOpen) {
+  async #prepare(threadId, allowOpen, requireResume) {
     const runtime = this.runtime();
     if (!runtime) return 'disabled';
     const sameRuntime = () => this.runtime()?.generation === runtime.generation;
     const thread = await this.readThread(threadId);
     if (thread?.id !== threadId || !sameRuntime()) return 'waiting';
-    if (thread.ephemeral !== false || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)) return 'ready';
+    if (thread.ephemeral !== false || thread.parentThreadId || !LOCAL_SOURCES.has(thread.source)) {
+      return requireResume ? 'unconfirmed' : 'ready';
+    }
     if (!thread.path || /[\\/]archived_sessions[\\/]/i.test(thread.path)) throw new Error('Desktop cannot open this local task.');
     const record = this.#read(threadId);
     const waiting = record?.generation === runtime.generation && record.phase === 'waiting';
@@ -160,7 +162,11 @@ export class DesktopFirst {
       if (confirmed === 'ready' || record.transport === DESKTOP_MCP || !allowOpen
         || thread.status?.type !== 'notLoaded') return confirmed;
     }
-    if (LOADED.has(thread.status?.type)) return 'ready';
+    if (LOADED.has(thread.status?.type)) {
+      if (!requireResume || (record?.generation === runtime.generation && record.phase === 'confirmed'
+        && runtime.desktopPids.includes(record.resumePid))) return 'ready';
+      return 'unconfirmed';
+    }
     if (thread.status?.type !== 'notLoaded' || !allowOpen) return 'waiting';
     if (this.#dispatch) return 'waiting';
 

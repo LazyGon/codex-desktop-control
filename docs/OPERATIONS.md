@@ -128,8 +128,13 @@ The scheduled controller verifies the signature and package identity, waits
 for the exact turn and for loaded work to go idle, and requests a normal
 Desktop shutdown once. The supervisor drains AppServer, then the controller
 installs only if needed and uses the same replacement worker. Completion is
-delivered once to the requesting task; its receipt is
-`launcher/state/runtime-refresh-last.json`. If Windows defers registration,
+delivered once to the requesting task. If the task is unloaded, the
+controller uses Desktop navigation and requires
+a successful local resume for that exact task before sending the completion.
+It does not load the task directly if Desktop navigation cannot be verified.
+The refresh receipt is `launcher/state/runtime-refresh-last.json`; Desktop
+load evidence is in the request's `completion-desktop/` directory. If Windows
+defers registration,
 inspect the actual registered version before any other install attempt.
 Optional observation limits default to zero (no deadline).
 
@@ -146,24 +151,20 @@ termination attempt, and refuses unrelated or unverified processes. It does not
 force the Desktop root, AppServer, Bridge, or Windows to close.
 
 The shared launcher enables Chrome Computer Use compatibility by default on
-Desktop `26.1029.7803.0`. On this build the explicit loopback WebSocket still
-selects the shared AppServer. Only the launched Desktop receives the flag
+verified Desktop builds `26.1029.7803.0` and `26.1103.4239.0`. The explicit
+loopback WebSocket still selects the shared AppServer. Only the launched Desktop receives the flag
 that lets it add its own signed browser access context to the normal Computer
 Use configuration. The launcher does not read or store that context. The
 runtime state records the setting in `desktopBrowserAccessCompatibility`.
 No user-level environment or scheduler setting is required.
 
-The one-shot `-DesktopBrowserAccessTrial` enables compatibility on an inspected
-package and records the request in its receipt. Store build `26.1103.4239.0`
-supports this explicit trial: the package still gates its per-task Computer
-Use configuration on the flag and resolves the explicit WebSocket separately.
-This build does not enable the flag on normal startup pending a live Chrome check.
-On `26.1029.7803.0`, the flag is already enabled by default. Its integrated
-`cua_repl` selected Chrome and read the heading and body of
-`https://example.com/` in a post-restart test turn. This is separate from
-success through the alternate Chrome plugin or web search. Verify ordinary `@Chrome` from the
-Desktop UI after a package update before enabling it by default. A turn
-started entirely outside Desktop is not covered by this check.
+The optional `-DesktopBrowserAccessTrial` records a same-version trial request.
+It is not needed for normal startup on either verified build. Integrated
+`cua_repl` read `https://example.com/` in Chrome on both builds; on
+`26.1103.4239.0` this was also verified from a separate task after Desktop
+loaded it. Check the real Chrome route on a new build before adding it to
+normal startup. A task first loaded by a headless client may still lack
+Desktop's signed context.
 
 On that verified shared Desktop runtime, the Discord Bridge checks the
 existing task before loading it to send input. An already loaded task needs

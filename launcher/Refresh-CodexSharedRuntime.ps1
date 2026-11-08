@@ -691,6 +691,7 @@ function Complete-RegisteredRefresh {
 function Send-CompletionCallback {
     param([object]$NewState = $null, [string]$FailureMessage = '')
 
+    $callbackState = if ($NewState) { $NewState } else { Get-VerifiedRuntimeState }
     $resultDetails = if ($FailureMessage) { "Refresh failed: $FailureMessage" } else {
         "new server PID: $($NewState.serverProcessId)`nnew server SHA-256: $($NewState.serverSha256)"
     }
@@ -712,7 +713,8 @@ If the exact waiter-owned goal pause receipt exists at $goalPausePath, verify it
 "@
     $output = @(
         & $nodeExecutable $drainScript deliver --thread $WaitForThreadId `
-            --endpoint 'ws://127.0.0.1:8798' `
+            --endpoint $callbackState.websocketUrl --server-pid ([string]$callbackState.serverProcessId) `
+            --request-id $RefreshRequestId `
             --message $message `
             --compact 2>&1
     )

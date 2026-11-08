@@ -202,7 +202,7 @@ test('refresh task ownership rejects foreign actions, principals, triggers and a
 test('completion delivery reads the current turn and sends exactly once without settings overrides', async () => {
   for (const active of [true, false]) {
     const client = new FakeClient((method, params) => {
-      if (method === 'thread/read') return { thread: { id: 'THREAD' } };
+      if (method === 'thread/read') return { thread: { id: 'THREAD', status: { type: active ? 'active' : 'idle' } } };
       if (method === 'thread/turns/list') return { data: [{ id: 'TURN', status: active ? 'inProgress' : 'completed' }] };
       assert.equal(method, active ? 'turn/steer' : 'turn/start');
       assert.deepEqual(Object.keys(params).sort(), active
@@ -220,7 +220,7 @@ test('completion delivery reads the current turn and sends exactly once without 
 test('uncertain completion delivery is never replayed', async () => {
   let writes = 0;
   const client = new FakeClient((method) => {
-    if (method === 'thread/read') return { thread: { id: 'THREAD' } };
+    if (method === 'thread/read') return { thread: { id: 'THREAD', status: { type: 'idle' } } };
     if (method === 'thread/turns/list') return { data: [] };
     writes++;
     return {};
@@ -229,22 +229,13 @@ test('uncertain completion delivery is never replayed', async () => {
   assert.equal(writes, 1);
 });
 
-test('completion resumes an unloaded task with its saved settings before delivering', async () => {
-  let loaded = false;
+test('an unloaded completion task is not resumed without a Desktop route', async () => {
   const client = new FakeClient((method, params) => {
-    if (method === 'thread/read') return { thread: { id: 'THREAD', status: { type: 'notLoaded' } } };
-    if (method === 'thread/resume') {
-      assert.deepEqual(params, { threadId: 'THREAD', excludeTurns: true });
-      loaded = true;
-      return { thread: { id: 'THREAD' } };
-    }
-    assert.ok(loaded, 'new runtime rejects turn operations on an unloaded task');
-    if (method === 'thread/turns/list') return { data: [] };
-    assert.equal(method, 'turn/start');
     assert.equal(params.threadId, 'THREAD');
-    return { turn: { id: 'DELIVERED' } };
+    if (method === 'thread/read') return { thread: { id: 'THREAD', status: { type: 'notLoaded' } } };
+    assert.fail(`Unexpected call without Desktop navigation: ${method}`);
   });
-  assert.equal((await deliverRuntimeCompletion(client, 'THREAD', 'done')).turnId, 'DELIVERED');
+  await assert.rejects(deliverRuntimeCompletion(client, 'THREAD', 'done'), /requires Desktop navigation/);
 });
 
 test('default turn wait has no agent deadline and observes terminal readback', async () => {

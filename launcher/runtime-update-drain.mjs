@@ -3,6 +3,8 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { deliveryFor, listPages } from '../control/shared-task-operations.mjs';
 import { goalIdentity } from '../control/system-error-recovery.mjs';
+import { validateLoopbackEndpoint } from '../control/codex-shared.mjs';
+import { createRuntimeCompletionRoute } from './runtime-completion-desktop.mjs';
 
 function nowIso() {
   return new Date().toISOString();
@@ -174,18 +176,31 @@ function turnCompleted(notification, threadId, turnId) {
   return notificationThreadId === threadId && turn?.id === turnId;
 }
 
-export async function deliverRuntimeCompletion(client, threadId, message) {
-  const metadata = await client.call('thread/read', { threadId, includeTurns: false });
-  if (metadata?.thread?.id !== threadId) throw new Error('Completion task identity mismatch.');
-  if (metadata.thread.status?.type === 'notLoaded') {
-    const resumed = await client.call('thread/resume', { threadId, excludeTurns: true });
-    if (resumed?.thread?.id !== threadId) throw new Error('Resumed completion task identity mismatch.');
+function isLoadedCompletionThread(thread, threadId) {
+  return thread?.id === threadId && ['idle', 'active', 'systemError'].includes(thread.status?.type);
+}
+
+export async function deliverRuntimeCompletion(client, threadId, message, {
+  prepareDesktopThread = null, verifyRuntime = () => {},
+} = {}) {
+  let { thread } = await client.call('thread/read', { threadId, includeTurns: false });
+  if (thread?.id !== threadId) throw new Error('Completion task identity mismatch.');
+  if (thread.status?.type === 'notLoaded') {
+    if (!prepareDesktopThread) throw new Error('An unloaded completion task requires Desktop navigation.');
+    verifyRuntime();
+    await prepareDesktopThread(threadId);
+    ({ thread } = await client.call('thread/read', { threadId, includeTurns: false }));
+  }
+  if (!isLoadedCompletionThread(thread, threadId)) {
+    throw new Error('The completion task is not loaded. No completion was sent.');
   }
   const turns = await client.call('thread/turns/list', {
     threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded',
   });
-  const active = turns.data?.find(turn => turn.status === 'inProgress') ?? null;
+  if (!Array.isArray(turns?.data)) throw new Error('The latest completion task turn could not be verified.');
+  const active = turns.data.find(turn => turn.status === 'inProgress') ?? null;
   const [method, params] = deliveryFor(threadId, active, message);
+  verifyRuntime();
   const result = await client.call(method, params);
   const turnId = result?.turn?.id ?? result?.turnId;
   if (!turnId || (method === 'turn/steer' && turnId !== active.id)
@@ -234,13 +249,17 @@ export async function waitForTurnCompletion(client, threadId, turnId, timeoutMil
 async function main() {
   const { positionals, options } = parseArguments(process.argv.slice(2));
   const command = positionals[0];
-  const endpoint = requiredString(options.endpoint, '--endpoint');
+  const endpoint = validateLoopbackEndpoint(requiredString(options.endpoint, '--endpoint'));
   const client = new AppServerClient(endpoint);
   await client.connect();
   try {
     if (command === 'deliver') {
+      const route = createRuntimeCompletionRoute(client, {
+        endpoint, expectedServerPid: positiveInteger(options['server-pid'], null, '--server-pid'),
+        requestId: requiredString(options['request-id'], '--request-id'),
+      });
       const result = await deliverRuntimeCompletion(client,
-        requiredString(options.thread, '--thread'), requiredString(options.message, '--message'));
+        requiredString(options.thread, '--thread'), requiredString(options.message, '--message'), route);
       process.stdout.write(`${JSON.stringify(result)}\n`);
       return;
     }
