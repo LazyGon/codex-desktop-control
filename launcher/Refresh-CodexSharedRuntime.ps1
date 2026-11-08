@@ -62,7 +62,8 @@ $refreshScriptPath = $PSCommandPath
 $scheduledTaskDescription = 'One-shot controller for a safe shared Codex runtime refresh.'
 $launchMutexName = 'Local\CodexSharedRuntimeRefreshLaunch'
 $controllerMutexName = 'Local\CodexSharedRuntimeRefreshController'
-$nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source
+. (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
+$nodeExecutable = Get-CodexNodeExecutable -StateRoot (Split-Path -Parent $runtimeStatePath)
 $bridgeWasRunning = $false
 
 if (-not (Test-Path -LiteralPath $runtimeCacheScript -PathType Leaf)) {
