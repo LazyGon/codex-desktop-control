@@ -60,7 +60,7 @@ test('the scheduled handoff starts only after a clean exit and does not repeat a
     'codex-windows-sandbox-service.exe', 'codex-windows-sandbox-setup.exe']) {
     fs.writeFileSync(path.join(res, name), bytes);
   }
-  const version = '26.1029.7803.0';
+  const version = '26.1103.4239.0';
   const family = 'OpenAI.Codex_2p2nqsd0c76g0';
   const id = '0939b948-4e54-4945-b3ea-5724882e826e';
   const job = path.join(dir, 'state', 'runtime-handoffs', id);

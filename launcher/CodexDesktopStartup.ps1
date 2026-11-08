@@ -5,8 +5,10 @@ function Test-CodexDesktopBrowserAccessCompatibilityVersion {
 
 function Assert-CodexDesktopBrowserAccessTrialVersion {
     param([string]$PackageVersion)
-    if (-not (Test-CodexDesktopBrowserAccessCompatibilityVersion $PackageVersion)) {
-        throw 'The Desktop browser access trial is limited to the inspected Desktop package 26.1029.7803.0.'
+    # The Store build retains the Desktop-side CUA setup and explicit WebSocket
+    # routing. Require a live Chrome check before enabling it by default.
+    if ($PackageVersion -ne '26.1103.4239.0' -and -not (Test-CodexDesktopBrowserAccessCompatibilityVersion $PackageVersion)) {
+        throw 'The Desktop browser access trial is limited to the inspected Desktop packages.'
     }
 }
 
@@ -28,8 +30,7 @@ function New-CodexDesktopStartInfo {
     $info.EnvironmentVariables['CODEX_APP_SERVER_WS_URL']=$WebSocketUrl
     $info.EnvironmentVariables.Remove('CODEX_APP_SERVER_FORCE_CLI')
     $info.EnvironmentVariables.Remove('CODEX_APP_SERVER_USE_LOCAL_DAEMON')
-    if (Test-CodexDesktopBrowserAccessCompatibilityVersion $PackageVersion) {
-        # Verified against the integrated Chrome Computer Use route on this build.
+    if ($DesktopBrowserAccessTrial -or (Test-CodexDesktopBrowserAccessCompatibilityVersion $PackageVersion)) {
         # The explicit WebSocket still selects the transport.
         # Desktop itself can attach its signed access context to cua_repl in
         # Desktop-originated threads; the launcher never reads that context.

@@ -13,10 +13,14 @@ test('Desktop receives an explicit endpoint without Explorer or permanent settin
  assert.equal(value.shell,false);assert.equal(value.endpoint,'ws://127.0.0.1:8798');assert.equal(value.force,false);assert.equal(value.daemon,false);assert.equal(value.parentEndpoint,'ws://127.0.0.1:1');
 });
 test('normal startup enables Chrome compatibility only on the verified Desktop build',()=>{
- const value=JSON.parse(run("$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON='parent'; $builds=@('26.1027.3384.0','26.1029.7803.0','26.1030.1.0'); $starts=@(foreach($version in $builds){$i=New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion $version; @{endpoint=$i.EnvironmentVariables['CODEX_APP_SERVER_WS_URL'];compatibility=$i.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON']}}); @{starts=$starts;parent=$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON}|ConvertTo-Json -Depth 4"));
+ const value=JSON.parse(run("$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON='parent'; $builds=@('26.1027.3384.0','26.1029.7803.0','26.1103.4239.0'); $starts=@(foreach($version in $builds){$i=New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion $version; @{endpoint=$i.EnvironmentVariables['CODEX_APP_SERVER_WS_URL'];compatibility=$i.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON']}}); @{starts=$starts;parent=$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON}|ConvertTo-Json -Depth 4"));
  assert.deepEqual(value,{starts:[null,'1',null].map(compatibility=>({endpoint:'ws://127.0.0.1:8798',compatibility})),parent:'parent'});
 });
-test('an explicitly requested browser access trial still rejects an unverified build',()=>{
+test('the inspected Store build can trial Chrome access while keeping the shared endpoint',()=>{
+ const value=JSON.parse(run("$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON='parent'; $i=New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion '26.1103.4239.0' -DesktopBrowserAccessTrial; @{endpoint=$i.EnvironmentVariables['CODEX_APP_SERVER_WS_URL'];compatibility=$i.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'];parent=$env:CODEX_APP_SERVER_USE_LOCAL_DAEMON}|ConvertTo-Json"));
+ assert.deepEqual(value,{endpoint:'ws://127.0.0.1:8798',compatibility:'1',parent:'parent'});
+});
+test('an explicitly requested browser access trial rejects an uninspected build',()=>{
  assert.equal(run("try{New-CodexDesktopStartInfo -DesktopExecutable 'C:\\fixture\\ChatGPT.exe' -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion '26.1030.1.0' -DesktopBrowserAccessTrial;'unexpected'}catch{'rejected'}"),'rejected');
 });
 test('a healthy cold startup is not failed just because thirty seconds elapsed',()=>{

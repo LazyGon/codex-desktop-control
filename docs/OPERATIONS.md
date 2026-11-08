@@ -153,13 +153,16 @@ Use configuration. The launcher does not read or store that context. The
 runtime state records the setting in `desktopBrowserAccessCompatibility`.
 No user-level environment or scheduler setting is required.
 
-The one-shot `-DesktopBrowserAccessTrial` records an explicit trial request
-in its receipt; it is no longer needed to enable compatibility. The integrated
+The one-shot `-DesktopBrowserAccessTrial` enables compatibility on an inspected
+package and records the request in its receipt. Store build `26.1103.4239.0`
+supports this explicit trial: the package still gates its per-task Computer
+Use configuration on the flag and resolves the explicit WebSocket separately.
+This build does not enable the flag on normal startup pending a live Chrome check.
+On `26.1029.7803.0`, the flag is already enabled by default. Its integrated
 `cua_repl` selected Chrome and read the heading and body of
 `https://example.com/` in a post-restart test turn. This is separate from
-success through the alternate Chrome plugin or web search. The compatibility
-flag is limited to this exact build; verify ordinary `@Chrome` from the
-Desktop UI after a package update before changing the version gate. A turn
+success through the alternate Chrome plugin or web search. Verify ordinary `@Chrome` from the
+Desktop UI after a package update before enabling it by default. A turn
 started entirely outside Desktop is not covered by this check.
 
 On that verified shared Desktop runtime, the Discord Bridge checks the
