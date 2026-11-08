@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { mirroredDescendants } from './subagent-discovery.mjs';
-import { AsyncUserInputController } from './async-user-input.mjs';
+import { AsyncUserInputController, asyncQuestionsBlockTaskReload } from './async-user-input.mjs';
 import { recoverDiscordMessages } from './discord-message-recovery.mjs';
 import {
   liveActivityItemText,
@@ -755,7 +755,7 @@ export class DiscordController {
         || this.deliveryOutbox.listWork({ states: ['queued', 'attempting', 'uncertain'] })
           .some((entry) => entry.threadId === threadId),
       canArchive: (threadId) => !this.stopping && !this.taskSyncPromise
-        && !(this.stateStore.asyncQuestions?.(threadId) ?? []).some((question) => question.phase !== 'answered'),
+        && !asyncQuestionsBlockTaskReload(this.stateStore.asyncQuestions?.(threadId) ?? []),
       log: (event, details) => this.#log(event, details),
     });
     this.browserInitializationPromise = null;

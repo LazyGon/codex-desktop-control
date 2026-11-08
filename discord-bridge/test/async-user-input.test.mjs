@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { AsyncUserInputController, asyncQuestionPayload, questionReplies, questionReplyId, questionReplyText } from '../src/async-user-input.mjs';
+import { AsyncUserInputController, asyncQuestionPayload, asyncQuestionsBlockTaskReload, questionReplies, questionReplyId, questionReplyText } from '../src/async-user-input.mjs';
 import { StateStore } from '../src/state-store.mjs';
 import { DiscordController } from '../src/discord-controller.mjs';
 import { interactionOwned } from '../src/task-routing.mjs';
@@ -128,6 +128,25 @@ test('free input has an explicit modal and can start the same idle task after th
   assert.equal(f.stateStore.asyncQuestion(record.key).acceptedTurnId, 'new-turn');
 });
 
+test('an unanswered card remains answerable after reloading its task', async context => {
+  const f = fixture(context);
+  await f.manager.ensure(f.binding, 'origin-turn', questionItem());
+  const [open] = f.stateStore.asyncQuestions(f.binding.threadId);
+  assert.equal(asyncQuestionsBlockTaskReload([open]), false);
+  const stateStore = new StateStore(f.directory, 'guild');
+  const manager = new AsyncUserInputController({ ...f, stateStore, instanceId: f.config.instanceId });
+  f.codex.prepareDelivery = async () => {
+    assert.equal(asyncQuestionsBlockTaskReload(stateStore.asyncQuestions(f.binding.threadId)), true);
+    return { mode: 'send', expectedTurnId: null };
+  };
+  await manager.handleInteraction(interaction(open));
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.calls[0].threadId, f.binding.threadId);
+  assert.deepEqual(questionReplies({ type: 'userMessage', text: f.calls[0].text }), [
+    { questionItemId: '["request_user_input_async","call_question_fixture",0]', question: '実行先は？', answer: '別のPC' },
+  ]);
+});
+
 test('concurrent answers are admitted once and unknown delivery is never replayed after restart', async context => {
   const f = fixture(context);
   await f.manager.ensure(f.binding, 'origin-turn', questionItem());
@@ -137,6 +156,7 @@ test('concurrent answers are admitted once and unknown delivery is never replaye
   assert.equal(results.every(result => result.status === 'rejected'), true);
   assert.equal(f.calls.length, 1);
   assert.equal(f.stateStore.asyncQuestion(record.key).phase, 'deliveryUnknown');
+  assert.equal(asyncQuestionsBlockTaskReload(f.stateStore.asyncQuestions(f.binding.threadId)), true);
   const reloaded = new StateStore(f.directory, 'guild');
   const restarted = new AsyncUserInputController({ ...f, stateStore: reloaded, instanceId: f.config.instanceId });
   await restarted.ensure(f.binding, 'origin-turn', questionItem());

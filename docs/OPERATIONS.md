@@ -191,7 +191,10 @@ can archive it temporarily, verify `notLoaded`, restore the same task and
 history, and hand it to the same Desktop loading path. Before archiving, it
 checks for goals, pending input or approval, background terminals, and
 descendant or attached tasks, including archived ones. Any of these blocks
-automatic archiving. Discord synchronization waits through the round trip.
+automatic archiving. An unanswered asynchronous question stays attached to
+the same task and remains answerable; an active or unconfirmed question
+post or answer blocks archiving. Discord synchronization waits through the
+round trip.
 
 Receipts are in `discord-bridge/data/desktop-first/` and
 `discord-bridge/data/browser-initialization/`. Archive, restore, and Desktop

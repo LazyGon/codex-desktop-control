@@ -31,6 +31,12 @@ export function questionReplies(item) {
   return replies;
 }
 
+export function asyncQuestionsBlockTaskReload(records) {
+  // An open card is durable, bound to the thread rather than its loaded session.
+  // An in-flight or unconfirmed Discord post/answer still needs its fence.
+  return records.some(record => record.phase !== 'open' && record.phase !== 'answered');
+}
+
 export function asyncQuestionPayload(record) {
   const open = record.phase === 'open' || record.phase === 'prepared' || record.phase === 'posting';
   const pages = Math.max(1, Math.ceil(record.options.length / OPTIONS_PER_PAGE));
