@@ -29,7 +29,8 @@
         ) {
             throw 'The recorded runtime does not match the installed Codex package and this launcher cache.'
         }
-        if ($state.desktopConnectionVerified -ne $true) {
+        $serverOnly = $state.PSObject.Properties['mode'] -and $state.mode -eq 'server'
+        if ($state.desktopConnectionVerified -ne $true -and -not $serverOnly) {
             throw 'The recorded shared runtime has not completed Desktop connection verification.'
         }
 
@@ -216,6 +217,7 @@ function Start-DesktopOnRuntime {
     }
 
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
+    Set-RuntimeStateValue -State $RuntimeState -Name 'mode' -Value 'desktop'
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value ([bool]$DesktopBrowserAccessTrial)
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' `
         -Value ($desktopStartInfo.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_USE_LOCAL_DAEMON') -and

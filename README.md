@@ -124,11 +124,32 @@ This changes only the launcher and icon references; it does not change endpoint
 configuration, logon tasks, or pin new shortcuts.
 
 If this checkout's healthy app-server is already listening, the launcher
-validates its state, completed Desktop connection verification, listener PID,
-executable, supervisor, package version, and `/readyz` response. It then skips
-app-server startup and opens only Codex Desktop on that existing connection. A
+validates its state, listener PID, executable, supervisor, package version, and
+`/readyz` response. Opening the launcher shows its current state without starting
+another worker. Choose the Desktop retry to attach Desktop to that connection. A
 server owned by another checkout, an incomplete startup, or an inconsistent
 state file is never adopted.
+
+Reopening a running launcher brings its existing window forward, including a
+hidden or minimized window. Each Windows user/session and checkout has one
+progress window.
+
+**サーバーのみ起動** starts the canonical shared AppServer without Desktop. The
+equivalent command is `launcher/Start-CodexShared.ps1 -ServerOnly`. Desktop can
+attach later. Closing Desktop leaves the shared AppServer and Bridge available;
+an explicit runtime refresh or registered package replacement still uses the
+normal shutdown/update handoff.
+
+The three **強制終了** buttons target only the selected AppServer, Desktop, or
+Bridge. They can stop in-flight work. Their local one-shot receipts record the
+selected process identities and actual outcome; a PID reuse, another user or
+session, unrelated executable, or unknown prior result cannot grant another
+termination. Bridge receives its graceful stop request before an explicitly
+requested forced termination. No task-activity gate substitutes for the user's
+decision.
+
+Use `launcher/Install-CodexSharedLauncher.ps1 -UpdateBinaryOnly` to rebuild the
+installed launcher without changing shortcuts, pinned items, or a running runtime.
 
 If the same checkout is already starting that runtime, a concurrent launcher
 waits up to two minutes for the existing owner to complete the same exact
@@ -347,8 +368,8 @@ re-authorization using the URL printed by the installer. Discord grants
 ```
 
 Add `-RemoveConfiguration` to remove the protected bot token and local Discord
-configuration. A running Desktop/shared app-server session is left intact until
-Desktop exits normally.
+configuration. Running Desktop and shared AppServer processes are left intact;
+stop them explicitly when they are no longer needed.
 
 ## Repository boundary
 

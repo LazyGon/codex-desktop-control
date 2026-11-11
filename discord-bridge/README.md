@@ -428,14 +428,21 @@ Desktop and the Bridge, and verifies that both use the same app-server. The
 standalone `Install-DiscordBridge.ps1` remains available for Bridge-only repair
 after the shared launcher has already been installed.
 
-The Bridge waits for the shared launcher's verified Desktop connection before
-connecting to the AppServer and restoring task subscriptions. The AppServer
-listener alone does not make Desktop ready. Any explicitly configured
-`appServerUrl` must match that launcher record. After reconnecting, the Bridge
-can recover a missed completion from stored history without loading the task.
-An active turn still gets a live subscription. Desktop's browser authorization
-is applied per task; waiting for Desktop startup does not add it to a task
-already loaded by another client.
+The Bridge connects to the shared launcher's verified local AppServer generation.
+When Desktop is running, its verified connection and per-task loading retain
+ownership. When all recorded Desktop PIDs are confirmed absent, including an
+explicit launcher `mode: "server"` with an empty `desktopProcessIds` list and
+`desktopConnectionVerified: false`, the Bridge can list/read tasks and execute
+AppServer-backed operations directly, including task creation and start/steer.
+The launcher record must identify a live server PID, its start time and the same
+loopback WebSocket endpoint. Initialization rechecks that generation; every
+operation rechecks ownership. Missing/malformed state, unknown process status,
+an endpoint/generation mismatch or a live unverified Desktop blocks fallback.
+Desktop-only screens, browser authorization and Chrome Use initialization still
+require Desktop. Pending navigation and uncertain delivery receipts are preserved;
+Desktop returning restores its loading path without replaying an unknown action.
+After reconnecting, the Bridge can recover a missed completion from stored history
+without loading the task. An active turn still gets a live subscription.
 
 The host appears as **Codex Discord Remote** in the notification area and as
 `CodexDiscordRemoteHost.exe` in Task Manager, instead of leaving the Bridge

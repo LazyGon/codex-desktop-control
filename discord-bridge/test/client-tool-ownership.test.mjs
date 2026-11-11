@@ -77,3 +77,38 @@ test('Desktop owner inspection distinguishes present, absent, and ambiguous stat
 test('client tool request key includes app-server generation and request identity', () => {
   assert.equal(clientToolRequestKey('server-generation', 42), 'server-generation|request:42');
 });
+
+test('headless ownership requires a known local server generation and confirmed Desktop absence', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-headless-owner-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const launcherStatePath = path.join(directory, 'current.json');
+  const state = {
+    websocketUrl: 'ws://127.0.0.1:8798', serverProcessId: 100,
+    startedAt: '2026-11-11T00:00:00Z', mode: 'server',
+    desktopProcessIds: [], desktopConnectionVerified: false,
+  };
+  const inspect = (patch = {}, probe = (pid) => pid === 100) => {
+    fs.writeFileSync(launcherStatePath, JSON.stringify({ ...state, ...patch }));
+    return inspectDesktopClientOwner({ launcherStatePath, appServerUrl: state.websocketUrl, isProcessAlive: probe });
+  };
+  assert.equal(inspect().state, 'absent');
+  assert.equal(inspect({ mode: 'desktop', desktopProcessIds: [200] }).state, 'absent');
+  for (const patch of [
+    { desktopProcessIds: undefined }, { desktopProcessIds: [0] }, { desktopProcessIds: ['200'] },
+    { serverProcessId: 0 }, { startedAt: undefined }, { startedAt: 'unknown' },
+    { mode: undefined }, { mode: 'other-runtime' },
+    { websocketUrl: 'ws://127.0.0.1:9999' },
+  ]) assert.equal(inspect(patch).state, 'ambiguous');
+  for (const result of [null, undefined, 'unknown']) {
+    assert.equal(inspect({ desktopProcessIds: [200] }, (pid) => pid === 100 ? true : result).state, 'ambiguous');
+    assert.equal(inspect({}, () => result).state, 'ambiguous');
+  }
+  assert.equal(inspect({ desktopProcessIds: [200] }, () => { throw new Error('process inspection denied'); }).state, 'ambiguous');
+  assert.equal(inspect({ desktopProcessIds: [200] }, () => true).state, 'ambiguous');
+  for (const endpoint of ['ws://remote.example:8798', 'http://127.0.0.1:8798', 'ws://user@127.0.0.1:8798']) {
+    fs.writeFileSync(launcherStatePath, JSON.stringify({ ...state, websocketUrl: endpoint }));
+    assert.equal(inspectDesktopClientOwner({ launcherStatePath, appServerUrl: endpoint, isProcessAlive: () => true }).state, 'ambiguous');
+  }
+  fs.writeFileSync(launcherStatePath, '{');
+  assert.equal(inspectDesktopClientOwner({ launcherStatePath, appServerUrl: state.websocketUrl }).state, 'ambiguous');
+});

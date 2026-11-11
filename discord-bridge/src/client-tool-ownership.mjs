@@ -14,6 +14,8 @@ export function requiresExclusiveClientToolOwner(namespace, tool) {
 function normalizedEndpoint(value) {
   try {
     const url = new URL(value);
+    if (!['ws:', 'wss:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+      || url.username || url.password || url.search || url.hash) return null;
     const host = url.hostname.toLocaleLowerCase('en-US') === 'localhost'
       ? '127.0.0.1'
       : url.hostname.toLocaleLowerCase('en-US');
@@ -29,8 +31,14 @@ export function processIsAlive(processId) {
     process.kill(processId, 0);
     return true;
   } catch (error) {
-    return error?.code === 'EPERM';
+    if (error?.code === 'ESRCH') return false;
+    return error?.code === 'EPERM' ? true : null;
   }
+}
+
+export function sharedServerAvailable(owner, generation = owner?.generation) {
+  return Boolean(generation && owner?.generation === generation
+    && (owner.state === 'present' || owner.state === 'absent'));
 }
 
 export function inspectDesktopClientOwner({
@@ -38,27 +46,39 @@ export function inspectDesktopClientOwner({
   appServerUrl,
   isProcessAlive = processIsAlive,
 }) {
-  const state = readJsonIfPresent(launcherStatePath);
+  let state;
+  try { state = readJsonIfPresent(launcherStatePath); }
+  catch { return { state: 'ambiguous', generation: null, reason: 'launcher-state-unavailable' }; }
   if (!state) return { state: 'ambiguous', generation: null, reason: 'launcher-state-unavailable' };
+  if (!['desktop', 'server'].includes(state.mode)) {
+    return { state: 'ambiguous', generation: null, reason: 'launcher-mode-unverified' };
+  }
 
   const stateEndpoint = normalizedEndpoint(state.websocketUrl);
   const activeEndpoint = normalizedEndpoint(appServerUrl);
   if (!stateEndpoint || !activeEndpoint || stateEndpoint !== activeEndpoint) {
     return { state: 'ambiguous', generation: null, reason: 'app-server-endpoint-mismatch' };
   }
-  if (!Number.isSafeInteger(state.serverProcessId) || !isProcessAlive(state.serverProcessId)) {
+  const alive = (pid) => {
+    try { return isProcessAlive(pid); } catch { return null; }
+  };
+  if (!Number.isSafeInteger(state.serverProcessId) || state.serverProcessId <= 0
+    || alive(state.serverProcessId) !== true || typeof state.startedAt !== 'string'
+    || !Number.isFinite(Date.parse(state.startedAt))) {
     return { state: 'ambiguous', generation: null, reason: 'app-server-generation-unverified' };
   }
 
-  const generation = [stateEndpoint, state.serverProcessId, state.startedAt ?? 'unknown-start'].join('|');
-  if (!Array.isArray(state.desktopProcessIds)) {
+  const generation = [stateEndpoint, state.serverProcessId, state.startedAt].join('|');
+  if (!Array.isArray(state.desktopProcessIds)
+    || state.desktopProcessIds.some((pid) => !Number.isSafeInteger(pid) || pid <= 0)) {
     return { state: 'ambiguous', generation, reason: 'desktop-process-list-unavailable' };
   }
-  const desktopAlive = state.desktopProcessIds.some((processId) => isProcessAlive(processId));
+  const desktopProcesses = state.desktopProcessIds.map(alive);
+  const desktopAlive = desktopProcesses.includes(true);
   if (desktopAlive && state.mode === 'desktop' && state.desktopConnectionVerified === true) {
     return { state: 'present', generation, reason: 'verified-desktop-process-alive' };
   }
-  if (!desktopAlive) {
+  if (desktopProcesses.every((result) => result === false)) {
     return { state: 'absent', generation, reason: 'no-desktop-process-alive' };
   }
   return { state: 'ambiguous', generation, reason: 'desktop-connection-unverified' };

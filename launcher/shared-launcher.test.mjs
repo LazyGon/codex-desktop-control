@@ -30,7 +30,7 @@ function compile(compiler, output, sources, main = null, target = 'exe') {
     '/reference:System.Windows.Forms.dll',
   ];
   if (main) arguments_.push(`/main:${main}`);
-  arguments_.push(...sources);
+  arguments_.push(...new Set([...sources, path.join(launcherRoot, 'CodexLauncherWindow.cs')]));
   execFileSync(compiler, arguments_, { stdio: 'pipe' });
 }
 
@@ -299,7 +299,7 @@ function compileUiHarness(directory) {
     '  var form = new SharedLaunchProgressForm(args[2], info);',
     '  var timer = new Timer { Interval=100 };',
     '  var watch = Stopwatch.StartNew();',
-    '  bool retried=false, requestedClose=false;',
+    '  bool retried=false, requestedClose=false, stopped=false;',
     '  string initialElapsed=null;',
     '  string initialDesktopStatus=null;',
     '  var grid = form.Controls.OfType<DataGridView>().Single();',
@@ -309,18 +309,21 @@ function compileUiHarness(directory) {
     '  timer.Tick += delegate {',
     '   if (args[3]=="cancel" && watch.ElapsedMilliseconds>1000 && !requestedClose) { requestedClose=true; form.Close(); return; }',
     '   var status=Convert.ToString(grid.Rows[1].Cells[1].Value);',
+    '   if(args[3]=="stop" && grid.Enabled && status=="running (skipped)" && !stopped) { stopped=true; form.Controls.OfType<Button>().Single(b=>b.Text=="Desktop 強制終了").PerformClick(); }',
+    '   if(args[3]=="stop" && System.IO.File.Exists(System.IO.Path.Combine(args[2],"stop-received.json")) && grid.Enabled) { requestedClose=true; form.Close(); return; }',
     '   if (args[3]=="hold-close" && grid.Enabled && status=="running (skipped)" && watch.ElapsedMilliseconds>1500 && !requestedClose) { requestedClose=true; form.Close(); return; }',
+    '   if (args[3]=="skip" && grid.Enabled && status=="running (skipped)" && watch.ElapsedMilliseconds>3500 && !requestedClose) { requestedClose=true; form.Close(); return; }',
     '   if ((status=="失敗" || status=="running (skipped)") && watch.ElapsedMilliseconds>1500 && initialElapsed==null) { initialElapsed=Convert.ToString(grid.Rows[3].Cells[1].Value); }',
     '   if (args[3]=="retry" && grid.Enabled && status=="失敗" && watch.ElapsedMilliseconds>1500 && !retried) {',
     '    initialDesktopStatus=Convert.ToString(grid.Rows[1].Cells[1].Value);',
     '    grid.Rows[1].Cells[2].AccessibilityObject.DoDefaultAction();',
     '    retried=true;',
     '   }',
-    '   if (watch.ElapsedMilliseconds>(args[3]=="fail" ? 3500 : 18000)) {',
+    '   if ((args[3]=="monitor" && watch.ElapsedMilliseconds>1500) || (watch.ElapsedMilliseconds>(args[3]=="fail" ? 3500 : 18000) && (args[3]!="fail" || grid.Enabled))) {',
     '    requestedClose=true; timer.Stop(); form.Close();',
     '   }',
     '  };',
-    '  form.Shown += delegate { form.Hide(); timer.Start(); };',
+    '  form.Shown += delegate { if(args[3]!="stop") form.Hide(); timer.Start(); };',
     '  Application.Run(form); timer.Dispose(); form.Dispose(); return 0;',
     ' }',
     '}',
@@ -342,7 +345,7 @@ test('progress window records a failed step, displays its error, and retries onl
   assert.equal(result.rows[1], 'running (skipped)');
   assert.match(result.details, /fixture connection failure/);
   assert.equal(result.enabled, true);
-  assert.equal(result.autoClosed, true);
+  assert.equal(result.autoClosed, false);
   assert.deepEqual(fs.readFileSync(path.join(launcher, 'requests.txt'), 'utf8').trim().split(/\r?\n/), ['All', 'Desktop']);
 });
 
@@ -357,7 +360,7 @@ test('an already-open unverified Desktop is shown as skipped rather than startup
   assert.equal(result.rows[1], 'running (skipped)');
   assert.match(result.rows[2], /スキップ/);
   assert.equal(result.enabled, true);
-  assert.equal(result.autoClosed, true);
+  assert.equal(result.autoClosed, false);
   assert.equal(result.initialElapsed, result.finalElapsed);
   assert.equal(fs.readdirSync(path.join(launcher, 'state')).some(name => name.endsWith('.cancel')), false);
 });
@@ -376,7 +379,7 @@ test('a failure freezes elapsed time before worker cleanup finishes and leaves r
   assert.match(result.details, /fixture connection failure/);
 });
 
-test('completion freezes displayed elapsed time and exits after the worker without cancellation', context => {
+test('an unverified running Desktop leaves recovery controls available after the worker exits', context => {
   if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-progress-complete-clock-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -385,7 +388,7 @@ test('completion freezes displayed elapsed time and exits after the worker witho
   const result = JSON.parse(execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'skip'], { encoding: 'utf8', timeout: 25000 }));
   assert.equal(result.result, 0);
   assert.equal(result.initialElapsed, result.finalElapsed);
-  assert.equal(result.autoClosed, true);
+  assert.equal(result.autoClosed, false);
   assert.ok(result.closedAfter >= 2000, 'Do not close before the finite worker exits.');
   assert.equal(fs.readdirSync(path.join(launcher, 'state')).some(name => name.endsWith('.cancel')), false);
 });
@@ -428,12 +431,85 @@ test('dependency failure publishes the actual error before a runtime can start',
   assert.match(receipt.detail, /Codex runtime cache helper was not found/);
 });
 
-test('a second launcher focuses the existing window and starts no additional worker', async context => {
+test('the explicit Desktop force button dispatches exactly its selected component once', context => {
+  if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-launcher-component-button-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const launcher = startupFixture(directory, 'skip');
+  fs.writeFileSync(path.join(launcher, 'Stop-CodexComponent.ps1'), `
+param([string]$Component,[guid]$OperationId,[string]$ResultPath,[switch]$Force)
+$receipt=@{phase='completed';component=$Component;operationId=$OperationId.ToString();force=[bool]$Force}
+[IO.File]::WriteAllText($ResultPath,($receipt|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'stop-received.json'),($receipt|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+`);
+  const harness = compileUiHarness(directory);
+  execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'stop'], { encoding: 'utf8', timeout: 25000 });
+  const receipt = JSON.parse(fs.readFileSync(path.join(launcher, 'stop-received.json'), 'utf8'));
+  assert.equal(receipt.component, 'Desktop');
+  assert.equal(receipt.force, true);
+  assert.match(receipt.operationId, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  assert.deepEqual(fs.readdirSync(path.join(launcher, 'state')).filter(name => name.startsWith('component-stop-')), [`component-stop-${receipt.operationId}.json`]);
+  assert.equal(fs.readFileSync(path.join(launcher, 'requests.txt'), 'utf8').trim(), 'All');
+});
+
+test('opening the launcher for an existing healthy server only observes it without another startup worker', async context => {
+  if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-launcher-monitor-'));
+  const launcher = startupFixture(directory, 'fail');
+  const serverFile = path.join(directory, 'server.mjs');
+  const addressFile = path.join(directory, 'address.json');
+  fs.writeFileSync(serverFile, `import http from 'node:http';import fs from 'node:fs';
+const server=http.createServer((req,res)=>{res.writeHead(200);res.end('ready');});
+server.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.argv[2],JSON.stringify({port:server.address().port})));`);
+  const server = spawn(process.execPath, [serverFile, addressFile], { stdio: 'ignore', windowsHide: true });
+  const exited = once(server, 'exit');
+  context.after(async () => {
+    if (server.exitCode == null) { server.kill(); await exited; }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  await waitForFile(addressFile);
+  const { port } = JSON.parse(fs.readFileSync(addressFile));
+  fs.mkdirSync(path.join(launcher, 'state'));
+  fs.writeFileSync(path.join(launcher, 'state/current.json'), JSON.stringify({
+    serverProcessId: server.pid, readyUrl: `http://127.0.0.1:${port}/readyz`,
+    desktopConnectionVerified: false, desktopProcessIds: [], desktopExecutable: 'fixture.exe',
+  }));
+  const harness = compileUiHarness(directory);
+  const result = JSON.parse(execFileSync(harness, [windowsPowerShell(), path.join(launcher, 'Start-CodexShared.ps1'), launcher, 'monitor'], { encoding: 'utf8', timeout: 15000 }));
+  assert.equal(result.rows[0], '起動済み');
+  assert.equal(result.rows[1], '未起動');
+  assert.equal(result.result, 0);
+  assert.equal(fs.existsSync(path.join(launcher, 'requests.txt')), false);
+});
+
+test('a second launcher focuses the existing hidden window and starts no additional worker', async context => {
   if (process.platform !== 'win32') { context.skip('Windows-only UI.'); return; }
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-progress-single-'));
   const launcher = startupFixture(directory, 'fail');
   const executable = path.join(launcher, 'CodexSharedLauncher.exe');
   compile(compilerPath(), executable, [sourcePath], null, 'winexe');
+  const visibilitySource = path.join(directory, 'Visibility.cs');
+  const visibilityExe = path.join(directory, 'Visibility.exe');
+  fs.writeFileSync(visibilitySource, `
+using System;
+using System.Runtime.InteropServices;
+internal static class Visibility {
+ delegate bool Visit(IntPtr window, IntPtr value);
+ [DllImport("user32.dll")] static extern bool EnumWindows(Visit visit, IntPtr value);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
+ [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window, int command);
+ [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+ static void Main(string[] args) {
+  bool visible=false;
+  EnumWindows(delegate(IntPtr window, IntPtr value) {
+   int pid; GetWindowThreadProcessId(window, out pid);
+   if(pid==int.Parse(args[0])) { if(args[1]=="hide") ShowWindow(window,0); visible|=IsWindowVisible(window); }
+   return true;
+  },IntPtr.Zero);
+  Console.Write(visible);
+ }
+}`);
+  compile(compilerPath(), visibilityExe, [visibilitySource], 'Visibility');
   const first = spawn(executable, [], { stdio: 'ignore' });
   const finished = new Promise(resolve => first.once('exit', resolve));
   context.after(async () => {
@@ -445,7 +521,16 @@ test('a second launcher focuses the existing window and starts no additional wor
     fs.rmSync(directory, { recursive: true, force: true });
   });
   await waitForFile(path.join(launcher, 'requests.txt'), 10000);
+  execFileSync(visibilityExe, [String(first.pid), 'hide']);
+  assert.equal(execFileSync(visibilityExe, [String(first.pid), 'read'], { encoding: 'utf8' }), 'False');
   const second = spawnSync(executable, [], { encoding: 'utf8', timeout: 10000 });
   assert.equal(second.status, 0, second.stderr);
+  const showDeadline = Date.now() + 10000;
+  let shown = false;
+  while (Date.now() < showDeadline && !shown) {
+    shown = execFileSync(visibilityExe, [String(first.pid), 'read'], { encoding: 'utf8' }) === 'True';
+    if (!shown) await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(shown, true, 'A hidden owner window must become visible without another worker.');
   assert.deepEqual(fs.readFileSync(path.join(launcher, 'requests.txt'), 'utf8').trim().split(/\r?\n/), ['All']);
 });

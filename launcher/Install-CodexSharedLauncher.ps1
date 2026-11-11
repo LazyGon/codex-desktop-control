@@ -3,6 +3,7 @@ param(
     [switch]$Uninstall,
 
     [switch]$RefreshIconOnly,
+    [switch]$UpdateBinaryOnly,
 
     [ValidateRange(1024, 65535)]
     [int]$Port = 8798
@@ -10,8 +11,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($Uninstall -and $RefreshIconOnly) {
-    throw 'Uninstall and RefreshIconOnly cannot be used together.'
+if (([int][bool]$Uninstall + [int][bool]$RefreshIconOnly + [int][bool]$UpdateBinaryOnly) -gt 1) {
+    throw 'Choose only one installer operation.'
 }
 
 $launcherRoot = Split-Path -Parent $PSCommandPath
@@ -88,7 +89,7 @@ if (-not (Test-Path -LiteralPath $desktopPackageScript -PathType Leaf)) {
 
 # Record a verified runtime so a Start-menu/logon launch also works when
 # Node.js was supplied by Codex's workspace runtime, not the user's PATH.
-if (-not $RefreshIconOnly) {
+if (-not $RefreshIconOnly -and -not $UpdateBinaryOnly) {
     . (Join-Path $launcherRoot 'CodexNodeRuntime.ps1')
     $nodeStateRoot = Join-Path $launcherRoot 'state'
     $nodeExecutable = Initialize-CodexNodeRuntime -StateRoot $nodeStateRoot
@@ -118,11 +119,16 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
 }
 
 $temporaryExecutable = Join-Path $launcherRoot "CodexSharedLauncher.$PID.tmp"
-$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$temporaryExecutable" /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Windows.Forms.dll $launcherSource 2>&1
+$windowSource = Join-Path $launcherRoot 'CodexLauncherWindow.cs'
+$compilerOutput = & $compiler /nologo /target:winexe /optimize+ "/win32icon:$launcherIcon" "/out:$temporaryExecutable" /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Windows.Forms.dll $launcherSource $windowSource 2>&1
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryExecutable -PathType Leaf)) {
     throw "Launcher compilation failed: $($compilerOutput -join [Environment]::NewLine)"
 }
 Move-Item -LiteralPath $temporaryExecutable -Destination $launcherExecutable -Force
+if ($UpdateBinaryOnly) {
+    [pscustomobject]@{ Updated = $true; TargetPath = $launcherExecutable; RuntimeUnchanged = $true }
+    return
+}
 
 $wsh = New-Object -ComObject WScript.Shell
 $updatedShortcuts = @()

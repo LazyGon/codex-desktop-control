@@ -28,6 +28,34 @@ function fixture(t) {
   return folder;
 }
 
+test('Desktop absence preserves the server while an explicit runtime refresh still requests shutdown', { skip: !windows }, () => {
+  const result = JSON.parse(run(`
+    . ${quote(path.join(launcher, 'CodexRuntimeHandoff.ps1'))}
+    function Get-CodexHandoffDesktopProcesses { }
+    function Get-CodexDesktopPackageReplacement { }
+    function Test-CodexManualRefreshActive { $script:refresh }
+    function Request-CodexAppServerShutdown { $script:shutdowns++ }
+    $results=@(foreach($refresh in @($false,$true)) {
+      $script:refresh=$refresh; $script:shutdowns=0
+      $info=[Diagnostics.ProcessStartInfo]::new()
+      $info.FileName=${quote(ps)}
+      $info.Arguments='-NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 400"'
+      $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+      $server=[Diagnostics.Process]::Start($info)
+      $runtime=[pscustomobject]@{packageVersion='26.1103.7773.0';desktopExecutable='fixture';appServerGracefulShutdown=$true}
+      try {
+        $exit=Wait-CodexDesktopRuntimeExit -Runtime $runtime -Server $server -StateRoot 'fixture' -CacheRoot 'fixture' -StartupStallSeconds 0 -Log { }
+        @{shutdownRequested=($script:shutdowns -gt 0);exitCode=$exit.ExitCode}
+      } finally { $server.WaitForExit(); $server.Dispose() }
+    })
+    ConvertTo-Json -InputObject $results -Compress
+  `));
+  assert.deepEqual(result, [
+    { shutdownRequested: false, exitCode: 0 },
+    { shutdownRequested: true, exitCode: 0 },
+  ]);
+});
+
 test('nonzero legacy exit requires approval in both the manual request and observed drain', { skip: !windows }, () => {
   const output = run(`
     . ${quote(path.join(launcher, 'CodexRuntimeHandoff.ps1'))}

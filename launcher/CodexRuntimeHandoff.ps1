@@ -194,18 +194,13 @@ function Wait-CodexDesktopRuntimeExit {
         [object]$Runtime, [Diagnostics.Process]$Server, [string]$StateRoot,
         [string]$CacheRoot, [int]$StartupStallSeconds, [scriptblock]$Log
     )
-    $absent = $null
     $lastError = $null
     $shutdownRequested = $false
     $handoff = $null
     while (-not $Server.HasExited) {
         try {
             if (-not $shutdownRequested) {
-                if (Get-CodexHandoffDesktopProcesses) {
-                    $absent = $null
-                }
-                else {
-                    if (-not $absent) { $absent = [Diagnostics.Stopwatch]::StartNew() }
+                if (-not (Get-CodexHandoffDesktopProcesses)) {
                     $packageQuery = @{
                         CurrentVersion = $Runtime.packageVersion
                         CurrentDesktopExecutable = $Runtime.desktopExecutable
@@ -233,7 +228,7 @@ function Wait-CodexDesktopRuntimeExit {
                             }
                         }
                     }
-                    elseif ($manualRefresh -or $absent.Elapsed.TotalSeconds -ge 60) {
+                    elseif ($manualRefresh) {
                         $shutdownRequested = $true
                         if (-not $Runtime.appServerGracefulShutdown) { throw 'The current AppServer does not have verified graceful shutdown support.' }
                     }

@@ -134,7 +134,7 @@ export async function validateSharedRuntime({
     throw new Error('Shared launcher state does not contain a valid server process id.');
   }
 
-  if (state.desktopConnectionVerified !== true) {
+  if (state.desktopConnectionVerified !== true && state.mode !== 'server') {
     throw new Error('The shared launcher has not verified the Desktop connection.');
   }
 

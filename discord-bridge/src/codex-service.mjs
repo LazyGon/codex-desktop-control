@@ -16,7 +16,7 @@ import {
   threadStatusLabel,
 } from './util.mjs';
 import { isHighVolumeCodexNotification } from './codex-notification-buffer.mjs';
-import { inspectDesktopClientOwner, processIsAlive } from './client-tool-ownership.mjs';
+import { inspectDesktopClientOwner, processIsAlive, sharedServerAvailable } from './client-tool-ownership.mjs';
 import { forkOwnTurns } from './session-fork-info.mjs';
 import { turnTimestampMs } from './recent-history.mjs';
 import { DESKTOP_PACKAGE_FAMILY } from './browser-initialization.mjs';
@@ -287,6 +287,7 @@ export class CodexService extends EventEmitter {
   }
 
   prepareDesktopThread(threadId) {
+    if (this.#requireClient()?.state === 'absent') return 'shared-server';
     return this.desktopFirst?.prepare(threadId);
   }
 
@@ -301,7 +302,8 @@ export class CodexService extends EventEmitter {
     if (state === 'opening' || state === 'waiting') throw new DesktopThreadPendingError();
     if (this.client !== client) throw new Error('App Server connection closed during Desktop preparation.');
     if (this.browserArchiveLocks.has(threadId)) throw new DesktopThreadPendingError();
-    this.#requireClient();
+    const owner = this.#requireClient();
+    if (state === 'shared-server' && owner?.state !== 'absent') throw new DesktopThreadPendingError();
   }
 
   async withBrowserArchive(threadId, operation) {
@@ -854,7 +856,7 @@ export class CodexService extends EventEmitter {
       this.endpoint = endpoint.url;
       this.connectionAttempt += 1;
       const owner = this.#desktopOwner(endpoint.url);
-      if (owner.state !== 'present') {
+      if (!sharedServerAvailable(owner)) {
         await this.#waitForDesktop(owner);
         continue;
       }
@@ -893,10 +895,10 @@ export class CodexService extends EventEmitter {
         ]);
         if (!connected || this.stopping) break;
         const verified = this.#desktopOwner(endpoint.url);
-        if (verified.state !== 'present' || verified.generation !== owner.generation) {
+        if (!sharedServerAvailable(verified, owner.generation)) {
           client.close();
           this.connectingClient = null;
-          await this.#waitForDesktop(verified.state === 'present'
+          await this.#waitForDesktop(sharedServerAvailable(verified)
             ? { reason: 'shared-runtime-changed-during-connect' } : verified);
           continue;
         }
@@ -1077,9 +1079,10 @@ export class CodexService extends EventEmitter {
     if (!this.client?.connected) throw new Error('Codex app-server is offline. The bridge will retry automatically.');
     if (this.clientGeneration !== null) {
       const owner = this.#desktopOwner(this.endpoint);
-      if (owner.state !== 'present' || owner.generation !== this.clientGeneration) {
-        throw new Error('Waiting for Desktop to connect to the shared App Server.');
+      if (!sharedServerAvailable(owner, this.clientGeneration)) {
+        throw new Error('Shared App Server ownership is unverified. The bridge will retry automatically.');
       }
+      return owner;
     }
   }
 

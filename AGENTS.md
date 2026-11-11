@@ -31,6 +31,15 @@
   shell command or expose the app-server listener.
 - Stop the Discord bridge through its graceful stop request before considering
   process termination.
+- Desktop may be absent in a canonical server-only session. Use the existing
+  local AppServer for supported operations only after verifying its generation
+  and actual Desktop absence; an ambiguous owner is not a headless grant.
+  Desktop-owned browser and screen tools still require Desktop.
+- The launcher's explicit component-stop buttons are operator actions. They
+  verify the selected process identity and Windows user/session, and preserve
+  one-shot outcome journals. Do not invoke forced termination merely to apply
+  source changes or bypass an uncertain stop. Closing Desktop normally keeps
+  the shared server available; explicit refresh/update handoffs still drain it.
 
 ## Apply updates and restart Bridge
 

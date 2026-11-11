@@ -7,7 +7,6 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -15,6 +14,8 @@ internal sealed class SharedRuntimeObservation
 {
     public bool ServerReady { get; set; }
     public bool DesktopVerified { get; set; }
+    public bool DesktopAlive { get; set; }
+    public bool SupervisorAlive { get; set; }
     public bool BridgeConfigured { get; set; }
     public bool BridgeAlive { get; set; }
     public bool DiscordReady { get; set; }
@@ -27,6 +28,7 @@ internal sealed class SharedLaunchProgressForm : Form
 {
     private readonly string statePath;
     private readonly string bridgeRoot;
+    private readonly string launcherRoot;
     private string progressPath;
     private readonly string baseArguments;
     private readonly ProcessStartInfo startInfo;
@@ -45,11 +47,16 @@ internal sealed class SharedLaunchProgressForm : Form
     private DateTime? bridgeWaitStarted;
     private bool closingRequested;
     private bool wasReady;
+    private bool monitorExisting;
+    private Process componentStop;
+    private string componentStopResult;
+    private readonly List<Button> stopButtons = new List<Button>();
 
     public int ResultCode { get; private set; }
 
     public SharedLaunchProgressForm(string launcherRoot, ProcessStartInfo processStartInfo)
     {
+        this.launcherRoot = launcherRoot;
         statePath = Path.Combine(launcherRoot, "state", "current.json");
         bridgeRoot = Path.Combine(Directory.GetParent(launcherRoot.TrimEnd(Path.DirectorySeparatorChar)).FullName, "discord-bridge");
         Directory.CreateDirectory(Path.Combine(launcherRoot, "state"));
@@ -58,10 +65,10 @@ internal sealed class SharedLaunchProgressForm : Form
         ResultCode = 0;
 
         Text = "Codex 共有起動状況";
-        ClientSize = new Size(470, 290);
+        ClientSize = new Size(620, 330);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
-        MinimizeBox = false;
+        MinimizeBox = true;
         StartPosition = FormStartPosition.CenterScreen;
         TopMost = true;
         ShowInTaskbar = true;
@@ -69,13 +76,13 @@ internal sealed class SharedLaunchProgressForm : Form
 
         summaryLabel.AutoSize = false;
         summaryLabel.Location = new Point(14, 12);
-        summaryLabel.Size = new Size(442, 42);
+        summaryLabel.Size = new Size(592, 42);
         summaryLabel.Text = "Codex の共有起動を準備しています…";
         summaryLabel.TextAlign = ContentAlignment.MiddleLeft;
         Controls.Add(summaryLabel);
 
         statusGrid.Location = new Point(14, 60);
-        statusGrid.Size = new Size(442, 122);
+        statusGrid.Size = new Size(592, 122);
         statusGrid.AllowUserToAddRows = false;
         statusGrid.AllowUserToDeleteRows = false;
         statusGrid.AllowUserToResizeRows = false;
@@ -107,19 +114,19 @@ internal sealed class SharedLaunchProgressForm : Form
         Controls.Add(statusGrid);
 
         progressBar.Location = new Point(14, 195);
-        progressBar.Size = new Size(442, 20);
+        progressBar.Size = new Size(592, 20);
         progressBar.Style = ProgressBarStyle.Marquee;
         progressBar.MarqueeAnimationSpeed = 30;
         Controls.Add(progressBar);
 
-        closeButton.Location = new Point(376, 226);
+        closeButton.Location = new Point(526, 226);
         closeButton.Size = new Size(80, 26);
         closeButton.Text = "閉じる";
         closeButton.Visible = true;
         closeButton.Click += delegate { Close(); };
         Controls.Add(closeButton);
 
-        logButton.Location = new Point(270, 226);
+        logButton.Location = new Point(420, 226);
         logButton.Size = new Size(100, 26);
         logButton.Text = "ログを開く";
         logButton.Enabled = false;
@@ -130,20 +137,37 @@ internal sealed class SharedLaunchProgressForm : Form
         };
         Controls.Add(logButton);
 
-        detailBox.Location = new Point(14, 290);
-        detailBox.Size = new Size(442, 110);
+        detailBox.Location = new Point(14, 334);
+        detailBox.Size = new Size(592, 110);
         detailBox.Multiline = true;
         detailBox.ReadOnly = true;
         detailBox.ScrollBars = ScrollBars.Vertical;
         detailBox.Visible = false;
         Controls.Add(detailBox);
 
+        var serverOnly = new Button { Text = "サーバーのみ起動", Location = new Point(14, 226), Size = new Size(150, 26) };
+        serverOnly.Click += delegate
+        {
+            if ((launcherProcess == null || launcherProcess.HasExited) && componentStop == null)
+                StartOperation("Shared");
+        };
+        Controls.Add(serverOnly);
+        string[] components = { "Shared", "Desktop", "Bridge" };
+        string[] componentLabels = { "AppServer 強制終了", "Desktop 強制終了", "Bridge 強制終了" };
+        for (int index = 0; index < components.Length; index++)
+        {
+            string component = components[index];
+            var button = new Button { Text = componentLabels[index], Location = new Point(14 + index * 200, 263), Size = new Size(192, 26) };
+            button.Click += delegate { StopComponent(component); };
+            stopButtons.Add(button);
+            Controls.Add(button);
+        }
         var note = new Label();
         note.AutoSize = false;
-        note.Location = new Point(14, 261);
-        note.Size = new Size(442, 20);
+        note.Location = new Point(14, 300);
+        note.Size = new Size(592, 20);
         note.ForeColor = SystemColors.GrayText;
-        note.Text = "閉じると起動操作を終了します。正常稼働中のアプリは残ります。";
+        note.Text = "強制終了すると、実行中の処理も終了します。";
         Controls.Add(note);
 
         timer.Interval = 500;
@@ -155,13 +179,22 @@ internal sealed class SharedLaunchProgressForm : Form
 
     private void BeginLaunch(object sender, EventArgs eventArgs)
     {
+        SharedRuntimeObservation existing = ReadObservation(statePath);
+        ReadBridgeObservation(bridgeRoot, existing);
+        if (existing.ServerReady || existing.DesktopAlive || existing.BridgeAlive || existing.SupervisorAlive)
+        {
+            monitorExisting = true;
+            timer.Start();
+            ObserveStartup(this, EventArgs.Empty);
+            return;
+        }
         StartOperation("All");
     }
 
     private void RetryStep(object sender, DataGridViewCellEventArgs eventArgs)
     {
         if (eventArgs.ColumnIndex != 2 || eventArgs.RowIndex < 0 || eventArgs.RowIndex > 2 ||
-            closingRequested || (launcherProcess != null && !launcherProcess.HasExited))
+            closingRequested || componentStop != null || (launcherProcess != null && !launcherProcess.HasExited))
             return;
         StartOperation(new[] { "Shared", "Desktop", "Bridge" }[eventArgs.RowIndex]);
     }
@@ -173,9 +206,11 @@ internal sealed class SharedLaunchProgressForm : Form
             if (launcherProcess != null) launcherProcess.Dispose();
             progressPath = Path.Combine(Path.GetDirectoryName(statePath), "startup-" + Guid.NewGuid().ToString("N") + ".json");
             startInfo.Arguments = baseArguments + " -RetryStep " + step + " -ProgressPath \"" + progressPath + "\"";
+            if (step == "Shared") startInfo.Arguments += " -ServerOnly";
             detailBox.Visible = false;
             detailBox.Text = String.Empty;
-            ClientSize = new Size(470, 290);
+            ClientSize = new Size(620, 330);
+            monitorExisting = false;
             summaryLabel.ForeColor = SystemColors.ControlText;
             summaryLabel.Text = "指定された起動操作を実行しています…";
             progressBar.Style = ProgressBarStyle.Marquee;
@@ -200,6 +235,7 @@ internal sealed class SharedLaunchProgressForm : Form
 
     private void ObserveStartup(object sender, EventArgs eventArgs)
     {
+        ObserveComponentStop();
         statusGrid.Enabled = launcherProcess == null || launcherProcess.HasExited;
         if (closingRequested)
         {
@@ -219,6 +255,16 @@ internal sealed class SharedLaunchProgressForm : Form
         statusGrid.Rows[0].Cells[1].Value = observation.ServerReady ? "起動済み" : "確認中…";
         statusGrid.Rows[1].Cells[1].Value = observation.DesktopVerified ? "接続済み" : "接続待ち…";
         statusGrid.Rows[2].Cells[1].Value = observation.BridgeStatus;
+
+        if (monitorExisting)
+        {
+            summaryLabel.Text = componentStop != null ? "終了処理中…" : "起動中のアプリ";
+            statusGrid.Rows[0].Cells[1].Value = observation.ServerReady ? "起動済み" : "未接続";
+            statusGrid.Rows[1].Cells[1].Value = observation.DesktopVerified ? "接続済み" : observation.DesktopAlive ? "起動済み・共有未接続" : "未起動";
+            progressBar.Style = ProgressBarStyle.Blocks;
+            progressBar.Value = observation.ServerReady ? 100 : 0;
+            return;
+        }
 
         Dictionary<string, object> receipt = ReadProgress(progressPath, launcherProcess.Id);
         string phase = GetString(receipt, "phase");
@@ -264,7 +310,9 @@ internal sealed class SharedLaunchProgressForm : Form
             }
         }
 
-        if (observation.DesktopVerified && (phase == "ready" || phase == "skipped" || phase == "bridge-ready"))
+        bool serverOnlyReady = receipt != null && receipt.ContainsKey("serverOnly") &&
+            receipt["serverOnly"] is bool && (bool)receipt["serverOnly"] && observation.ServerReady;
+        if ((observation.DesktopVerified || serverOnlyReady) && (phase == "ready" || phase == "skipped" || phase == "bridge-ready"))
         {
             if (observation.BridgeConfigured && !observation.BridgeReady)
             {
@@ -279,7 +327,7 @@ internal sealed class SharedLaunchProgressForm : Form
                 return;
             }
             verifiedTicks++;
-            summaryLabel.Text = phase == "skipped"
+            summaryLabel.Text = serverOnlyReady ? "共有 AppServer 起動済み" : phase == "skipped"
                 ? "すでに起動済みのためスキップしました。接続は正常です。"
                 : "共有 App Server・Desktop・Discord Bridge の確認が完了しました。";
             summaryLabel.ForeColor = Color.DarkGreen;
@@ -304,6 +352,51 @@ internal sealed class SharedLaunchProgressForm : Form
                 "終了コード: " + launcherProcess.ExitCode.ToString(CultureInfo.InvariantCulture) +
                 "。今回の起動結果を取得できないか、共有接続が未完了です。結果ファイル: " + progressPath);
         }
+    }
+
+    private void StopComponent(string component)
+    {
+        if (closingRequested || componentStop != null) return;
+        try
+        {
+            if (launcherProcess != null && !launcherProcess.HasExited)
+                File.WriteAllText(progressPath + ".cancel", "component stop requested");
+            string operation = Guid.NewGuid().ToString();
+            componentStopResult = Path.Combine(launcherRoot, "state", "component-stop-" + operation + ".json");
+            var info = new ProcessStartInfo
+            {
+                FileName = startInfo.FileName,
+                Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File \"" +
+                    Path.Combine(launcherRoot, "Stop-CodexComponent.ps1") + "\" -Force -Component " + component +
+                    " -OperationId " + operation + " -ResultPath \"" + componentStopResult + "\"",
+                WorkingDirectory = launcherRoot, UseShellExecute = false, CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            info.EnvironmentVariables.Remove("PSExecutionPolicyPreference");
+            componentStop = Process.Start(info);
+            if (componentStop == null) throw new InvalidOperationException("終了処理を開始できませんでした。");
+            foreach (Button button in stopButtons) button.Enabled = false;
+            timer.Start();
+        }
+        catch (Exception error) { ShowFailure("終了処理を開始できませんでした。", error.Message); }
+    }
+
+    private void ObserveComponentStop()
+    {
+        if (componentStop == null || !componentStop.HasExited) return;
+        int exitCode = componentStop.ExitCode;
+        componentStop.Dispose();
+        componentStop = null;
+        monitorExisting = true;
+        foreach (Button button in stopButtons) button.Enabled = true;
+        try
+        {
+            var result = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                ReadReplaceableStateFile(componentStopResult));
+            if (exitCode != 0 || GetString(result, "phase") != "completed")
+                ShowDetail(GetString(result, "error") + Environment.NewLine + componentStopResult);
+        }
+        catch (Exception error) { ShowDetail(error.Message + Environment.NewLine + componentStopResult); }
     }
 
     private void RequestClose(object sender, FormClosingEventArgs eventArgs)
@@ -402,6 +495,23 @@ internal sealed class SharedLaunchProgressForm : Form
             var state = serializer.Deserialize<Dictionary<string, object>>(
                 ReadReplaceableStateFile(stateFilePath));
 
+            object supervisorValue;
+            DateTimeOffset recordedAt;
+            if (state.TryGetValue("supervisorProcessId", out supervisorValue) &&
+                DateTimeOffset.TryParse(GetString(state, "startedAt"), out recordedAt))
+            {
+                try
+                {
+                    using (var supervisor = Process.GetProcessById(Convert.ToInt32(supervisorValue, CultureInfo.InvariantCulture)))
+                        result.SupervisorAlive = !supervisor.HasExited &&
+                            supervisor.SessionId == Process.GetCurrentProcess().SessionId &&
+                            supervisor.StartTime.ToUniversalTime() <= recordedAt.UtcDateTime;
+                }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+            }
+
             object processValue;
             object readyUrlValue;
             object desktopValue;
@@ -418,6 +528,7 @@ internal sealed class SharedLaunchProgressForm : Form
             bool desktopVerified = desktopValue is bool && (bool)desktopValue;
             string readyUrl = readyUrlValue as string;
             string desktopExecutable = desktopExecutableValue as string;
+            result.DesktopAlive = HasLiveDesktopProcess(desktopProcessIdsValue as IEnumerable, desktopExecutable);
             using (Process process = Process.GetProcessById(processId))
             {
                 if (process.HasExited)
@@ -435,7 +546,7 @@ internal sealed class SharedLaunchProgressForm : Form
         }
         catch
         {
-            return new SharedRuntimeObservation();
+                return result;
         }
     }
 
@@ -549,7 +660,7 @@ internal sealed class SharedLaunchProgressForm : Form
         progressBar.Style = ProgressBarStyle.Blocks;
         progressBar.Value = 100;
         ShowDetail(detail);
-        FinishSuccessfulOperation();
+        StopElapsed();
     }
 
     private void StopElapsed()
@@ -578,7 +689,7 @@ internal sealed class SharedLaunchProgressForm : Form
     {
         detailBox.Text = detail + (String.IsNullOrWhiteSpace(logPath) ? String.Empty : Environment.NewLine + Environment.NewLine + "ログ: " + logPath);
         detailBox.Visible = !String.IsNullOrWhiteSpace(detailBox.Text);
-        if (detailBox.Visible) ClientSize = new Size(470, 414);
+        if (detailBox.Visible) ClientSize = new Size(620, 458);
     }
 
     private void Cleanup(object sender, FormClosedEventArgs eventArgs)
@@ -587,48 +698,12 @@ internal sealed class SharedLaunchProgressForm : Form
         timer.Dispose();
         if (launcherProcess != null)
             launcherProcess.Dispose();
+        if (componentStop != null) componentStop.Dispose();
     }
 }
 
 internal static class CodexSharedLauncher
 {
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr window);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr window, int command);
-
-    internal static string ProgressMutexName(string launcherRoot)
-    {
-        using (var sha = SHA256.Create())
-        {
-            byte[] digest = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(launcherRoot).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()));
-            return "Local\\CodexSharedLauncherProgress-" + BitConverter.ToString(digest).Replace("-", "").Substring(0, 24);
-        }
-    }
-
-    private static void FocusExistingProgress()
-    {
-        string executable = Process.GetCurrentProcess().MainModule.FileName;
-        foreach (Process process in Process.GetProcessesByName("CodexSharedLauncher"))
-        {
-            using (process)
-            {
-                try
-                {
-                    if (process.Id != Process.GetCurrentProcess().Id &&
-                        String.Equals(process.MainModule.FileName, executable, StringComparison.OrdinalIgnoreCase) &&
-                        process.MainWindowHandle != IntPtr.Zero)
-                    {
-                        ShowWindow(process.MainWindowHandle, 9);
-                        SetForegroundWindow(process.MainWindowHandle);
-                        return;
-                    }
-                }
-                catch { }
-            }
-        }
-    }
     internal static string FindOnPath(
         string fileName,
         string pathValue,
@@ -735,25 +810,19 @@ internal static class CodexSharedLauncher
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using (var windowMutex = new System.Threading.Mutex(false, ProgressMutexName(launcherRoot)))
+            using (var windowOwner = new CodexLauncherWindow(launcherRoot))
             {
-                bool ownsWindow;
-                try { ownsWindow = windowMutex.WaitOne(0); }
-                catch (System.Threading.AbandonedMutexException) { ownsWindow = true; }
-                if (!ownsWindow)
+                if (!windowOwner.OwnsWindow)
                 {
-                    FocusExistingProgress();
+                    windowOwner.RequestShow();
                     return 0;
                 }
-                try
+                using (var progressForm = new SharedLaunchProgressForm(launcherRoot, startInfo))
                 {
-                    using (var progressForm = new SharedLaunchProgressForm(launcherRoot, startInfo))
-                    {
-                        Application.Run(progressForm);
-                        return progressForm.ResultCode;
-                    }
+                    windowOwner.Attach(progressForm);
+                    Application.Run(progressForm);
+                    return progressForm.ResultCode;
                 }
-                finally { windowMutex.ReleaseMutex(); }
             }
         }
         catch (Exception exception)

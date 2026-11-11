@@ -129,3 +129,29 @@ test('an existing loaded task or an unavailable runtime does not get navigated',
   assert.equal(await make().prepare(THREAD), 'disabled');
   assert.deepEqual(state.opens, []);
 });
+
+test('headless delivery preserves an unknown Desktop navigation receipt for the returning owner', async (t) => {
+  const { make, record, state } = fixture(t);
+  const desktopFirst = make({ prepareNavigation: async () => async (id) => {
+    state.opens.push(id);
+    throw new Error('unknown navigation result');
+  } });
+  await desktopFirst.prepare(THREAD);
+  await setImmediate();
+  const receipt = fs.readFileSync(record, 'utf8');
+  let owner = { state: 'absent', generation: 'one' };
+  const service = new CodexService({
+    config: {}, stateStore: {}, logDir: os.tmpdir(), desktopFirst, inspectDesktopOwner: () => owner,
+  });
+  service.clientGeneration = 'one';
+  service.client = { connected: true, call: async (method) => {
+    if (method === 'thread/turns/list') return { data: [] };
+    if (method === 'turn/start') return { turn: { id: 'accepted' } };
+    return {};
+  } };
+  assert.equal((await service.deliver(THREAD, 'send', null, 'headless-input')).turnId, 'accepted');
+  assert.equal(fs.readFileSync(record, 'utf8'), receipt);
+  owner = { state: 'present', generation: 'one' };
+  await assert.rejects(service.deliver(THREAD, 'wait', null, 'desktop-input'), { code: 'DESKTOP_THREAD_PENDING' });
+  assert.deepEqual(state.opens, [THREAD]);
+});

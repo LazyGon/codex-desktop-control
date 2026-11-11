@@ -8,6 +8,7 @@ param(
     [int]$DesktopConnectionStallSeconds = 0,
 
     [switch]$SelfTest,
+    [switch]$ServerOnly,
 
     [switch]$NoSound,
 
@@ -100,7 +101,7 @@ $null = Initialize-CodexNodeRuntime -StateRoot $stateRoot
 $cliRedirectEnabledForChildProcesses = Enable-CodexCliRedirectForChildProcesses
 
 $runStamp = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID
-$modeName = if ($SelfTest) { 'selftest' } else { 'desktop' }
+$modeName = if ($SelfTest) { 'selftest' } elseif ($ServerOnly) { 'server' } else { 'desktop' }
 $logPath = Join-Path $logRoot "$runStamp-$modeName.log"
 $serverStdoutPath = Join-Path $logRoot "$runStamp-app-server.stdout.log"
 $serverStderrPath = Join-Path $logRoot "$runStamp-app-server.stderr.log"
@@ -122,7 +123,8 @@ function Write-LauncherProgress {
         [Parameter(Mandatory)][string]$Summary,
         [string]$Detail = '',
         [string]$ServerStatus = '確認中…',
-        [string]$DesktopStatus = '起動待ち…'
+        [string]$DesktopStatus = '起動待ち…',
+        [switch]$ServerOnlyMode
     )
 
     if ([string]::IsNullOrWhiteSpace($ProgressPath)) { return }
@@ -140,6 +142,7 @@ function Write-LauncherProgress {
         detail = $Detail
         serverStatus = $ServerStatus
         desktopStatus = $DesktopStatus
+        serverOnly = [bool]$ServerOnlyMode
         logPath = $logPath
         updatedAt = [DateTimeOffset]::Now.ToString('o')
     }
@@ -520,6 +523,7 @@ function Invoke-InteractiveLauncherWorker {
         ' -NoDialogs -RuntimeSupervisor -ProgressPath ' + (ConvertTo-WindowsCommandLineArgument -Value $ProgressPath) +
         ' -ProgressOwnerProcessId ' + $PID + ' -RetryStep ' + $RetryStep + ' -Port ' + $Port +
         ' -DesktopConnectionStallSeconds ' + $DesktopConnectionStallSeconds
+    if ($ServerOnly) { $ownerInfo.Arguments += ' -ServerOnly' }
     $ownerInfo.WorkingDirectory = $launcherRoot
     $ownerInfo.UseShellExecute = $false
     $ownerInfo.CreateNoWindow = $true
@@ -590,7 +594,8 @@ function Invoke-BridgeRetry {
     throw "Discord Bridge の再試行が 5 分以内に完了しませんでした。$($status.AppServerStatus)"
 }
 
-if ($DesktopBrowserAccessTrial -and (-not $RuntimeSupervisor -or $InteractiveWorker -or $SelfTest -or $RetryStep -ne 'All')) {
+if ($SelfTest -and $ServerOnly) { throw 'A self-test cannot start a persistent server-only runtime.' }
+if ($DesktopBrowserAccessTrial -and (-not $RuntimeSupervisor -or $InteractiveWorker -or $SelfTest -or $ServerOnly -or $RetryStep -ne 'All')) {
     throw 'The Desktop browser access trial requires a full runtime supervisor launch.'
 }
 
@@ -669,11 +674,16 @@ try {
         if ($null -ne $reusableRuntime) {
             if ($DesktopBrowserAccessTrial) { throw 'Another App Server is still running. The trial was not applied.' }
             Write-LauncherLog "Reusing healthy owned app-server. pid=$($reusableRuntime.serverProcessId)"
-            $null = Start-DesktopOnRuntime `
-                -PackageInfo $packageInfo `
-                -RuntimeState $reusableRuntime `
-                -PortNumber $Port
-            Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
+            if ($ServerOnly) {
+                Write-LauncherProgress -Phase 'ready' -Summary '共有 AppServer 起動済み' -ServerStatus '起動済み' -DesktopStatus '起動しない' -ServerOnlyMode
+            }
+            else {
+                $null = Start-DesktopOnRuntime `
+                    -PackageInfo $packageInfo `
+                    -RuntimeState $reusableRuntime `
+                    -PortNumber $Port
+                Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
+            }
             Invoke-LauncherSignal -Kind Ready
             $exitCode = 0
             $startupHandled = $true
@@ -792,6 +802,16 @@ try {
             Write-LauncherLog 'SELFTEST_OK app-server accepted connections and returned HTTP 200.'
             Write-Output "SELFTEST_OK port=$Port serverPid=$serverProcessId log=$logPath"
             $exitCode = 0
+        }
+        elseif ($ServerOnly) {
+            $bridgeTask = Get-ScheduledTask -TaskName 'Codex Discord Remote' -ErrorAction SilentlyContinue
+            if ($null -ne $bridgeTask -and $bridgeTask.State -ne 'Running') {
+                try { Start-ScheduledTask -TaskName 'Codex Discord Remote' }
+                catch { Write-LauncherLog "Bridge start was not confirmed; no retry: $($_.Exception.Message)" }
+            }
+            Write-LauncherProgress -Phase 'ready' -Summary '共有 AppServer 起動済み' -ServerStatus '起動済み' -DesktopStatus '起動しない' -ServerOnlyMode
+            $serverProcess.WaitForExit()
+            $exitCode = $serverProcess.ExitCode
         }
         else {
             $registeredWebSocketUrl = $runtimeState.websocketUrl

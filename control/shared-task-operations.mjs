@@ -32,7 +32,7 @@ export function deliveryFor(threadId, activeTurn, message) {
 export async function connectCanonical({ requestTimeoutMs = 300_000 } = {}) {
   const state = readJson(path.join(repository, 'launcher/state/current.json'));
   const endpoint = validateLoopbackEndpoint(state.websocketUrl);
-  if (!state.desktopConnectionVerified) throw new Error('Canonical Desktop connection is not verified.');
+  if (!state.desktopConnectionVerified && state.mode !== 'server') throw new Error('Canonical Desktop connection is not verified.');
   const client = new AppServerClient(endpoint, { requestTimeoutMs });
   try { await client.connect(); return client; }
   catch (error) { client.close(); throw error; }

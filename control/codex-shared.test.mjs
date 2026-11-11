@@ -7,7 +7,6 @@ import path from 'node:path';
 
 import {
   buildRemoteArguments,
-  readyTimeoutMilliseconds,
   validateLoopbackEndpoint,
   validateSharedRuntime,
 } from './codex-shared.mjs';
@@ -98,8 +97,15 @@ test('shared CLI rejects a stale executable hash and unverified Desktop', async 
   );
 });
 
-test('shared CLI owns the remote endpoint and uses a five-minute readiness window', () => {
-  assert.equal(readyTimeoutMilliseconds, 300_000);
+test('an explicitly server-only runtime is usable without a Desktop connection', async context => {
+  const { statePath } = fixture(context, { mode: 'server', desktopConnectionVerified: false });
+  const runtime = await validateSharedRuntime({ statePath, isProcessAlive: () => true,
+    fetchImplementation: async () => ({ status: 200 }) });
+  assert.equal(runtime.endpoint, 'ws://127.0.0.1:8798');
+  assert.equal(runtime.serverProcessId, 1234);
+});
+
+test('shared CLI owns the remote endpoint', () => {
   assert.deepEqual(buildRemoteArguments(['--no-alt-screen', 'continue this task']), [
     '--no-alt-screen',
     'continue this task',
