@@ -218,7 +218,8 @@ function Start-DesktopOnRuntime {
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value ([bool]$DesktopBrowserAccessTrial)
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' `
-        -Value ($desktopStartInfo.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'] -eq '1')
+        -Value ($desktopStartInfo.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_USE_LOCAL_DAEMON') -and
+            $desktopStartInfo.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'] -eq '1')
     Set-RuntimeStateValue `
         -State $RuntimeState `
         -Name 'desktopProcessIds' `

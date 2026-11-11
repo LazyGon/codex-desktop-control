@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
 
 const launcherRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,4 +72,47 @@ try {
 `;
   const output = execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
   assert.equal(JSON.parse(output.trim()).cancelled, true);
+});
+
+test('connected Desktop startup completes with or without the optional browser compatibility environment', context => {
+  if (process.platform !== 'win32') { context.skip('Windows PowerShell is required.'); return; }
+  const shells = [windowsPowerShell(), path.join(
+    process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe',
+  )].filter(shell => fs.existsSync(shell));
+  for (const shell of shells) {
+    const script = `
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+. ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopStartup.ps1'))}
+. ${quotePowerShell(path.join(launcherRoot, 'CodexDesktopConnection.ps1'))}
+$factory = (Get-Command New-CodexDesktopStartInfo).ScriptBlock
+$script:DesktopConnectionStallSeconds = 0
+function Set-RuntimeStateValue { param($State, $Name, $Value) $State[$Name] = $Value }
+function Write-RuntimeState { }
+function Write-LauncherProgress { }
+function Write-LauncherLog { }
+function Invoke-DesktopProjectSync { }
+function Assert-LauncherNotCancelled { }
+function Set-UserWebSocketEnvironment { }
+function Get-CodexDesktopRootProcesses { [pscustomobject]@{ProcessId=101} }
+function Get-CodexDesktopProcessIds { 101 }
+function Wait-DesktopSharedConnection { $true }
+function New-CodexDesktopStartInfo { $script:fixtureStartInfo }
+$results = @(foreach ($version in @('26.1103.7773.0', '26.1103.4239.0')) {
+    $script:fixtureStartInfo = & $factory -DesktopExecutable ${quotePowerShell(windowsPowerShell())} -WebSocketUrl 'ws://127.0.0.1:8798' -PackageVersion $version
+    $script:fixtureStartInfo.Arguments = '-NoProfile -NonInteractive -Command "exit 0"'
+    $script:fixtureStartInfo.CreateNoWindow = $true
+    $state = @{websocketUrl='ws://127.0.0.1:8798';serverProcessId=$PID}
+    $package = [pscustomobject]@{DesktopExecutable=${quotePowerShell(windowsPowerShell())};ApplicationUserModelId='fixture';Version=$version}
+    $result = Start-DesktopOnRuntime -PackageInfo $package -RuntimeState $state -PortNumber 8798
+    @{connected=$result.RuntimeState.desktopConnectionVerified;compatibility=$result.RuntimeState.desktopBrowserAccessCompatibility;desktopIds=@($result.DesktopProcessIds)}
+})
+ConvertTo-Json -InputObject $results -Depth 4 -Compress
+`;
+    const output = execFileSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], { encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(output.trim()), [
+      { connected: true, compatibility: false, desktopIds: [101] },
+      { connected: true, compatibility: true, desktopIds: [101] },
+    ], shell);
+  }
 });

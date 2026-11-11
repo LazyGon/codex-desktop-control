@@ -279,12 +279,15 @@ if ($null -ne $newState) {
     try {
         $callbackAttempted = $true
         $receipt.callbackAttempted = $true; $receipt.callbackPhase = 'dispatching'; Write-Receipt
-        # Re-read the verified canonical endpoint at delivery time. The control
-        # utility resumes the same thread and reads its latest active turn.
+        # Re-read the canonical runtime and let Desktop load cold tasks before
+        # the shared completion route sends to the latest turn.
         $deliveryState = Get-VerifiedNewRuntime
         if ($null -eq $deliveryState) { throw 'The verified canonical runtime is no longer available; no callback was sent.' }
         $message = "Windows Scheduler bootstrap has finished. Request id: $($request.requestId). Receipt: $($request.receiptPath). Log: $($request.logPath). Read the receipt first. Continue the user request that authorized this switch from the official Desktop to the shared Desktop. Verify the live shared AppServer, Desktop and Discord Bridge. If the receipt reports a failure, diagnose its recorded stage before any retry. Preserve this task's workspace, permissions, model and existing Git changes."
-        $output = @(& $nodeExecutable (Join-Path $repositoryRoot 'control\codex-control.mjs') deliver $request.threadId --url $deliveryState.websocketUrl --message $message --compact 2>&1)
+        $output = @(& $nodeExecutable (Join-Path $launcherRoot 'runtime-update-drain.mjs') deliver `
+            --thread $request.threadId --endpoint $deliveryState.websocketUrl `
+            --server-pid ([string]$deliveryState.serverProcessId) --request-id $request.requestId `
+            --message $message --compact 2>&1)
         if ($LASTEXITCODE -ne 0) { throw 'Callback delivery was uncertain; it was not automatically retried.' }
         $delivery = ($output -join "`n") | ConvertFrom-Json
         if ($delivery.accepted -ne $true -or $delivery.threadId -ne $request.threadId) { throw 'Callback acceptance was not confirmed.' }
