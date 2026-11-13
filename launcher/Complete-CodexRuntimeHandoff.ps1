@@ -22,10 +22,6 @@ if (-not $request -or $request.id -ne $id -or $request.port -lt 1024 -or $reques
 }
 $browserAccessTrial = [bool]($request.PSObject.Properties['desktopBrowserAccessTrial'] -and
     $request.desktopBrowserAccessTrial -eq $true)
-if ($browserAccessTrial) {
-    Assert-CodexDesktopBrowserAccessTrialVersion $request.fromVersion
-    Assert-CodexDesktopBrowserAccessTrialVersion $request.toVersion
-}
 $port = [int]$request.port
 $endpoint = "ws://127.0.0.1:$port"
 $readyUrl = "http://127.0.0.1:$port/readyz"

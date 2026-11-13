@@ -180,8 +180,7 @@ function Start-DesktopOnRuntime {
     # Explorer/package activation can race environment broadcasts at logon.
     # Start the installed package executable with an explicit inherited endpoint.
     $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable `
-        -WebSocketUrl $RuntimeState.websocketUrl -PackageVersion $PackageInfo.Version `
-        -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial
+        -WebSocketUrl $RuntimeState.websocketUrl
     $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
     if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
     Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"

@@ -615,7 +615,6 @@ try {
         exit 0
     }
     $packageInfo = Get-CodexPackageRuntime -Package (Get-CodexDesktopPackageInfo -RequireBundledRuntime) -CacheRoot $cacheRoot
-    if ($DesktopBrowserAccessTrial) { Assert-CodexDesktopBrowserAccessTrialVersion $packageInfo.Version }
     Write-LauncherLog "Launcher started. mode=$modeName port=$Port package=$($packageInfo.Version)"
 
     $nodeExecutable = (Get-Command node.exe -ErrorAction Stop).Source

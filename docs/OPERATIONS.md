@@ -154,21 +154,22 @@ normal shutdown. It requires proof that the captured root exited, journals each
 termination attempt, and refuses unrelated or unverified processes. It does not
 force the Desktop root, AppServer, Bridge, or Windows to close.
 
-The shared launcher enables Chrome Computer Use compatibility by default on
-verified Desktop builds `26.1029.7803.0` and `26.1103.4239.0`. The explicit
-loopback WebSocket still selects the shared AppServer. Only the launched Desktop receives the flag
+The shared launcher enables Chrome Computer Use compatibility for Desktop
+startup without a package-version allowlist. The explicit loopback WebSocket
+still selects the shared AppServer. Only the launched Desktop receives the flag
 that lets it add its own signed browser access context to the normal Computer
 Use configuration. The launcher does not read or store that context. The
 runtime state records the setting in `desktopBrowserAccessCompatibility`.
 No user-level environment or scheduler setting is required.
 
-The optional `-DesktopBrowserAccessTrial` records a same-version trial request.
-It is not needed for normal startup on either verified build. Integrated
-`cua_repl` read `https://example.com/` in Chrome on both builds; on
-`26.1103.4239.0` this was also verified from a separate task after Desktop
-loaded it. Check the real Chrome route on a new build before adding it to
-normal startup. A task first loaded by a headless client may still lack
-Desktop's signed context.
+The optional `-DesktopBrowserAccessTrial` remains accepted for recorded
+same-version restart requests; normal startup needs no trial option. Previous
+version restrictions were an inspection aid, not a browser authentication or
+transport contract, and have been removed. Package identity, signed access
+verification, and the loopback transport remain enforced by their existing
+owners. After an app update, verify the real Chrome route with integrated
+`cua_repl`; a ready MCP server alone does not prove browser access. A task first
+loaded by a headless client may still lack Desktop's signed context.
 
 On that verified shared Desktop runtime, the Discord Bridge checks the
 existing task before loading it to send input. An already loaded task needs

@@ -731,8 +731,6 @@ If the exact waiter-owned goal pause receipt exists at $goalPausePath, verify it
 function Assert-RefreshMode {
     if ($DesktopBrowserAccessTrial) {
         if (-not $RestartOnly) { throw 'The Desktop browser access trial requires a same-version restart.' }
-        Assert-CodexDesktopBrowserAccessTrialVersion $FromVersion
-        Assert-CodexDesktopBrowserAccessTrialVersion $ToVersion
     }
     if ($CleanupExitedDesktopHelpers -and -not $RestartOnly) {
         throw 'Opt-in residual helper cleanup applies only to a same-version restart.'

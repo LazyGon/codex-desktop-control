@@ -360,7 +360,7 @@ test('restart-only admits only the exact same version without installer or force
     'ConvertTo-Json -InputObject $results -Compress',
   ].join('\n');
   const output = execFileSync(windowsPowerShell(), ['-NoProfile','-NonInteractive','-EncodedCommand',encodedPowerShell(script)], {encoding:'utf8',windowsHide:true});
-  assert.deepEqual(JSON.parse(output), [true,false,false,false,false,false,true,true,false,false]);
+  assert.deepEqual(JSON.parse(output), [true,false,false,false,false,false,true,true,false,true]);
 });
 
 test('encoded scheduled controller is one invocation with all arguments in Windows PowerShell', {
