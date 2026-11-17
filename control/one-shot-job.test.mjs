@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { workerArguments, deliveryFor } from './one-shot-job.mjs';
+import { workerArguments, deliveryFor, postbootOwnsCompletion } from './one-shot-job.mjs';
 import { collectPins } from '../restart-signin/prepare.mjs';
 
 test('public callback runner uses one explicit script/job without per-job UAC or raw shell', () => {
@@ -30,4 +30,12 @@ test('historical jobs are not rewritten during dependency pin collection', () =>
     collectPins([file]);
     assert.equal(fs.readFileSync(file, 'utf8'), bytes);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('accepted Windows restart leaves wake-up to the postboot receiver',()=>{
+  assert.equal(postbootOwnsCompletion({phase:'restart-request-accepted',apiReturn:0}),true);
+  assert.equal(postbootOwnsCompletion({phase:'unknown-do-not-repeat',apiReturn:0}),true);
+  assert.equal(postbootOwnsCompletion({phase:'restart-not-accepted',apiReturn:5}),false);
+  assert.equal(postbootOwnsCompletion({phase:'unknown-do-not-repeat'}),false);
+  assert.equal(postbootOwnsCompletion(null),false);
 });

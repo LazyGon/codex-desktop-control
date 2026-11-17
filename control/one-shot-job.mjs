@@ -15,6 +15,10 @@ export function workerArguments(state, jobPath) {
   return ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', state.workerScript, '-JobPath', jobPath];
 }
 
+export function postbootOwnsCompletion(operation) {
+  return operation?.apiReturn===0 && ['restart-request-accepted','unknown-do-not-repeat'].includes(operation.phase);
+}
+
 async function main() {
   const mode = process.argv[2];
   if (!process.argv[3]) throw new Error('An explicit local job JSON path is required.');
@@ -48,6 +52,16 @@ async function main() {
     const outcome = await new Promise((resolve, reject) => { worker.once('error', reject); worker.once('exit', (code, signal) => resolve({ code, signal })); });
     fs.closeSync(log);
     state.workerExit = outcome; state.phase = 'ready'; state.workerFinishedAt = new Date().toISOString(); saveJson(jobPath, state);
+    if(state.postbootOperationPath && fs.existsSync(state.postbootOperationPath)) {
+      const operation=readJson(state.postbootOperationPath);
+      if(operation.operationId!==state.operationId || operation.threadId!==state.threadId)throw new Error('Postboot operation owner mismatch.');
+      if(postbootOwnsCompletion(operation)) {
+        // A successful restart request returns before Windows actually shuts down.
+        // Do not wake the paused owner in that gap; its logon receiver owns delivery.
+        state.phase='awaiting-postboot';state.postbootOwnsCompletion=true;saveJson(jobPath,state);
+        return;
+      }
+    }
     const client = await connectCanonical();
     try {
       const {thread}=await client.call('thread/read', { threadId: state.threadId, includeTurns: false });
