@@ -207,6 +207,17 @@ listener; the AppServer WebSocket remains loopback-only. See [MULTI-PC.md](MULTI
   completions. Task inventories are fetched serially, and a parent task that
   already completed one full subagent scan preserves known children while
   scanning only its newest ten turns for additions.
+- Posts identical startup/configuration advisories once per task: unrecognized
+  configuration settings, under-development features, and the combined user
+  instruction-size notice. Each binding retains only the latest full-message
+  fingerprint per advisory kind, surviving reconnects and Bridge restarts.
+  Changed content and other tasks are shown independently; unknown warnings,
+  errors, and guardian warnings keep their existing delivery behavior.
+  A durable `unknown` claim precedes the Discord send and becomes `posted` on
+  success. An uncertain send is not retried on repeated notifications, including
+  after restart. A crash between claiming and sending can therefore omit that
+  advisory; a channel lookup failure makes no claim. If a kind changes from A
+  to B and later back to A, A is shown again because only the latest is retained.
 - Treats transient communication failures across the Discord gateway, Discord
   REST, Codex app-server WebSocket, attachment fetches, DNS, TCP, and TLS as
   recoverable. Initial Discord login and setup retry with exponential backoff

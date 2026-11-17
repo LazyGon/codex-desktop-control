@@ -111,7 +111,7 @@ import { TaskChannelCreateJournal } from './task-channel-create-journal.mjs';
 import { TaskMirrorDeletions, missingDeletedThread } from './task-mirror-deletions.mjs';
 import { deliverCardWithSizeFallback } from './card-size-fallback.mjs';
 import { ImageReplayQueue, isPublishedImageCopy } from './published-image.mjs';
-import { codexRetryStatusText } from './communication-error.mjs';
+import { TaskDiagnosticPosts } from './task-diagnostic-posts.mjs';
 import {
   accountUsageEmbed,
   goalPayload,
@@ -693,6 +693,10 @@ export class DiscordController {
     this.client = client;
     this.codex = codex;
     this.stateStore = stateStore;
+    this.taskDiagnosticPosts = new TaskDiagnosticPosts({ stateStore,
+      fetchChannel: id => this.client.channels.fetch(id),
+      send: (channel, content) => channel.send(messageOptions(content)),
+    });
     this.config = config;
     this.authorizedUserIds = [...new Set(
       config.authorizedUserIds
@@ -7469,14 +7473,7 @@ export class DiscordController {
       else if (message.method === 'thread/tokenUsage/updated') this.#tokenUsageChanged(binding, message.params);
       else if (message.method === 'turn/completed') await this.#turnCompleted(binding, message.params);
       else if (message.method === 'error' || message.method === 'warning' || message.method === 'guardianWarning') {
-        // A terminal turn error is rendered by turn/completed's failed card.
-        // Keep retry progress and errors without a turn (no final card) visible.
-        if (message.method === 'error' && message.params?.willRetry === false && turnId) return;
-        const retryStatus = message.method === 'error' ? codexRetryStatusText(message.params) : null;
-        await this.#postTaskMessage(
-          binding,
-          retryStatus ?? `**${message.method}**\n${truncate(message.params?.message ?? JSON.stringify(message.params), 1800)}`,
-        );
+        await this.taskDiagnosticPosts.post(binding, message);
       }
     } catch (error) {
       this.#log('notification-handler-error', { method: message.method, error: error.stack ?? error.message });
