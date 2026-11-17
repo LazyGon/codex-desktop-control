@@ -19,6 +19,11 @@ export function postbootOwnsCompletion(operation) {
   return operation?.apiReturn===0 && ['restart-request-accepted','unknown-do-not-repeat'].includes(operation.phase);
 }
 
+export function sameActiveGoal(current,recorded) {
+  return current?.status==='active' && recorded?.status==='active'
+    && ['threadId','objective','tokenBudget','createdAt'].every(key=>current[key]===recorded[key]);
+}
+
 async function main() {
   const mode = process.argv[2];
   if (!process.argv[3]) throw new Error('An explicit local job JSON path is required.');
@@ -71,9 +76,14 @@ async function main() {
       const route=createRuntimeCompletionRoute(client,{endpoint:canonical.websocketUrl,expectedServerPid:canonical.serverProcessId,requestId:state.completionRouteRequestId});
       if(thread.status?.type==='notLoaded')await route.prepareDesktopThread(state.threadId);
       if(state.pausedGoalReadbackPath) {
-        const paused=readJson(state.pausedGoalReadbackPath);
-        if(paused.threadId!==state.threadId || !state.recordedGoal || paused.goal?.objective!==state.recordedGoal.objective || paused.goal?.createdAt!==state.recordedGoal.createdAt || paused.goal?.tokenBudget!==state.recordedGoal.tokenBudget)throw new Error('Wrong completion goal owner or original goal.');
-        state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);},{allowSourceInProgress:true});
+        if(fs.existsSync(state.pausedGoalReadbackPath)) {
+          const paused=readJson(state.pausedGoalReadbackPath);
+          if(paused.threadId!==state.threadId || !state.recordedGoal || paused.goal?.objective!==state.recordedGoal.objective || paused.goal?.createdAt!==state.recordedGoal.createdAt || paused.goal?.tokenBudget!==state.recordedGoal.tokenBudget)throw new Error('Wrong completion goal owner or original goal.');
+          state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);},{allowSourceInProgress:true});
+        } else {
+          const {goal}=await client.call('thread/goal/get',{threadId:state.threadId});
+          if(thread.status?.type!=='active'||!sameActiveGoal(goal,state.recordedGoal))throw new Error('No unchanged active source for a failure before maintenance pause.');
+        }
       }
       const instructions = state.completionInstructions ?? 'No reboot, firmware, or security changes are authorized without separate confirmation.';
       const message = `One-shot ${state.requestId} has finished its ${state.stage} worker. Read receipt ${state.receiptPath} and job ${jobPath} first. Continue only the authorized task described by this job. Do not repeat this worker or an uncertain operation. Preserve other tasks, workspace, permissions and model. ${instructions}`;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { workerArguments, deliveryFor, postbootOwnsCompletion } from './one-shot-job.mjs';
+import { workerArguments, deliveryFor, postbootOwnsCompletion, sameActiveGoal } from './one-shot-job.mjs';
 import { collectPins } from '../restart-signin/prepare.mjs';
 
 test('public callback runner uses one explicit script/job without per-job UAC or raw shell', () => {
@@ -38,4 +38,11 @@ test('accepted Windows restart leaves wake-up to the postboot receiver',()=>{
   assert.equal(postbootOwnsCompletion({phase:'restart-not-accepted',apiReturn:5}),false);
   assert.equal(postbootOwnsCompletion({phase:'unknown-do-not-repeat'}),false);
   assert.equal(postbootOwnsCompletion(null),false);
+});
+
+test('a failure before pause may notify only the same still-active goal',()=>{
+  const goal={threadId:'owner',objective:'Original task',status:'active',tokenBudget:null,createdAt:10};
+  assert.equal(sameActiveGoal({...goal},goal),true);
+  for(const changed of [{status:'paused'},{status:'complete'},{objective:'Other task'},{threadId:'other'},{tokenBudget:1},{createdAt:20}])assert.equal(sameActiveGoal({...goal,...changed},goal),false);
+  assert.equal(sameActiveGoal(null,goal),false);
 });

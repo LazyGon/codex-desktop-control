@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$JobPath)
 $ErrorActionPreference='Stop'
+$JobPath=(Resolve-Path -LiteralPath $JobPath).Path
 $job=Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $config=Get-Content -LiteralPath 'C:\ProgramData\CodexRestartSignIn\config.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 if($job.phase -ne 'prepared' -or $job.restoreRoot -ne 'C:\ProgramData\CodexRestartSignIn' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $config.userSid){throw 'Unprepared or wrong-user receiver.'}

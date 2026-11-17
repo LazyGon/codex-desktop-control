@@ -8,4 +8,10 @@ foreach($pin in $config.files){
     if($actual -ne $pin.sha256){throw 'Protected implementation hash changed.'}
 }
 if($Cancel){& (Join-Path $root 'Restore-RestartSignIn.ps1') -Cancel}
-else {& (Join-Path $root 'Invoke-RestartSignIn.ps1') -Mode $Mode -AuthorizationPath $AuthorizationPath -PostbootJobPath $PostbootJobPath}
+else {
+    if($Mode -eq 'Execute'){
+        $AuthorizationPath=(Resolve-Path -LiteralPath $AuthorizationPath).Path
+        $PostbootJobPath=(Resolve-Path -LiteralPath $PostbootJobPath).Path
+    }
+    & (Join-Path $root 'Invoke-RestartSignIn.ps1') -Mode $Mode -AuthorizationPath $AuthorizationPath -PostbootJobPath $PostbootJobPath
+}
