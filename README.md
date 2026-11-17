@@ -135,7 +135,8 @@ hidden or minimized window. Each Windows user/session and checkout has one
 progress window.
 
 **サーバーのみ起動** starts the canonical shared AppServer without Desktop. The
-equivalent command is `launcher/Start-CodexShared.ps1 -ServerOnly`. Desktop can
+equivalent command is `launcher/Start-CodexShared.ps1 -ServerOnly`. An open
+Desktop does not block this server-only request and is not closed. Desktop can
 attach later. Closing Desktop leaves the shared AppServer and Bridge available;
 an explicit runtime refresh or registered package replacement still uses the
 normal shutdown/update handoff.
@@ -162,10 +163,18 @@ single table-style launcher window. It reports App Server readiness, Desktop
 connection, Discord Bridge connection, and elapsed time. Reopening the launcher
 focuses that window rather than starting another window or another launch.
 Each component has a manual retry button, enabled after the current operation
-settles. An already-running Desktop is reported as skipped; a private Desktop
-is clearly distinguished from a verified shared connection. The Desktop retry
-can request a normal close of that disconnected Desktop before relaunching;
-it never force-kills it.
+settles. A verified shared Desktop is reused. If the same live Desktop is
+retrying the exact shared loopback endpoint after connection refusal, the launcher
+restores that AppServer and waits for Desktop to reconnect, without launching a
+second Desktop or rewriting its open UI state. A real WebSocket handshake,
+local initialization and owned TCP connection are still required for success;
+a past connection error alone is not readiness. Reconnection does not infer
+browser access settings from a process that this launch did not create.
+
+An unknown/private Desktop remains untouched. The Desktop retry can request its
+normal close before relaunching; it never force-kills it. Foreign endpoints,
+another process's logs and records predating the live process cannot select the
+reconnection path.
 
 Elapsed time freezes when startup completes, is skipped, is cancelled, or fails;
 an explicit retry resets it. A successful or skipped startup keeps its result

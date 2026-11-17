@@ -49,7 +49,9 @@ function Read-CodexDesktopStartupProgress {
         [Parameter(Mandatory)][object[]]$DesktopRoots,
         [Parameter(Mandatory)][hashtable]$Offsets,
         [Parameter(Mandatory)][object]$PackageInfo,
-        [hashtable]$SharedHandshakeByDesktop
+        [hashtable]$SharedHandshakeByDesktop,
+        [string]$ExpectedWebSocketUrl,
+        [hashtable]$SharedEndpointByDesktop
     )
     $logRoots=@(
         (Join-Path $env:LOCALAPPDATA 'Codex\Logs'),
@@ -77,9 +79,32 @@ function Read-CodexDesktopStartupProgress {
                         $eventTime=[DateTimeOffset]::MinValue
                         if(-not [DateTimeOffset]::TryParse($Matches[1],[ref]$eventTime) -or $eventTime -lt $started){continue}
                         $stage=Get-CodexDesktopStartupLogStage -Line $line
+                        if($null -ne $SharedEndpointByDesktop -and $ExpectedWebSocketUrl){
+                            $actor = "$($root.ProcessId)|$($started.UtcDateTime.Ticks)"
+                            if($line -match '\[AppServerConnection\]' -and
+                                $line -match '(?:^| )host(?:Id|Kind)=local(?: |$)'){
+                                if($line -match 'Starting app-server connection |app_server_connection\.websocket_error ' -and
+                                    (-not $SharedEndpointByDesktop.ContainsKey($actor) -or
+                                        $eventTime -ge $SharedEndpointByDesktop[$actor].At)){
+                                    $endpoint = $null
+                                    $refused = [regex]::Escape(($ExpectedWebSocketUrl -replace '^ws://',''))
+                                    if($line -match 'app_server_connection\.websocket_error ' -and
+                                        $line -match '(?:^| )errorCode=ECONNREFUSED(?: |$)' -and
+                                        $line -match ('(?:^| )message="connect ECONNREFUSED '+$refused+'"(?: |$)')){
+                                        $endpoint = $ExpectedWebSocketUrl
+                                    }
+                                    $SharedEndpointByDesktop[$actor] = @{ Endpoint = $endpoint; At = $eventTime }
+                                }
+                            }
+                        }
                         if($null -ne $SharedHandshakeByDesktop){
                             $actor = "$($root.ProcessId)|$($started.UtcDateTime.Ticks)"
-                            if($stage -eq 40 -and -not $SharedHandshakeByDesktop.ContainsKey($actor)){
+                            if($line -match '\[AppServerConnection\]' -and
+                                $line -match '(?:^| )host(?:Id|Kind)=local(?: |$)' -and
+                                $line -match 'Starting app-server connection |app_server_connection\.websocket_error |next=(?:error|disconnected)(?: |$)'){
+                                [void]$SharedHandshakeByDesktop.Remove($actor)
+                            }
+                            if($stage -eq 40){
                                 $SharedHandshakeByDesktop[$actor] = 'websocket-initialized'
                             }
                             elseif($stage -eq 50 -and $SharedHandshakeByDesktop[$actor] -eq 'websocket-initialized'){

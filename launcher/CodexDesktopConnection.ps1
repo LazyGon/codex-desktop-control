@@ -154,14 +154,94 @@ function Wait-DesktopSharedConnection {
     }
 }
 
+function Resolve-ExistingDesktopStartup {
+    param(
+        [Parameter(Mandatory)][object]$PackageInfo,
+        [Parameter(Mandatory)][int]$PortNumber,
+        [switch]$ServerOnly,
+        [switch]$RetryDesktop,
+        [switch]$DesktopBrowserAccessTrial
+    )
+
+    $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+    if ($DesktopBrowserAccessTrial -and $roots.Count -gt 0) {
+        throw 'Desktop is already running. Its launch settings were not changed.'
+    }
+    $result = [pscustomobject]@{ Handled = $false; ReconnectRoots = @() }
+    # A server-only request must not be blocked by a disconnected Desktop.
+    if ($ServerOnly -or $roots.Count -eq 0) { return $result }
+
+    $runtime = Get-ReusableRuntimeState -PackageInfo $PackageInfo -PortNumber $PortNumber -SuppressFailureLog
+    $connected = $null -ne $runtime -and
+        (Test-DesktopWebSocketConnection -DesktopExecutable $PackageInfo.DesktopExecutable -PortNumber $PortNumber)
+    $recordedOwner = $connected -and $runtime.desktopConnectionVerified -eq $true -and
+        @($roots | Where-Object { $_.ProcessId -notin $runtime.desktopProcessIds }).Count -eq 0
+    if ($recordedOwner) {
+        Write-LauncherLog "Desktop is already running; launch skipped. pid=$($roots.ProcessId -join ',') sharedConnected=True. No process was stopped."
+        Write-LauncherProgress -Phase 'skipped' -Summary 'すでに起動・共有接続済みのため、起動をスキップしました。' -ServerStatus '起動済み（スキップ）' -DesktopStatus '共有接続済み（スキップ）'
+        $result.Handled = $true
+        return $result
+    }
+
+    $expected = "ws://127.0.0.1:$PortNumber"
+    $endpoints = @{}
+    if (-not $connected) {
+        $null = Read-CodexDesktopStartupProgress -DesktopRoots $roots -Offsets @{} -PackageInfo $PackageInfo `
+            -ExpectedWebSocketUrl $expected -SharedEndpointByDesktop $endpoints
+    }
+    $waiting = @($roots | Where-Object {
+        $started = [DateTimeOffset]$_.CreationDate
+        $actor = "$($_.ProcessId)|$($started.UtcDateTime.Ticks)"
+        $endpoints.ContainsKey($actor) -and $endpoints[$actor].Endpoint -eq $expected
+    })
+    if ($connected -or $waiting.Count -eq $roots.Count) {
+        Write-LauncherLog "Existing Desktop targets the shared endpoint; restoring its connection without relaunch. pid=$($roots.ProcessId -join ',') endpoint=$expected"
+        $result.ReconnectRoots = $roots
+        return $result
+    }
+
+    if ($RetryDesktop) {
+        Write-LauncherProgress -Phase 'desktop-closing' -Summary 'Desktop を終了しています。' -DesktopStatus '正常終了待ち…'
+        foreach ($root in $roots) {
+            $live = Get-Process -Id $root.ProcessId -ErrorAction Stop
+            if (-not $live.CloseMainWindow()) { throw 'Desktop が正常終了の要求を受け付けませんでした。Desktop を通常の操作で終了してから再試行してください。' }
+        }
+        $closeDeadline = [DateTimeOffset]::Now.AddSeconds(30)
+        do {
+            Assert-LauncherNotCancelled
+            Start-Sleep -Milliseconds 250
+            $roots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+        } while ($roots.Count -gt 0 -and [DateTimeOffset]::Now -lt $closeDeadline)
+        if ($roots.Count -gt 0) { throw 'Desktop はトレイ等に残っています。Desktop を通常の操作で完全に終了してから再試行してください。強制終了は行っていません。' }
+        return $result
+    }
+
+    Write-LauncherLog "Desktop launch skipped: its shared endpoint is unconfirmed. pid=$($roots.ProcessId -join ','). No process was stopped."
+    Write-LauncherProgress -Phase 'skipped' -Summary 'Desktop は起動済みです。' -Detail '接続先を確認できません。Desktop の再試行か、共有 AppServer のみ起動を選んでください。' -ServerStatus '共有接続は未確認' -DesktopStatus '起動済み（スキップ）'
+    $result.Handled = $true
+    return $result
+}
+
 function Start-DesktopOnRuntime {
     param(
         [Parameter(Mandatory)][object]$PackageInfo,
         [Parameter(Mandatory)][object]$RuntimeState,
         [Parameter(Mandatory)][int]$PortNumber,
-        [switch]$DesktopBrowserAccessTrial
+        [switch]$DesktopBrowserAccessTrial,
+        [object[]]$ExistingDesktopRoots = @()
     )
 
+    if ($ExistingDesktopRoots.Count -gt 0) {
+        $currentRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+        foreach ($expectedRoot in $ExistingDesktopRoots) {
+            $matched = @($currentRoots | Where-Object {
+                $_.ProcessId -eq $expectedRoot.ProcessId -and
+                ([DateTimeOffset]$_.CreationDate).UtcDateTime.Ticks -eq ([DateTimeOffset]$expectedRoot.CreationDate).UtcDateTime.Ticks
+            })
+            if ($matched.Count -ne 1) { throw 'The existing Desktop identity changed before reconnection. No Desktop was launched or stopped.' }
+        }
+        if ($currentRoots.Count -ne $ExistingDesktopRoots.Count) { throw 'The existing Desktop set changed before reconnection.' }
+    }
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopExecutable' -Value $PackageInfo.DesktopExecutable
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopProcessIds' -Value @()
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $false
@@ -169,36 +249,42 @@ function Start-DesktopOnRuntime {
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' -Value $false
     Write-RuntimeState -State $RuntimeState
 
-    Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
-    Invoke-DesktopProjectSync -WebSocketUrl $RuntimeState.websocketUrl
-    Assert-LauncherNotCancelled
-    Set-UserWebSocketEnvironment -WebSocketUrl $RuntimeState.websocketUrl
-    Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
-    Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
-
-    Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
-    # Explorer/package activation can race environment broadcasts at logon.
-    # Start the installed package executable with an explicit inherited endpoint.
-    $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable `
-        -WebSocketUrl $RuntimeState.websocketUrl
-    $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
-    if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
-    Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"
-
-    $desktopRoots = @()
-    $launchWatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
+    if ($ExistingDesktopRoots.Count -gt 0) {
+        $desktopRoots = $currentRoots
+        Write-LauncherProgress -Phase 'desktop-connecting' -Summary 'Desktop の再接続を待っています。' -ServerStatus '起動済み' -DesktopStatus '共有接続待ち…'
+    }
+    else {
+        Write-LauncherProgress -Phase 'syncing-projects' -Summary '共有サーバーは起動済みです。Desktop のプロジェクトを確認しています。' -ServerStatus '起動済み'
+        Invoke-DesktopProjectSync -WebSocketUrl $RuntimeState.websocketUrl
         Assert-LauncherNotCancelled
-        $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
-        if ($desktopRoots.Count -gt 0) {
-            break
+        Set-UserWebSocketEnvironment -WebSocketUrl $RuntimeState.websocketUrl
+        Remove-Item Env:CODEX_APP_SERVER_FORCE_CLI -ErrorAction SilentlyContinue
+        Remove-Item Env:CODEX_APP_SERVER_USE_LOCAL_DAEMON -ErrorAction SilentlyContinue
+
+        Write-LauncherProgress -Phase 'desktop-starting' -Summary 'Desktop を起動しています。' -ServerStatus '起動済み' -DesktopStatus '起動中…'
+        # Explorer/package activation can race environment broadcasts at logon.
+        # Start the installed package executable with an explicit inherited endpoint.
+        $desktopStartInfo = New-CodexDesktopStartInfo -DesktopExecutable $PackageInfo.DesktopExecutable `
+            -WebSocketUrl $RuntimeState.websocketUrl
+        $startedDesktop = [Diagnostics.Process]::Start($desktopStartInfo)
+        if ($null -eq $startedDesktop) { throw 'The installed Desktop executable did not start.' }
+        Write-LauncherLog "Desktop executable started with explicit shared endpoint. pid=$($startedDesktop.Id) appId=$($PackageInfo.ApplicationUserModelId)"
+
+        $desktopRoots = @()
+        $launchWatch = [Diagnostics.Stopwatch]::StartNew()
+        while ($launchWatch.Elapsed.TotalSeconds -lt 30) {
+            Assert-LauncherNotCancelled
+            $desktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $PackageInfo.DesktopExecutable)
+            if ($desktopRoots.Count -gt 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
         }
-        Start-Sleep -Milliseconds 250
+        if ($desktopRoots.Count -eq 0) {
+            throw 'Codex Desktop did not start within 30 seconds.'
+        }
+        $script:launchedDesktopRoots = $desktopRoots
     }
-    if ($desktopRoots.Count -eq 0) {
-        throw 'Codex Desktop did not start within 30 seconds.'
-    }
-    $script:launchedDesktopRoots = $desktopRoots
 
     Set-RuntimeStateValue `
         -State $RuntimeState `
@@ -218,9 +304,11 @@ function Start-DesktopOnRuntime {
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopConnectionVerified' -Value $true
     Set-RuntimeStateValue -State $RuntimeState -Name 'mode' -Value 'desktop'
     Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessTrial' -Value ([bool]$DesktopBrowserAccessTrial)
-    Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' `
-        -Value ($desktopStartInfo.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_USE_LOCAL_DAEMON') -and
-            $desktopStartInfo.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'] -eq '1')
+    if ($ExistingDesktopRoots.Count -eq 0) {
+        Set-RuntimeStateValue -State $RuntimeState -Name 'desktopBrowserAccessCompatibility' `
+            -Value ($desktopStartInfo.EnvironmentVariables.ContainsKey('CODEX_APP_SERVER_USE_LOCAL_DAEMON') -and
+                $desktopStartInfo.EnvironmentVariables['CODEX_APP_SERVER_USE_LOCAL_DAEMON'] -eq '1')
+    }
     Set-RuntimeStateValue `
         -State $RuntimeState `
         -Name 'desktopProcessIds' `

@@ -633,42 +633,16 @@ try {
         )
     }
 
-    $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
-    if ($DesktopBrowserAccessTrial -and $existingDesktopRoots.Count -gt 0) {
-        throw 'Desktop is already running. Its launch settings were not changed.'
-    }
-    if (-not $SelfTest -and $RetryStep -eq 'Desktop' -and $existingDesktopRoots.Count -gt 0) {
-        $healthy = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port -SuppressFailureLog
-        if ($null -eq $healthy -or -not (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port)) {
-            Write-LauncherProgress -Phase 'desktop-closing' -Summary '指定された Desktop の再試行を行うため、正常終了を要求しています。' -DesktopStatus '正常終了待ち…'
-            foreach ($root in $existingDesktopRoots) {
-                $live = Get-Process -Id $root.ProcessId -ErrorAction Stop
-                if (-not $live.CloseMainWindow()) { throw 'Desktop が正常終了の要求を受け付けませんでした。Desktop を通常の操作で終了してから再試行してください。' }
-            }
-            $closeDeadline = [DateTimeOffset]::Now.AddSeconds(30)
-            do {
-                Assert-LauncherNotCancelled
-                Start-Sleep -Milliseconds 250
-                $existingDesktopRoots = @(Get-CodexDesktopRootProcesses -DesktopExecutable $packageInfo.DesktopExecutable)
-            } while ($existingDesktopRoots.Count -gt 0 -and [DateTimeOffset]::Now -lt $closeDeadline)
-            if ($existingDesktopRoots.Count -gt 0) { throw 'Desktop はトレイ等に残っています。Desktop を通常の操作で完全に終了してから再試行してください。強制終了は行っていません。' }
+    $existingDesktop = [pscustomobject]@{ Handled = $false; ReconnectRoots = @() }
+    if (-not $SelfTest) {
+        $existingDesktop = Resolve-ExistingDesktopStartup -PackageInfo $packageInfo -PortNumber $Port `
+            -ServerOnly:$ServerOnly -RetryDesktop:($RetryStep -eq 'Desktop') -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial
+        if ($existingDesktop.Handled) {
+            $exitCode = 0
+            $startupHandled = $true
         }
     }
-    if (-not $SelfTest -and $existingDesktopRoots.Count -gt 0) {
-        $processList = ($existingDesktopRoots.ProcessId -join ', ')
-        $alreadyShared = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port -SuppressFailureLog
-        $sharedConnected = $null -ne $alreadyShared -and (Test-DesktopWebSocketConnection -DesktopExecutable $packageInfo.DesktopExecutable -PortNumber $Port)
-        Write-LauncherLog "Desktop is already running; launch skipped. pid=$processList sharedConnected=$sharedConnected. No process was stopped."
-        if ($sharedConnected) {
-            Write-LauncherProgress -Phase 'skipped' -Summary 'すでに起動・共有接続済みのため、起動をスキップしました。' -ServerStatus '起動済み（スキップ）' -DesktopStatus '共有接続済み（スキップ）'
-        }
-        else {
-            Write-LauncherProgress -Phase 'skipped' -Summary 'Desktop はすでに起動済みです。重複起動をスキップしました。' -Detail 'この Desktop の共有接続は確認できません。公式から直接起動している場合は、その作業を終えて Desktop を終了し、共有ランチャーで起動してください。' -ServerStatus '共有接続は未確認' -DesktopStatus '起動済み（スキップ）'
-        }
-        $exitCode = 0
-        $startupHandled = $true
-    }
-    elseif (-not $SelfTest) {
+    if (-not $SelfTest -and -not $startupHandled) {
         $reusableRuntime = Get-ReusableRuntimeState -PackageInfo $packageInfo -PortNumber $Port
         if ($null -ne $reusableRuntime) {
             if ($DesktopBrowserAccessTrial) { throw 'Another App Server is still running. The trial was not applied.' }
@@ -680,7 +654,8 @@ try {
                 $null = Start-DesktopOnRuntime `
                     -PackageInfo $packageInfo `
                     -RuntimeState $reusableRuntime `
-                    -PortNumber $Port
+                    -PortNumber $Port `
+                    -ExistingDesktopRoots $existingDesktop.ReconnectRoots
                 Write-LauncherLog "Desktop attached to existing app-server. pid=$($reusableRuntime.serverProcessId)"
             }
             Invoke-LauncherSignal -Kind Ready
@@ -818,7 +793,8 @@ try {
                 -PackageInfo $packageInfo `
                 -RuntimeState $runtimeState `
                 -PortNumber $Port `
-                -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial
+                -DesktopBrowserAccessTrial:$DesktopBrowserAccessTrial `
+                -ExistingDesktopRoots $existingDesktop.ReconnectRoots
             Invoke-LauncherSignal -Kind Ready
 
             $exit = Wait-CodexDesktopRuntimeExit -Runtime $runtimeState -Server $serverProcess -StateRoot $stateRoot -CacheRoot $cacheRoot -StartupStallSeconds $DesktopConnectionStallSeconds -Log { param($Message) Write-LauncherLog $Message }
