@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { readJson, saveJson, connectCanonical, taskSnapshot } from '../control/shared-task-operations.mjs';
-import { restoreRecordedPause } from '../control/paused-goal-continuation.mjs';
+import { restoreRecordedPause, assertRecordedPause } from '../control/paused-goal-continuation.mjs';
 import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-desktop.mjs';
 import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -30,6 +30,15 @@ async function waitIdle(job) {
           if(canonical.serverProcessId!==job.previousServerPid || !canonical.desktopConnectionVerified) throw new Error('Canonical runtime changed before restart.');
           const snapshot=await taskSnapshot(client,job.threadId);
           if(decideIdle(snapshot,job.workspace)==='ready'){
+            const post=readJson(job.postbootPath??path.join(path.dirname(job.authorizationPath),'postboot.json'));
+            if(post.pausedGoalReadbackPath) {
+              const paused=readJson(post.pausedGoalReadbackPath);
+              const [{goal},turns]=await Promise.all([
+                client.call('thread/goal/get',{threadId:job.threadId}),
+                client.call('thread/turns/list',{threadId:job.threadId,limit:1,sortDirection:'desc',itemsView:'notLoaded'})
+              ]);
+              assertRecordedPause(paused,goal,turns.data?.[0]);
+            }
             // Admission has already authenticated this owner and permission profile.
             // Do not steal a loaded Desktop task just to read its settings.
             done=true;resolve();
