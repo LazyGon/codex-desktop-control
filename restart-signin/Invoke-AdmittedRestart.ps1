@@ -4,7 +4,8 @@ $job=Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $auth=Get-Content -LiteralPath $job.authorizationPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if($job.operationId -ne $auth.operationId -or $job.threadId -ne $auth.threadId -or $job.workspace -ne $auth.workspace -or $identity.User.Value -ne $auth.userSid -or -not ([Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))){throw 'Exact owning restart/admin identity required.'}
-$wrapper=Join-Path $job.workspace 'restart-signin\Run-RestartSignIn.ps1'
+$config=Get-Content -LiteralPath 'C:\ProgramData\CodexRestartSignIn\config.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+$wrapper=Join-Path $config.controlRoot 'restart-signin\Run-RestartSignIn.ps1'
 if((Get-FileHash -LiteralPath $wrapper -Algorithm SHA256).Hash -ne $job.restartWrapperSha256){throw 'Reviewed restart wrapper changed.'}
 if(Test-Path -LiteralPath $job.receiptPath){throw 'Receipt already exists; never replay this operation.'}
 $receipt=[ordered]@{operationId=$job.operationId;threadId=$job.threadId;phase='admitted-preflight-and-own-idle-wait';pid=$PID;userSid=$identity.User.Value;elevated=$true;startedAt=[DateTimeOffset]::Now.ToString('o');authorizationPath=$job.authorizationPath;postbootPath=$job.postbootPath;restartIssued=$false}

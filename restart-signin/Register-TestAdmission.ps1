@@ -2,12 +2,13 @@ param([Parameter(Mandatory)][string]$JobPath)
 $ErrorActionPreference='Stop'
 $job=Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $config=Get-Content -LiteralPath 'C:\ProgramData\CodexAdminTerminal\config.json' -Raw -Encoding UTF8 | ConvertFrom-Json
-if($job.phase -ne 'prepared' -or $job.requireStandardUac -or $job.workspace -ne $config.controlRoot -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $config.userSid){throw 'Exact prepared limited admission required.'}
+$authorization=Get-Content -LiteralPath $job.authorizationPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if($job.phase -ne 'prepared' -or $job.requireStandardUac -or $job.threadId -ne $authorization.threadId -or $job.workspace -ne $authorization.workspace -or -not (Test-Path -LiteralPath $job.workspace -PathType Container) -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $config.userSid){throw 'Exact prepared limited admission required.'}
 if(Get-ScheduledTask -TaskName $job.schedulerTask -ErrorAction SilentlyContinue){throw 'Admission task exists; never recreate.'}
 foreach($item in @(@{file=$job.adminScript;sha256=$job.adminExpectedScriptSha256},@{file=$job.workerScript;sha256=$job.workerExpectedSha256},@{file=$config.nodePath;sha256=$config.nodeSha256})){
     if((Get-FileHash -LiteralPath $item.file -Algorithm SHA256).Hash -ne $item.sha256){throw 'Admission execution source changed.'}
 }
-$controller=Join-Path $job.workspace 'control\one-shot-job.mjs'
+$controller=Join-Path $config.controlRoot 'control\one-shot-job.mjs'
 if(-not $job.sourcePins){throw 'Pinned continuation sources are required for a new admission.'}
 foreach($pin in $job.sourcePins){if((Get-FileHash -LiteralPath $pin.file -Algorithm SHA256).Hash -ne $pin.sha256){throw 'Pinned admission controller dependency changed.'}}
 $arguments='"'+$controller+'" run "'+$JobPath+'"'
