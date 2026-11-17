@@ -77,6 +77,18 @@ locked state remains unproven. Any additional test requires fresh restart
 authorization. See the operation's `sign-in-verification.json` and
 `state/windows-maintenance-20261011/maintenance-status-latest.json`.
 
+Restart preparation binds the exact ordinary Desktop owner and its real
+workspace; it does not require the control utility to own Product work. A loaded
+task is read without `thread/resume`; postboot loading uses the existing native
+Desktop completion route. Restore only the recorded maintenance pause, matching
+objective, budget, creation and pause timestamps, and preserving usage. A later
+user stop/change or an uncertain mutation prevents automatic restoration.
+`Refresh-RestartDependencies.ps1` may refresh reviewed dependency pins through
+the common admin host only while the sign-in lease is idle and all historical
+restart operations are terminal. It preserves those operations, protected
+executable assets, the previous config and its ACL. Do not use the historical
+unused-install updater against a completed installation.
+
 ## Crash recovery copies
 
 - Before crash repair, inspect `%LOCALAPPDATA%/CodexRecovery/current.json`, its

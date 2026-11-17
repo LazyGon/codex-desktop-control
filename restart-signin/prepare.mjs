@@ -23,9 +23,10 @@ async function prepare(threadId,authorizationReference) {
   const client=await connectCanonical();
   try {
     const own=(await client.call('thread/read',{threadId,includeTurns:false})).thread;
-    if(path.resolve(own.cwd).toLowerCase()!==repo.toLowerCase())throw new Error('Run from this maintenance owner workspace; do not borrow a task ID.');
-    const settings=await client.call('thread/resume',{threadId,excludeTurns:true});
-    if(settings.approvalPolicy!=='never'||settings.sandbox?.type!=='dangerFullAccess')throw new Error('Owner admin-delegation profile unsupported.');
+    if(own.id!==threadId || !own.cwd || own.source!=='vscode' || own.canAcceptDirectInput!==true)throw new Error('An exact ordinary Desktop owner workspace is required.');
+    // The protected admin guard verifies the live approval/sandbox at admission.
+    // Reading a loaded Desktop task must not reload it through this client.
+    const {goal}=await client.call('thread/goal/get',{threadId});
     const canonical=readJson(path.join(repo,'launcher/state/current.json'));
     const {stdout}=await run('C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command','(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")'],{windowsHide:true});
     const previousBoot=stdout.trim();if(!Number.isFinite(Date.parse(previousBoot)))throw new Error('Boot identity unverified.');
@@ -33,7 +34,7 @@ async function prepare(threadId,authorizationReference) {
     const authorizationPath=path.join(dir,'authorization.json'),postbootPath=path.join(dir,'postboot.json');
     const sourcePins=collectPins([path.join(repo,'restart-signin/session.mjs'),path.join(repo,'restart-signin/Run-RestartSignIn.ps1'),path.join(repo,'restart-signin/Register-PostbootReceiver.ps1'),config.nodePath]);
     saveJson(authorizationPath,{operationId,phase:'prepared',threadId,workspace:own.cwd,userSid:config.userSid,previousBoot,previousServerPid:canonical.serverProcessId,authorizationPath,authorizationReference,restartAuthorized:true,restartSignInAuthorized:true,sourcePins});
-    saveJson(postbootPath,{operationId,phase:'prepared',threadId,workspace:own.cwd,previousBoot,restoreRoot:'C:\\ProgramData\\CodexRestartSignIn',sourcePins,schedulerTask:'Codex Restart Sign-In Resume '+operationId,recordedSettings:Object.fromEntries(['model','modelProvider','approvalPolicy','sandbox','cwd','reasoningEffort'].filter(k=>settings[k]!==undefined).map(k=>[k,settings[k]])),completionInstructions:'Verify this one-shot sign-in test separately from the already completed maintenance restart; do not restart Windows again.'});
+    saveJson(postbootPath,{operationId,phase:'prepared',threadId,workspace:own.cwd,previousBoot,restoreRoot:'C:\\ProgramData\\CodexRestartSignIn',sourcePins,schedulerTask:'Codex Restart Sign-In Resume '+operationId,recordedSettings:Object.fromEntries(['model','modelProvider','cwd','reasoningEffort'].filter(k=>own[k]!==undefined).map(k=>[k,own[k]])),recordedGoal:goal,pausedGoalReadbackPath:goal?.status==='active'?path.join(dir,'paused-goal-readback.json'):null,completionInstructions:'Continue this one explicitly authorized restart only. Verify the protected result, new boot, original sign-in setting restoration and exact saved task/goal identities. Do not repeat the restart, feature operation or any UNKNOWN operation. Other tasks may be restored only from the separately saved exact pre-restart active-task snapshot and the current user authorization.'});
     console.log(JSON.stringify({operationId,authorizationPath,postbootPath,phase:'prepared-not-reboot-armed',restarted:false}));
   }finally{client.close();}
 }

@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { readJson, saveJson, connectCanonical, deliveryFor, taskSnapshot } from '../control/shared-task-operations.mjs';
+import { readJson, saveJson, connectCanonical, taskSnapshot } from '../control/shared-task-operations.mjs';
+import { restoreRecordedPause } from '../control/paused-goal-continuation.mjs';
+import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-desktop.mjs';
+import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export function decideIdle(snapshot,workspace) {
   if(path.resolve(snapshot.own.cwd).toLowerCase()!==path.resolve(workspace).toLowerCase()) throw new Error('Owner workspace changed.');
@@ -27,9 +30,8 @@ async function waitIdle(job) {
           if(canonical.serverProcessId!==job.previousServerPid || !canonical.desktopConnectionVerified) throw new Error('Canonical runtime changed before restart.');
           const snapshot=await taskSnapshot(client,job.threadId);
           if(decideIdle(snapshot,job.workspace)==='ready'){
-            // Read latest settings without starting a turn or applying any settings override.
-            const settings=await client.call('thread/resume',{threadId:job.threadId,excludeTurns:true});
-            if(settings.approvalPolicy!=='never' || settings.sandbox?.type!=='dangerFullAccess') throw new Error('Owner privileges changed; do not cross its boundary.');
+            // Admission has already authenticated this owner and permission profile.
+            // Do not steal a loaded Desktop task just to read its settings.
             done=true;resolve();
           }
         }catch(error){done=true;reject(error);}finally{busy=false;if(again&&!done){again=false;queueMicrotask(check);}}
@@ -64,15 +66,20 @@ async function logon(jobPath) {
             verifyPins(state.sourcePins);
             const own=(await client.call('thread/read',{threadId:state.threadId,includeTurns:false})).thread;
             if(path.resolve(own.cwd).toLowerCase()!==path.resolve(state.workspace).toLowerCase())throw new Error('Owner workspace changed.');
-            await client.call('thread/resume',{threadId:state.threadId,excludeTurns:true});
-            const turns=await client.call('thread/turns/list',{threadId:state.threadId,limit:10,sortDirection:'desc',itemsView:'notLoaded'});
-            const active=turns.data.find(t=>t.status==='inProgress')??null;
-            const message=`One-shot restart sign-in completed a new boot and restored the original sign-in setting. Read ${jobPath} and protected operation ${state.operationId} first. Verify actual ARSO versus manual sign-in, normal opt-out restored, lock state, administrator host, canonical Desktop/Bridge, owner settings and other stopped tasks. No repeated restart, installer, password reading, other-task resume or settings override. ${state.completionInstructions??''}`;
-            const [method,params]=deliveryFor(state.threadId,active,message);
-            state.phase='dispatching';state.deliveryMethod=method;state.expectedTurnId=active?.id??null;saveJson(jobPath,state);
-            const result=await client.call(method,params);const accepted=result.turn?.id??result.turnId;
-            if(!accepted||(active&&accepted!==active.id))throw new Error('Delivery uncertain; do not resend.');
-            state.phase='delivered';state.acceptedTurnId=accepted;state.deliveredAt=new Date().toISOString();saveJson(jobPath,state);done=true;resolve();
+            for(const key of ['model','modelProvider','cwd','reasoningEffort']) {
+              if(state.recordedSettings?.[key]!==undefined&&own[key]!==state.recordedSettings[key])throw new Error('Owner settings changed; do not override.');
+            }
+            const route=createRuntimeCompletionRoute(client,{endpoint:canonical.websocketUrl,expectedServerPid:canonical.serverProcessId,requestId:state.operationId});
+            if(own.status?.type==='notLoaded')await route.prepareDesktopThread(state.threadId);
+            if(state.pausedGoalReadbackPath) {
+              const paused=readJson(state.pausedGoalReadbackPath);
+              if(paused.threadId!==state.threadId || paused.goal?.objective!==state.recordedGoal?.objective || paused.goal?.createdAt!==state.recordedGoal?.createdAt || paused.goal?.tokenBudget!==state.recordedGoal?.tokenBudget)throw new Error('Restart goal pause does not match its original owner.');
+              state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);});
+            }
+            const message=`One authorized restart completed a new boot and restored the original sign-in setting. Read ${jobPath} and protected operation ${state.operationId} first. Verify actual ARSO versus manual sign-in, normal opt-out restored, lock state, administrator host, canonical Desktop/Bridge and original task settings. No repeated restart, installer, password reading, UNKNOWN resend or settings override. ${state.completionInstructions??''}`;
+            state.phase='dispatching';saveJson(jobPath,state);
+            const result=await deliverRuntimeCompletion(client,state.threadId,message,route);
+            state.phase='delivered';state.acceptedTurnId=result.turnId;state.deliveryMethod=result.mode;state.deliveredAt=new Date().toISOString();saveJson(jobPath,state);done=true;resolve();
           }finally{client.close();}
         }catch(error){done=true;reject(error);}finally{busy=false;if(again&&!done){again=false;queueMicrotask(check);}}
       };

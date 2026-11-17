@@ -2,8 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readJson, saveJson, deliveryFor, connectCanonical } from './shared-task-operations.mjs';
+import { restoreRecordedPause } from './paused-goal-continuation.mjs';
+import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-desktop.mjs';
+import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
 export { deliveryFor } from './shared-task-operations.mjs';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,18 +50,23 @@ async function main() {
     state.workerExit = outcome; state.phase = 'ready'; state.workerFinishedAt = new Date().toISOString(); saveJson(jobPath, state);
     const client = await connectCanonical();
     try {
-      await client.call('thread/read', { threadId: state.threadId, includeTurns: false });
-      await client.call('thread/resume', { threadId: state.threadId, excludeTurns: true });
-      const turns = await client.call('thread/turns/list', { threadId: state.threadId, limit: 10, sortDirection: 'desc', itemsView: 'notLoaded' });
-      const active = turns.data.find(x => x.status === 'inProgress') ?? null;
+      const {thread}=await client.call('thread/read', { threadId: state.threadId, includeTurns: false });
+      if(state.workspace&&path.resolve(thread.cwd).toLowerCase()!==path.resolve(state.workspace).toLowerCase())throw new Error('Completion owner workspace changed.');
+      const canonical=readJson(path.join(repository,'launcher/state/current.json'));
+      state.completionRouteRequestId??=randomUUID();saveJson(jobPath,state);
+      const route=createRuntimeCompletionRoute(client,{endpoint:canonical.websocketUrl,expectedServerPid:canonical.serverProcessId,requestId:state.completionRouteRequestId});
+      if(thread.status?.type==='notLoaded')await route.prepareDesktopThread(state.threadId);
+      if(state.pausedGoalReadbackPath) {
+        const paused=readJson(state.pausedGoalReadbackPath);
+        if(paused.threadId!==state.threadId || !state.recordedGoal || paused.goal?.objective!==state.recordedGoal.objective || paused.goal?.createdAt!==state.recordedGoal.createdAt || paused.goal?.tokenBudget!==state.recordedGoal.tokenBudget)throw new Error('Wrong completion goal owner or original goal.');
+        state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);});
+      }
       const instructions = state.completionInstructions ?? 'No reboot, firmware, or security changes are authorized without separate confirmation.';
       const message = `One-shot ${state.requestId} has finished its ${state.stage} worker. Read receipt ${state.receiptPath} and job ${jobPath} first. Continue only the authorized task described by this job. Do not repeat this worker or an uncertain operation. Preserve other tasks, workspace, permissions and model. ${instructions}`;
-      const [method, params] = deliveryFor(state.threadId, active, message);
-      state.phase = 'dispatching'; state.deliveryMethod = method; state.deliveryTurnId = active?.id ?? null; saveJson(jobPath, state);
-      const result = await client.call(method, params);
-      if (method === 'turn/start' && !result.turn?.id) throw new Error('Mutation returned no accepted turn ID. Do not resend.');
-      if (method === 'turn/steer' && result.turnId !== active?.id) throw new Error('Steer did not confirm the expected exact turn ID. Do not resend.');
-      state.acceptedTurnId = result.turn?.id ?? result.turnId;
+      state.phase = 'dispatching';saveJson(jobPath, state);
+      const result = await deliverRuntimeCompletion(client,state.threadId,message,route);
+      state.deliveryMethod=result.mode;
+      state.acceptedTurnId = result.turnId;
       state.deliveryResult = result; state.phase = 'delivered'; state.deliveredAt = new Date().toISOString(); saveJson(jobPath, state);
     } finally { client.close(); }
   } catch (error) {
