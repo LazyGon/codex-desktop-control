@@ -42,3 +42,14 @@ test('a user interruption or a newer turn prevents both restart admission and re
   assert.throws(()=>assertRecordedPause(record,paused,{id:'saved-turn',status:'interrupted'}),/interrupted/);
   assert.throws(()=>assertRecordedPause(record,paused,{id:'newer-user-turn',status:'completed'}),/changed/);
 });
+
+test('failure callback can restore the same still-running source but cannot override a user stop or newer turn',async()=>{
+  const record={threadId:'owner',turnId:'saved-turn',goal:paused};
+  const active={id:'saved-turn',status:'inProgress'};
+  assert.throws(()=>assertRecordedPause(record,paused,active),/changed or was interrupted/);
+  assert.doesNotThrow(()=>assertRecordedPause(record,paused,active,{allowSourceInProgress:true}));
+  assert.throws(()=>assertRecordedPause(record,paused,{id:'saved-turn',status:'interrupted'},{allowSourceInProgress:true}));
+  assert.throws(()=>assertRecordedPause(record,paused,{id:'new-user-turn',status:'inProgress'},{allowSourceInProgress:true}));
+  const f=fixture();const client={call:(method,args)=>method==='thread/turns/list'?Promise.resolve({data:[active]}):f.client.call(method,args)};
+  assert.equal((await restoreRecordedPause(client,record,()=>{},{allowSourceInProgress:true})).status,'active');
+});

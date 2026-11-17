@@ -73,7 +73,7 @@ async function main() {
       if(state.pausedGoalReadbackPath) {
         const paused=readJson(state.pausedGoalReadbackPath);
         if(paused.threadId!==state.threadId || !state.recordedGoal || paused.goal?.objective!==state.recordedGoal.objective || paused.goal?.createdAt!==state.recordedGoal.createdAt || paused.goal?.tokenBudget!==state.recordedGoal.tokenBudget)throw new Error('Wrong completion goal owner or original goal.');
-        state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);});
+        state.restoredGoal=await restoreRecordedPause(client,paused,()=>{state.phase='restoring-recorded-goal';saveJson(jobPath,state);},{allowSourceInProgress:true});
       }
       const instructions = state.completionInstructions ?? 'No reboot, firmware, or security changes are authorized without separate confirmation.';
       const message = `One-shot ${state.requestId} has finished its ${state.stage} worker. Read receipt ${state.receiptPath} and job ${jobPath} first. Continue only the authorized task described by this job. Do not repeat this worker or an uncertain operation. Preserve other tasks, workspace, permissions and model. ${instructions}`;

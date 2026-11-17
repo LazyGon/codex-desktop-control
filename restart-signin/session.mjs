@@ -2,10 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { readJson, saveJson, connectCanonical, taskSnapshot } from '../control/shared-task-operations.mjs';
+import { readJson, saveJson, connectCanonical } from '../control/shared-task-operations.mjs';
 import { restoreRecordedPause, assertRecordedPause } from '../control/paused-goal-continuation.mjs';
 import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-desktop.mjs';
-import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
+import { deliverRuntimeCompletion, inspectLoadedActivity } from '../launcher/runtime-update-drain.mjs';
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export function decideIdle(snapshot,workspace) {
   if(path.resolve(snapshot.own.cwd).toLowerCase()!==path.resolve(workspace).toLowerCase()) throw new Error('Owner workspace changed.');
@@ -14,6 +14,18 @@ export function decideIdle(snapshot,workspace) {
 }
 export function verifyPins(pins) {
   for(const pin of pins) if(createHash('sha256').update(fs.readFileSync(pin.file)).digest('hex').toUpperCase()!==pin.sha256) throw new Error('Reviewed continuation dependency changed.');
+}
+export async function restartOwnerReady(client,job) {
+  const [{thread:own},turns]=await Promise.all([
+    client.call('thread/read',{threadId:job.threadId,includeTurns:false}),
+    client.call('thread/turns/list',{threadId:job.threadId,limit:1,sortDirection:'desc',itemsView:'notLoaded'})
+  ]);
+  if(own.id!==job.threadId)throw new Error('Restart owner identity changed.');
+  const activeTurn=turns.data?.find(turn=>turn.status==='inProgress')??null;
+  if(decideIdle({own,activeTurn,otherActive:[]},job.workspace)!=='ready')return false;
+  // Runtime liveness is the existing double-read loaded census. Historical
+  // thread-list rows are not evidence of a process or model still running.
+  return (await inspectLoadedActivity(client)).idle;
 }
 async function waitIdle(job) {
   const client=await connectCanonical();
@@ -28,8 +40,7 @@ async function waitIdle(job) {
           verifyPins(job.sourcePins);
           const canonical=readJson(path.join(repo,'launcher/state/current.json'));
           if(canonical.serverProcessId!==job.previousServerPid || !canonical.desktopConnectionVerified) throw new Error('Canonical runtime changed before restart.');
-          const snapshot=await taskSnapshot(client,job.threadId);
-          if(decideIdle(snapshot,job.workspace)==='ready'){
+          if(await restartOwnerReady(client,job)){
             const post=readJson(job.postbootPath??path.join(path.dirname(job.authorizationPath),'postboot.json'));
             if(post.pausedGoalReadbackPath) {
               const paused=readJson(post.pausedGoalReadbackPath);
