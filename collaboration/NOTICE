@@ -1,0 +1,7 @@
+Claude/Codex peer collaboration
+Adapted from wywwzjj/adversarial-peers
+https://github.com/wywwzjj/adversarial-peers
+Upstream commit: 42dda97e96f590191fee673abcf0f927e85529a6
+Original distribution: Apache-2.0 (see LICENSE).
+Local modifications: canonical shared AppServer transport, operation journal,
+Windows Claude CLI adapter, host-specific skills and mobile launcher.
