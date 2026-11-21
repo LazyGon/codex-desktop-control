@@ -1,0 +1,4 @@
+/reports/
+/*.log
+/diagnostic.json
+/node-location.txt
