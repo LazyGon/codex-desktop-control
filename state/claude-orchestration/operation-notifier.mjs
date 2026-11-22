@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { retireThread } from './retire-threads.mjs';
+import { rolloutOutcome } from '../../collaboration/rollout-truth.mjs';
 
 const MIN_INTERVAL_MS = 10 * 60_000;
 const RETRY_INTERVAL_MS = 15 * 60_000;
 const MAX_ATTEMPTS = 3;
-const TERMINAL_PHASES = new Set(['completed', 'failed', 'result-unavailable', 'unknown-do-not-resend']);
+const TERMINAL_PHASES = new Set(['completed', 'failed', 'not-delivered', 'unknown', 'result-unavailable', 'unknown-do-not-resend']);
 
 export function createOperationNotifier({ directory, resultsDirectory, notify, log, retire = retireThread, now = Date.now }) {
   const markers = path.join(directory, '.notified');
@@ -55,10 +56,23 @@ export function createOperationNotifier({ directory, resultsDirectory, notify, l
         }
         if (attempt && (attempt.attempts >= MAX_ATTEMPTS || time - attempt.lastAttemptAt < RETRY_INTERVAL_MS)) continue;
         if (!TERMINAL_PHASES.has(result.phase)) continue;
+        if (result.phase === 'failed' || result.phase === 'result-unavailable') {
+          // peer.mjs can report waiter-side failures while the turn is still running; trust the rollout.
+          const outcome = rolloutOutcome(result.threadId, result.turnId);
+          if (outcome?.type === 'task_complete') {
+            result.phase = 'completed'; result.answer = outcome.answer; result.verifiedBy = 'rollout';
+          } else if (outcome?.type === 'turn_aborted') {
+            result.phase = 'failed'; result.verifiedBy = 'rollout';
+          } else {
+            if (result.verifiedBy === 'thread/read' && ['completed', 'failed', 'interrupted', 'aborted'].includes(result.status)) {
+              result.phase = result.status === 'completed' ? 'completed' : 'failed';
+            } else if (result.threadId && result.turnId) continue;
+          }
+        }
         const excerpt = { ...result };
         if (typeof excerpt.answer === 'string') excerpt.answer = Array.from(excerpt.answer).slice(0, 1500).join('');
         operations.push({ operationId, request, result, prompt:
-          `Codex依頼 ${operationId} が ${result.phase} で終了。note: ${request.note ?? ''}。result.json の内容（answerは先頭1500字まで）を読んで検証・報告し、次の手順に進んでください\n` +
+          `Codex依頼 ${operationId}: ${['unknown', 'unknown-do-not-resend'].includes(result.phase) ? '配送結果不明・再送禁止' : result.phase === 'not-delivered' ? '未配送・再配送可能' : result.phase + ' で終了'}。note: ${request.note ?? ''}。result.json の内容（answerは先頭1500字まで）を読んで検証・報告し、次の手順に進んでください\n` +
           resultFile + '\n' + JSON.stringify(excerpt, null, 2) });
       } catch (e) {
         if (e.code !== 'ENOENT') log({ watchOps: 'read-failed', operationId, code: e.code ?? e.name });

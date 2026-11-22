@@ -51,9 +51,23 @@ A connection that only reads and starts/steers an existing thread is not subscri
 by those calls. The waiter therefore reads the exact accepted turn immediately and
 every 45 seconds, with notifications as an earlier wakeup when available. It never
 resumes a Desktop-owned thread to acquire a subscription or resends accepted work.
-Terminal readback feeds the usual durable result and completion notifier.
+The rollout task_complete/turn_aborted event is the terminal truth; an exact
+terminal thread/read is also accepted. Servers without history projection are
+detected once per connection and read from the rollout instead. Disconnects,
+missing projections and read errors remain pending with waiterWarning; they
+never mark the task failed. Terminal readback feeds the durable result and notifier.
 The notice deadline does not terminate the worker. Detached requests are not offered
 without a durable completion route. No automatic peer review loop or goal reactivation is installed.
+
+Results use accepted, completed, failed (an actual failed/aborted turn),
+not-delivered (input was never issued or was explicitly rejected), or unknown (do not resend).
+If Desktop loading fails before input dispatch, deliveryEvidence records the
+unsent boundary and latest thread/rollout identity. The returned fallback offers
+`deliveryRoute: "appserver"`: send a fresh operation ID to the same thread with
+that option. It loads only a currently unloaded thread, preserves settings, and
+starts or steers its current exact turn. No automatic resend follows an uncertain
+turn/start or turn/steer. A completed turn may have answerAvailable: false while
+its answer projection is unavailable; this does not change its terminal phase.
 
 Operation journals and raw Claude envelopes are local under
 `state/agent-collaboration/`. An existing UUID is never dispatched again. If a

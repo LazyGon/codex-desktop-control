@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJson, saveJson } from '../control/shared-task-operations.mjs';
-import { connectPeer, inspectPeer, sendPeer, turnAnswer, waitPeer } from './codex-peer.mjs';
+import { connectPeer, inspectPeer, sendPeer, turnAnswer, waitPeer, taskPhase } from './codex-peer.mjs';
 import { askClaude } from './claude-peer.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -11,21 +11,25 @@ export function operationDirectory(id, stateRoot = path.join(root, 'state/agent-
   return path.join(stateRoot, id);
 }
 
-export async function runRequest(request, { stateRoot, connect = connectPeer, claude = askClaude } = {}) {
+export async function runRequest(request, { stateRoot, connect = connectPeer, claude = askClaude, routeFactory, waitOptions } = {}) {
   const action = request.action ?? 'ask';
   if (!['codex', 'claude'].includes(request.peer)) throw new Error('peer must be codex or claude.');
   if (action === 'status') {
     const file = path.join(operationDirectory(request.operationId, stateRoot), 'result.json');
     const record = readJson(file);
     if (record.peer === 'codex' && record.accepted && record.threadId && record.turnId && record.phase !== 'completed') {
-      const { client } = await connect();
+      record.phase = taskPhase(record);
+      let client;
       try {
+        ({ client } = await connect());
         const result = await turnAnswer(client, record.threadId, record.turnId);
-        const phase = result.status === 'inProgress' ? 'accepted'
-          : result.status === 'completed' ? (result.answerAvailable ? 'completed' : 'result-unavailable') : 'failed';
-        record.previousPhase = record.phase;
-        Object.assign(record, result, { phase, observedAt: new Date().toISOString() }); saveJson(file, record);
-      } finally { client.close(); }
+        Object.assign(record, result, { phase: taskPhase(result), observedAt: new Date().toISOString() });
+      } catch (error) {
+        const result = await turnAnswer({ call: async () => { throw error; } }, record.threadId, record.turnId);
+        Object.assign(record, result, { phase: taskPhase(result) });
+      }
+      finally { client?.close(); }
+      saveJson(file, record);
     }
     return record;
   }
@@ -81,19 +85,20 @@ export async function runRequest(request, { stateRoot, connect = connectPeer, cl
       record.phase = 'completed';
     } else {
       const connection = await connect(); client = connection.client;
-      await sendPeer({ ...connection, request, message: delegatedMessage, record, persist });
-      const result = await waitPeer(client, record.threadId, record.turnId);
-      Object.assign(record, result, { phase: result.status === 'completed'
-        ? (result.answerAvailable ? 'completed' : 'result-unavailable') : 'failed' });
+      await sendPeer({ ...connection, request, message: delegatedMessage, record, persist, routeFactory });
+      const result = await waitPeer(client, record.threadId, record.turnId, { ...waitOptions, onUpdate: observed => {
+        Object.assign(record, observed, { phase: taskPhase(observed), observedAt: new Date().toISOString() }); persist(record);
+      } });
+      Object.assign(record, result, { phase: taskPhase(result) });
     }
     record.updatedAt = new Date().toISOString(); persist(record); return record;
   } catch (error) {
     record.error = error.message;
     if (error.peerResult) Object.assign(record, error.peerResult);
-    if (error.knownFailure || error.notDispatched) record.phase = 'failed';
-    else if (['creating', 'dispatching'].includes(record.phase)) record.phase = 'unknown-do-not-resend';
-    else if (record.phase === 'accepted') record.phase = 'result-unavailable';
-    else record.phase = 'failed';
+    if (request.peer === 'claude' && error.knownFailure) record.phase = 'failed';
+    else if (record.accepted) { record.waiterWarning = error.message; record.error = null; record.phase = 'accepted'; }
+    else if (error.notDispatched || !['creating', 'dispatching'].includes(record.phase)) record.phase = 'not-delivered';
+    else record.phase = 'unknown';
     persist(record); return record;
   } finally { clearTimeout(notice); client?.close(); }
 }
@@ -103,7 +108,7 @@ async function main() {
   if (!requestPath || extra.length) throw new Error('Usage: node collaboration/peer.mjs REQUEST.json (message text stays in messageFile).');
   const result = await runRequest(readJson(path.resolve(requestPath)));
   process.stdout.write(JSON.stringify(result) + '\n');
-  if (['failed', 'unknown-do-not-resend', 'result-unavailable'].includes(result.phase)) process.exitCode = 1;
+  if (['failed', 'unknown', 'not-delivered'].includes(result.phase)) process.exitCode = 1;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });

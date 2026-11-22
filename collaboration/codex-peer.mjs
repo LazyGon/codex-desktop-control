@@ -1,24 +1,13 @@
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { validateSharedRuntime, sharedStatePath } from '../control/codex-shared.mjs';
 import { connectCanonical, readJson, deliveryFor } from '../control/shared-task-operations.mjs';
 import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-desktop.mjs';
-import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
+import { rolloutOutcome, rolloutTurn } from './rollout-truth.mjs';
 
 const completionMonitors = new WeakMap();
+const unsupportedHistory = new WeakSet();
 const peerModels = new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra']);
 const peerEfforts = new Set(['low', 'medium', 'high', 'xhigh']);
-
-async function readHistoryPage(client, params) {
-  for (let attempt = 0; ; attempt++) {
-    try { return await client.call('thread/turns/list', params); }
-    catch (error) {
-      if (attempt >= 9 || !error.message.includes('rollout at ') || !error.message.includes(' is empty')) throw error;
-      // The accepted first input can precede the metadata projection. Retry only this read.
-      await delay(Math.min(500, 50 * 2 ** attempt));
-    }
-  }
-}
 
 export async function connectPeer() {
   const before = readJson(sharedStatePath);
@@ -36,28 +25,25 @@ export async function connectPeer() {
 export async function inspectPeer(client, threadId, turnId = null) {
   const { thread } = await client.call('thread/read', { threadId, includeTurns: false });
   const { goal } = await client.call('thread/goal/get', { threadId });
-  return { thread, goal, ...await readTurn(client, threadId, turnId) };
+  return { thread, goal, ...await readTurn(client, threadId, turnId, thread) };
 }
 
-async function readTurn(client, threadId, turnId = null) {
-  let turn, cursor;
-  do {
-    let page;
+async function readTurn(client, threadId, turnId = null, metadata = null) {
+  if (!unsupportedHistory.has(client)) {
     try {
-      page = await readHistoryPage(client, {
-        threadId, limit: 100, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}),
-      });
+      const { thread } = await client.call('thread/read', { threadId, includeTurns: true });
+      const turns = thread.turns ?? [];
+      return { turn: (turnId ? turns.find(t => t.id === turnId) : turns.at(-1)) ?? null, materialized: turns.length > 0 };
     } catch (error) {
-      if (!turnId && error.message.includes('is not materialized yet') && error.message.includes('before first user message')) {
+      if (error.code === -32601 || /"code":-32601/.test(error.message)) unsupportedHistory.add(client);
+      else if (!turnId && /before first user message|rollout at .* is empty/.test(error.message)) {
         return { turn: null, materialized: false };
-      }
-      throw error;
+      } else throw error;
     }
-    turn = turnId ? page.data.find(t => t.id === turnId) : page.data[0];
-    cursor = page.nextCursor;
-  } while (!turn && turnId && cursor);
-  if (turnId && !turn) throw new Error('The exact requested turn was not found.');
-  return { turn: turn ?? null };
+  }
+  metadata ??= (await client.call('thread/read', { threadId, includeTurns: false })).thread;
+  const turn = rolloutTurn(threadId, turnId, { file: metadata.path });
+  return { turn, materialized: !!turn, verifiedBy: 'rollout' };
 }
 
 function requireRunnableGoal(goal) {
@@ -73,6 +59,9 @@ export async function sendPeer({ client, runtime, request, message, record, pers
     if (request[key] !== undefined && !allowed.has(request[key])) {
       throw Object.assign(new Error(`${key} must be one of: ${[...allowed].join(', ')}.`), { notDispatched: true });
     }
+  }
+  if (request.deliveryRoute !== undefined && !['desktop', 'appserver'].includes(request.deliveryRoute)) {
+    throw Object.assign(new Error('deliveryRoute must be desktop or appserver.'), { notDispatched: true });
   }
   const canonical = readJson(runtime.statePath);
   const route = routeFactory(client, {
@@ -105,82 +94,96 @@ export async function sendPeer({ client, runtime, request, message, record, pers
   };
   client.on('notification', capture);
   completionMonitors.set(client, { completed, capture });
-  record.phase = 'dispatching'; persist(record);
-  const guardedClient = { call: async (method, params, ...rest) => {
-    if (method === 'turn/start' || method === 'turn/steer') {
-      const { goal } = await client.call('thread/goal/get', { threadId: request.threadId });
-      requireRunnableGoal(goal);
+  let mutationAttempted = false;
+  try {
+    if (before.thread.status?.type === 'notLoaded') {
+      record.phase = 'preparing'; persist(record);
+      route.verifyRuntime();
+      if (request.deliveryRoute === 'appserver') {
+        // Only an unloaded task may be loaded here. Never resume a loaded owner.
+        const { thread } = await client.call('thread/read', { threadId: request.threadId, includeTurns: false });
+        if (thread.status?.type === 'notLoaded') await client.call('thread/resume', { threadId: request.threadId, excludeTurns: true });
+      } else {
+        await route.prepareDesktopThread(request.threadId);
+      }
     }
-    return client.call(method, params, ...rest);
-  } };
-  let delivery;
-  if (before.materialized === false) {
-    // The server explicitly reports that an empty thread has no turn history yet.
+    // Read current goal and exact turn after loading, immediately before dispatch.
+    const latest = await inspectPeer(client, request.threadId);
+    requireRunnableGoal(latest.goal);
+    if (latest.thread.status?.type === 'active' && latest.turn?.status !== 'inProgress') {
+      throw new Error('The running turn is not projected yet; no peer input was sent.');
+    }
+    const active = latest.turn?.status === 'inProgress' ? latest.turn : null;
+    const [method, params] = deliveryFor(request.threadId, active, message);
     route.verifyRuntime();
-    const [method, params] = deliveryFor(request.threadId, null, message);
-    const result = await guardedClient.call(method, params);
-    if (!result.turn?.id) throw new Error('First turn outcome is unknown; do not repeat.');
-    delivery = { accepted: true, threadId: request.threadId, turnId: result.turn.id, mode: 'start' };
-  } else {
-    delivery = await deliverRuntimeCompletion(guardedClient, request.threadId, message, route);
+    record.phase = 'dispatching'; persist(record);
+    mutationAttempted = true;
+    const result = await client.call(method, params);
+    const turnId = result?.turn?.id ?? result?.turnId;
+    if (!turnId || (active && turnId !== active.id) || (result.threadId && result.threadId !== request.threadId)) {
+      throw new Error('Peer delivery uncertain; do not resend.');
+    }
+    const delivery = { accepted: true, threadId: request.threadId, turnId, mode: active ? 'steer' : 'start' };
+    Object.assign(record, delivery, { phase: 'accepted' }); persist(record);
+    return delivery;
+  } catch (error) {
+    const rejected = /"code":-3260[012](?:,|})/.test(error.message);
+    if (!mutationAttempted || rejected) {
+      error.notDispatched = true;
+      record.deliveryEvidence = { previousTurnId: before.turn?.id ?? null, turnMutationAttempted: mutationAttempted, ...(rejected ? { inputRejected: true } : {}) };
+      try {
+        const after = await inspectPeer(client, request.threadId);
+        Object.assign(record.deliveryEvidence, { threadStatus: after.thread.status, lastTurnId: after.turn?.id ?? null,
+          rolloutPath: after.thread.path });
+      } catch (readError) { record.waiterWarning = readError.message; }
+      record.fallback = { deliveryRoute: 'appserver', threadId: request.threadId, safeToResend: true };
+    }
+    throw error;
   }
-  Object.assign(record, delivery, { phase: 'accepted' }); persist(record);
-  return delivery;
+}
+
+const terminalStatuses = new Set(['completed', 'failed', 'interrupted', 'aborted']);
+export function taskPhase(result) {
+  return result.status === 'completed' ? 'completed' : terminalStatuses.has(result.status) ? 'failed' : 'accepted';
 }
 
 export async function turnAnswer(client, threadId, turnId) {
-  const { turn } = await readTurn(client, threadId, turnId);
-  const messages = [];
-  let cursor;
-  do {
-    const page = await client.call('thread/items/list', {
-      threadId, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}),
-    });
-    for (const entry of page.data ?? []) {
-      if (entry.turnId === turnId && entry.item?.type === 'agentMessage') messages.push(entry.item);
-    }
-    cursor = page.nextCursor;
-    if (messages.some(m => m.phase === 'final_answer') || !cursor) break;
-  } while (cursor);
-  const finals = messages.filter(m => m.phase == null || ['final_answer', 'final'].includes(m.phase));
-  return { threadId, turnId, status: turn?.status ?? 'unavailable',
-    answerAvailable: finals.length > 0,
-    answer: finals.reverse().map(m => m.text ?? '').join('\n'),
-    error: turn?.error ?? null };
+  const base = { threadId, turnId, status: 'inProgress', answerAvailable: false, answer: '', error: null };
+  try {
+    const outcome = rolloutOutcome(threadId, turnId);
+    if (outcome) return { ...base, status: outcome.type === 'task_complete' ? 'completed' : 'interrupted',
+      answerAvailable: outcome.type === 'task_complete', answer: outcome.answer, verifiedBy: 'rollout' };
+    const { turn, verifiedBy } = await readTurn(client, threadId, turnId);
+    if (!turn) return { ...base, waiterWarning: 'The exact requested turn is not projected yet.' };
+    const finals = (turn.items ?? []).filter(m => m.type === 'agentMessage' && (m.phase == null || ['final_answer', 'final'].includes(m.phase)));
+    return { ...base, status: turn.status, error: turn.error ?? null, answerAvailable: (verifiedBy === 'rollout' && turn.status === 'completed') || finals.length > 0,
+      answer: turn.answer ?? finals.map(m => m.text ?? '').join('\n'), verifiedBy: verifiedBy ?? 'thread/read' };
+  } catch (error) { return { ...base, waiterWarning: error.message }; }
 }
 
-export async function waitPeer(client, threadId, turnId, { pollIntervalMs = 45_000 } = {}) {
+export async function waitPeer(client, threadId, turnId, { pollIntervalMs = 45_000, onUpdate = () => {} } = {}) {
   const monitor = completionMonitors.get(client);
-  let wake, rejectWake;
-  let completionSeen = monitor?.completed.has(turnId) ?? false;
-  const notify = message => {
-    if (message.method === 'turn/completed' && message.params?.threadId === threadId
-      && message.params?.turn?.id === turnId) {
-      completionSeen = true;
-      wake?.();
-    }
+  let wake;
+  const notify = event => {
+    if (event.method === 'turn/completed' && event.params?.threadId === threadId && event.params?.turn?.id === turnId) wake?.();
   };
-  const disconnected = () => rejectWake?.(new Error('Shared AppServer disconnected; the accepted operation must not be resent.'));
+  const disconnected = () => wake?.();
   client.on('notification', notify);
   client.on('disconnected', disconnected);
   try {
-    // Existing-thread reads/start/steer do not subscribe this connection. Do not
-    // resume a Desktop-owned thread just to receive events: read its exact turn.
-    // Always read immediately, including when sendPeer installed a monitor.
     while (true) {
-      const observed = await readTurn(client, threadId, turnId);
-      if (['completed', 'failed', 'interrupted'].includes(observed.turn?.status)) break;
-      if (!client.connected) throw new Error('Shared AppServer disconnected; the accepted operation must not be resent.');
+      // Notifications only wake this read. Neither missing events nor failed reads end a turn.
+      const result = await turnAnswer(client, threadId, turnId);
+      onUpdate(result);
+      if (terminalStatuses.has(result.status)) return result;
       let timer;
       try {
-        await new Promise((resolve, reject) => {
-          wake = resolve; rejectWake = reject;
-          // A received completion can precede the persisted terminal projection.
-          timer = setTimeout(resolve, completionSeen ? 250 : pollIntervalMs);
+        await new Promise(resolve => {
+          wake = resolve;
+          timer = setTimeout(resolve, monitor?.completed.has(turnId) ? 250 : pollIntervalMs);
         });
-      } finally { clearTimeout(timer); wake = rejectWake = null; }
+      } finally { clearTimeout(timer); wake = null; }
     }
-    return turnAnswer(client, threadId, turnId);
   } finally {
     client.off('notification', notify); client.off('disconnected', disconnected);
     if (monitor) { client.off('notification', monitor.capture); completionMonitors.delete(client); }
