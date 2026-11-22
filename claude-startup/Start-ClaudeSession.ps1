@@ -22,6 +22,16 @@ function Find-Session {
 }
 function Save-Outcome([string]$Status,$Processes,[int]$Attempt=0) {
     $value=[ordered]@{at=[DateTimeOffset]::Now.ToString('o');session=$Session;status=$Status;attempt=$Attempt;pids=@($Processes | ForEach-Object ProcessId);debugFile=$debug}
+    if($Session -eq 'Conversation'){
+        foreach($sessionProcess in @($Processes)){
+            $live=Get-Process -Id $sessionProcess.ProcessId -ErrorAction Stop
+            $connection=Publish-ClaudeMobileConnection -SessionDirectory (Join-Path $env:USERPROFILE '.claude/sessions') `
+                -ProcessId $live.Id -ProcessStartFileTime ($live.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()) `
+                -ExpectedSessionId $script:ClaudeConversationSessionId `
+                -OutputPath (Join-Path $root 'state/agent-collaboration/mobile.json') -LaunchStatus $Status
+            if($null -ne $connection){$value['remoteControl']=$connection}
+        }
+    }
     $value | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $state ($Session+'-status.json')) -Encoding UTF8
     $value | ConvertTo-Json -Compress
 }
@@ -32,7 +42,7 @@ try {
     if($existing.Count){Save-Outcome 'already-running' $existing;return}
     if($CheckOnly){Save-Outcome 'not-running-check-only' @();return}
     $arguments=if($Session -eq 'Conversation'){
-        '--resume 5467c555-7279-5b55-b8ce-e262b1e2e1f7 --remote-control --permission-mode bypassPermissions'
+        '--resume '+$script:ClaudeConversationSessionId+' --remote-control --permission-mode bypassPermissions'
     } else {
         '--model claude-haiku-5-5 --effort low --permission-mode bypassPermissions --name 雑談Haiku --remote-control 雑談Haiku'
     }

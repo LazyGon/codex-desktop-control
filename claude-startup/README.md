@@ -11,6 +11,13 @@ minimized in `~/Documents/ChatGPT/その他`. The conversation resumes session
 Both use the explicitly requested `bypassPermissions` mode and remote control.
 No prompt is submitted by the launcher.
 
+The conversation launch also records its current phone URL in
+`state/agent-collaboration/mobile.json`, using Claude's live session metadata.
+That URL can change when the remote bridge is recreated even though the local
+conversation and its history are unchanged. Use the recorded current URL rather
+than an earlier standalone server's link. Publishing this record does not restart
+Claude or submit a prompt.
+
 An existing matching Claude process in the same Windows session is left running.
 A named mutex prevents overlapping launcher calls. A launch that exits is retried
 once after 30 seconds. A live process without a CCRClient heartbeat is recorded
