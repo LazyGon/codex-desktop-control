@@ -104,3 +104,34 @@ test('Desktop readiness reads appended handshake lines even when the directory l
   fs.rmSync(temporary,{recursive:true,force:true});
  }
 });
+
+test('Desktop accepts its app-server utility log without accepting unrelated, reused, or split-process handshakes', () => {
+ const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'codex-utility-handshake-'));
+ try {
+  const created=new Date(Date.now()-3000), childStarted=new Date(created.getTime()+1000), stamp=new Date().toISOString();
+  const day=[created.getFullYear(),String(created.getMonth()+1).padStart(2,'0'),String(created.getDate()).padStart(2,'0')].join('/');
+  const dir=path.join(temporary,'Codex','Logs',day);fs.mkdirSync(dir,{recursive:true});
+  const ws=stamp+' info [AppServerConnection] initialize_handshake_result outcome=success transportKind=websocket\n';
+  const local=stamp+' info [AppServerConnection] app_server_connection.state_changed hostId=local initialized=true next=connected pendingClientRequests=0\n';
+  const childLog=path.join(dir,'codex-desktop-fixture-303-t0-0.log');
+  fs.writeFileSync(path.join(dir,'codex-desktop-fixture-101-t0-0.log'),ws);
+  fs.writeFileSync(childLog,local);
+  for(const pid of [505,606,707])fs.writeFileSync(path.join(dir,`codex-desktop-fixture-${pid}-t0-0.log`),ws+local);
+  const result=JSON.parse(run([
+   `$env:LOCALAPPDATA=${literal(temporary)}`,
+   `$created=[DateTimeOffset]${literal(created.toISOString())}; $childStarted=[DateTimeOffset]${literal(childStarted.toISOString())}`,
+   "$exe='C:\\fixture\\ChatGPT.exe'",
+   "function Get-CimInstance { @([pscustomobject]@{ProcessId=303;ParentProcessId=101;CreationDate=$childStarted;ExecutablePath=$exe},[pscustomobject]@{ProcessId=505;ParentProcessId=999;CreationDate=$childStarted;ExecutablePath=$exe},[pscustomobject]@{ProcessId=606;ParentProcessId=101;CreationDate=$created.AddSeconds(-1);ExecutablePath=$exe},[pscustomobject]@{ProcessId=707;ParentProcessId=101;CreationDate=$childStarted;ExecutablePath='C:\\different\\ChatGPT.exe'}) }",
+   '$roots=@([pscustomobject]@{ProcessId=101;CreationDate=$created}); $package=[pscustomobject]@{PackageFamilyName="fixture";DesktopExecutable=$exe}; $offsets=@{}; $states=@{}',
+   '$null=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   "$before=($states.Values -contains 'local-connected')",
+   `[IO.File]::AppendAllText(${literal(childLog)},${literal(ws+local)})`,
+   '$null=Read-CodexDesktopStartupProgress $roots $offsets $package -SharedHandshakeByDesktop $states',
+   `@($before,($states["101|$($created.UtcDateTime.Ticks)"] -eq 'local-connected'))|ConvertTo-Json`,
+  ].join('; ')));
+  assert.deepEqual(result,[false,true]);
+ } finally {
+  assert.equal(path.dirname(path.resolve(temporary)),path.resolve(os.tmpdir()));
+  fs.rmSync(temporary,{recursive:true,force:true});
+ }
+});

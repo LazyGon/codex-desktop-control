@@ -44,6 +44,38 @@ function Get-CodexDesktopStartupLogStage {
     return 0
 }
 
+function Get-CodexDesktopLogProcesses {
+    param([object[]]$DesktopRoots, [object]$PackageInfo)
+
+    $snapshot = @()
+    if ($PackageInfo.PSObject.Properties['DesktopExecutable']) {
+        $snapshot = @(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'" -ErrorAction Stop)
+    }
+    foreach ($desktop in $DesktopRoots) {
+        $owned = @{}
+        $owned[[int]$desktop.ProcessId] = $desktop
+        do {
+            $added = $false
+            foreach ($candidate in $snapshot) {
+                if ($owned.ContainsKey([int]$candidate.ProcessId) -or
+                    -not $owned.ContainsKey([int]$candidate.ParentProcessId) -or
+                    $candidate.ExecutablePath -ne $PackageInfo.DesktopExecutable) { continue }
+                $parent = $owned[[int]$candidate.ParentProcessId]
+                if (([DateTimeOffset]$candidate.CreationDate) -lt ([DateTimeOffset]$parent.CreationDate)) { continue }
+                $owned[[int]$candidate.ProcessId] = $candidate
+                $added = $true
+            }
+        } while ($added)
+        foreach ($process in $owned.Values) {
+            [pscustomobject]@{
+                ProcessId = $process.ProcessId
+                CreationDate = $process.CreationDate
+                DesktopActor = "$($desktop.ProcessId)|$(([DateTimeOffset]$desktop.CreationDate).UtcDateTime.Ticks)"
+            }
+        }
+    }
+}
+
 function Read-CodexDesktopStartupProgress {
     param(
         [Parameter(Mandatory)][object[]]$DesktopRoots,
@@ -58,7 +90,7 @@ function Read-CodexDesktopStartupProgress {
         (Join-Path $env:LOCALAPPDATA ('Packages\'+$PackageInfo.PackageFamilyName+'\LocalCache\Local\Codex\Logs'))
     )
     $maxStage=0
-    foreach($root in $DesktopRoots){
+    foreach($root in @(Get-CodexDesktopLogProcesses -DesktopRoots $DesktopRoots -PackageInfo $PackageInfo)){
         $started=[DateTimeOffset]$root.CreationDate
         $days=@($started.LocalDateTime.ToString('yyyy/MM/dd'),$started.UtcDateTime.ToString('yyyy/MM/dd'))|Select-Object -Unique
         foreach($base in $logRoots){foreach($day in $days){
@@ -80,7 +112,7 @@ function Read-CodexDesktopStartupProgress {
                         if(-not [DateTimeOffset]::TryParse($Matches[1],[ref]$eventTime) -or $eventTime -lt $started){continue}
                         $stage=Get-CodexDesktopStartupLogStage -Line $line
                         if($null -ne $SharedEndpointByDesktop -and $ExpectedWebSocketUrl){
-                            $actor = "$($root.ProcessId)|$($started.UtcDateTime.Ticks)"
+                            $actor = $root.DesktopActor
                             if($line -match '\[AppServerConnection\]' -and
                                 $line -match '(?:^| )host(?:Id|Kind)=local(?: |$)'){
                                 if($line -match 'Starting app-server connection |app_server_connection\.websocket_error ' -and
@@ -103,12 +135,14 @@ function Read-CodexDesktopStartupProgress {
                                 $line -match '(?:^| )host(?:Id|Kind)=local(?: |$)' -and
                                 $line -match 'Starting app-server connection |app_server_connection\.websocket_error |next=(?:error|disconnected)(?: |$)'){
                                 [void]$SharedHandshakeByDesktop.Remove($actor)
+                                [void]$SharedHandshakeByDesktop.Remove($root.DesktopActor)
                             }
                             if($stage -eq 40){
                                 $SharedHandshakeByDesktop[$actor] = 'websocket-initialized'
                             }
                             elseif($stage -eq 50 -and $SharedHandshakeByDesktop[$actor] -eq 'websocket-initialized'){
                                 $SharedHandshakeByDesktop[$actor] = 'local-connected'
+                                $SharedHandshakeByDesktop[$root.DesktopActor] = 'local-connected'
                             }
                         }
                         if($stage -gt $maxStage){$maxStage=$stage}
