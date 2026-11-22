@@ -1,4 +1,5 @@
 ﻿$script:ClaudeConversationSessionId='5467c555-7279-5b55-b8ce-e262b1e2e1f7'
+$script:ClaudeHaikuSessionId='00e7448d-db05-4a56-a669-0fc8254d1f56'
 
 function Test-ClaudeSessionCommand([string]$CommandLine,[string]$Session) {
     if($Session -eq 'Conversation'){

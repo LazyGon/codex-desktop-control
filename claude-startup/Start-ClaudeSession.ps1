@@ -42,9 +42,9 @@ try {
     if($existing.Count){Save-Outcome 'already-running' $existing;return}
     if($CheckOnly){Save-Outcome 'not-running-check-only' @();return}
     $arguments=if($Session -eq 'Conversation'){
-        '--resume '+$script:ClaudeConversationSessionId+' --remote-control --permission-mode bypassPermissions'
+        '--resume '+$script:ClaudeConversationSessionId+' --remote-control Surface-collaboration --permission-mode bypassPermissions'
     } else {
-        '--model claude-haiku-5-5 --effort low --permission-mode bypassPermissions --name 雑談Haiku --remote-control 雑談Haiku'
+        '--resume '+$script:ClaudeHaikuSessionId+' --model claude-haiku-5-5 --effort low --permission-mode bypassPermissions --name 雑談Haiku --remote-control 雑談Haiku'
     }
     $arguments+=' --debug-file "'+$debug+'"'
     for($attempt=1;$attempt -le 2;$attempt++){

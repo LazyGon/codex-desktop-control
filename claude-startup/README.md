@@ -7,9 +7,12 @@ locked. Registration does not start either session.
 
 The windowless Python entry runs the PowerShell launcher, which opens Claude
 minimized in `~/Documents/ChatGPT/その他`. The conversation resumes session
-`5467c555-7279-5b55-b8ce-e262b1e2e1f7`; Haiku starts a fresh named conversation.
+`5467c555-7279-5b55-b8ce-e262b1e2e1f7`; Haiku resumes the named conversation
+`00e7448d-db05-4a56-a669-0fc8254d1f56`.
 Both use the explicitly requested `bypassPermissions` mode and remote control.
-No prompt is submitted by the launcher.
+No prompt is submitted by the launcher. Both retain the bridge pointer saved by
+Claude in their conversation transcripts. Names do not select a registration.
+See [registration persistence and reboot checks](../docs/claude-remote-registration.md).
 
 The conversation launch also records its current phone URL in
 `state/agent-collaboration/mobile.json`, using Claude's live session metadata.
