@@ -149,34 +149,36 @@ export async function turnAnswer(client, threadId, turnId) {
     error: turn?.error ?? null };
 }
 
-export async function waitPeer(client, threadId, turnId) {
+export async function waitPeer(client, threadId, turnId, { pollIntervalMs = 45_000 } = {}) {
   const monitor = completionMonitors.get(client);
-  let resolveFinished, rejectFinished;
-  const finished = new Promise((resolve, reject) => { resolveFinished = resolve; rejectFinished = reject; });
-  finished.catch(() => {});
+  let wake, rejectWake;
+  let completionSeen = monitor?.completed.has(turnId) ?? false;
   const notify = message => {
     if (message.method === 'turn/completed' && message.params?.threadId === threadId
-      && message.params?.turn?.id === turnId) resolveFinished();
+      && message.params?.turn?.id === turnId) {
+      completionSeen = true;
+      wake?.();
+    }
   };
-  const disconnected = () => rejectFinished(new Error('Shared AppServer disconnected; the accepted operation must not be resent.'));
+  const disconnected = () => rejectWake?.(new Error('Shared AppServer disconnected; the accepted operation must not be resent.'));
   client.on('notification', notify);
   client.on('disconnected', disconnected);
   try {
-    // Readback closes the gap between dispatch and subscription. Later waits use events, not RPC polling.
-    if (monitor?.completed.has(turnId)) resolveFinished();
-    if (!monitor) {
-      const initial = await readTurn(client, threadId, turnId);
-      if (initial.turn?.status !== 'inProgress') return turnAnswer(client, threadId, turnId);
-    }
-    if (!client.connected) disconnected();
-    await finished;
-    // Completion can reach the socket before the shared history projection catches up.
-    // Observe that same turn becoming terminal; never turn a transient inProgress read into failure.
-    let observed = await readTurn(client, threadId, turnId);
-    while (observed.turn?.status === 'inProgress') {
-      if (!client.connected) throw new Error('Disconnected before terminal readback; do not resend the accepted request.');
-      await delay(250);
-      observed = await readTurn(client, threadId, turnId);
+    // Existing-thread reads/start/steer do not subscribe this connection. Do not
+    // resume a Desktop-owned thread just to receive events: read its exact turn.
+    // Always read immediately, including when sendPeer installed a monitor.
+    while (true) {
+      const observed = await readTurn(client, threadId, turnId);
+      if (['completed', 'failed', 'interrupted'].includes(observed.turn?.status)) break;
+      if (!client.connected) throw new Error('Shared AppServer disconnected; the accepted operation must not be resent.');
+      let timer;
+      try {
+        await new Promise((resolve, reject) => {
+          wake = resolve; rejectWake = reject;
+          // A received completion can precede the persisted terminal projection.
+          timer = setTimeout(resolve, completionSeen ? 250 : pollIntervalMs);
+        });
+      } finally { clearTimeout(timer); wake = rejectWake = null; }
     }
     return turnAnswer(client, threadId, turnId);
   } finally {

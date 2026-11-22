@@ -187,3 +187,51 @@ test('known Claude failure keeps its continuation identity', async t => {
   });
   assert.equal(result.phase, 'failed'); assert.equal(result.sessionId, 'retain-me');
 });
+
+for (const status of ['completed', 'failed', 'interrupted']) {
+  test('unsubscribed follow-up reaches ' + status + ' without a completion event or resend', async () => {
+    const client = new Client();
+    const original = client.call.bind(client);
+    let started = false, terminal = false;
+    client.call = async (method, params) => {
+      if (method === 'turn/start') started = true;
+      if (method === 'thread/turns/list' && terminal) {
+        return { data: [
+          { id: 'later-turn', status: 'inProgress' },
+          { id: 'new-turn', status, error: status === 'failed' ? { message: 'capacity' } : null },
+        ] };
+      }
+      if (method === 'thread/turns/list' && started) {
+        terminal = true;
+        return { data: [{ id: 'new-turn', status: 'inProgress' }] };
+      }
+      if (method === 'thread/items/list') return { data: [{ turnId: 'new-turn', item: { type: 'agentMessage', phase: 'final_answer', text: 'saved outcome' } }] };
+      return original(method, params);
+    };
+    await sendPeer({ client, runtime, request: { threadId: 'chosen', operationId: randomUUID() }, message: 'follow-up', record: {}, persist() {}, routeFactory });
+    const result = await waitPeer(client, 'chosen', 'new-turn', { pollIntervalMs: 5 });
+    assert.equal(result.status, status);
+    assert.equal(result.answer, 'saved outcome');
+    assert.equal(client.calls.filter(([m]) => m === 'turn/start').length, 1);
+    assert.equal(client.listenerCount('notification'), 0);
+    assert.equal(client.listenerCount('disconnected'), 0);
+  });
+}
+
+test('status recovers a missed completion into durable result without sending work', async t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-recovery-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const operationId = randomUUID(), directory = path.join(temporary, operationId);
+  fs.mkdirSync(directory);
+  const file = path.join(directory, 'result.json');
+  fs.writeFileSync(file, JSON.stringify({ operationId, peer: 'codex', accepted: true, phase: 'accepted', threadId: 'chosen', turnId: 'finished' }));
+  const client = new Client();
+  client.call = async method => {
+    if (method === 'thread/turns/list') return { data: [{ id: 'finished', status: 'completed' }] };
+    if (method === 'thread/items/list') return { data: [{ turnId: 'finished', item: { type: 'agentMessage', phase: 'final_answer', text: 'actual outcome' } }] };
+    throw new Error('No mutation permitted: ' + method);
+  };
+  const result = await runRequest({ peer: 'codex', action: 'status', operationId }, { stateRoot: temporary, connect: async () => ({ client }) });
+  assert.equal(result.phase, 'completed');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).answer, 'actual outcome');
+});

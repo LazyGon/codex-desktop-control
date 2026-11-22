@@ -46,6 +46,12 @@ the user's normal permissions and may be blocked by an unanswered approval.
 `status` reads an operation's durable outcome without dispatch; `read` reads an
 exact Codex thread/turn, and `list` discovers matching ordinary Codex tasks. The
 default `ask` waits for the exact turn, with a progress notice at five minutes.
+Completion notifications are connection subscriptions, not global broadcasts.
+A connection that only reads and starts/steers an existing thread is not subscribed
+by those calls. The waiter therefore reads the exact accepted turn immediately and
+every 45 seconds, with notifications as an earlier wakeup when available. It never
+resumes a Desktop-owned thread to acquire a subscription or resends accepted work.
+Terminal readback feeds the usual durable result and completion notifier.
 The notice deadline does not terminate the worker. Detached requests are not offered
 without a durable completion route. No automatic peer review loop or goal reactivation is installed.
 
