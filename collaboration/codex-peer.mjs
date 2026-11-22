@@ -6,6 +6,8 @@ import { createRuntimeCompletionRoute } from '../launcher/runtime-completion-des
 import { deliverRuntimeCompletion } from '../launcher/runtime-update-drain.mjs';
 
 const completionMonitors = new WeakMap();
+const peerModels = new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra']);
+const peerEfforts = new Set(['low', 'medium', 'high', 'xhigh']);
 
 async function readHistoryPage(client, params) {
   for (let attempt = 0; ; attempt++) {
@@ -67,6 +69,11 @@ function requireRunnableGoal(goal) {
 }
 
 export async function sendPeer({ client, runtime, request, message, record, persist, routeFactory = createRuntimeCompletionRoute }) {
+  for (const [key, allowed] of [['model', peerModels], ['effort', peerEfforts]]) {
+    if (request[key] !== undefined && !allowed.has(request[key])) {
+      throw Object.assign(new Error(`${key} must be one of: ${[...allowed].join(', ')}.`), { notDispatched: true });
+    }
+  }
   const canonical = readJson(runtime.statePath);
   const route = routeFactory(client, {
     endpoint: runtime.endpoint, expectedServerPid: runtime.serverProcessId,
@@ -76,7 +83,8 @@ export async function sendPeer({ client, runtime, request, message, record, pers
     if (!request.create || !request.workspace) throw new Error('Select an exact threadId, or explicitly request create with a workspace.');
     record.phase = 'creating'; persist(record);
     const result = await client.call('thread/start', {
-      cwd: request.workspace, model: 'gpt-6.1-sol',
+      cwd: request.workspace, model: request.model ?? 'gpt-6.1-sol',
+      ...(request.effort !== undefined ? { config: { model_reasoning_effort: request.effort } } : {}),
       ...(request.mode === 'review' ? { sandbox: 'read-only' } : {}),
     });
     if (!result.thread?.id) throw new Error('Thread creation outcome is unknown; do not repeat.');

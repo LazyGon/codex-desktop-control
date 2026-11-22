@@ -66,6 +66,12 @@ export async function runRequest(request, { stateRoot, connect = connectPeer, cl
   }, 5 * 60_000);
   let client;
   try {
+    if (request.peer === 'codex') {
+      record.requestedSettings = {
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.effort !== undefined ? { effort: request.effort } : {}),
+      };
+    }
     const delegatedMessage = message + '\n\nDelegated peer task: stay within this request. Return findings and results to the caller; do not call another agent or expand permissions. Task mode: ' + request.mode
       + (request.mode === 'review' ? '. This request is read-only; do not change files.' : '. Make only the changes authorized by the bounded task above.');
     if (request.peer === 'claude') {

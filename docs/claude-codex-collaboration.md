@@ -23,6 +23,8 @@ Keep prompt text in an absolute UTF-8 `messageFile`, not in the command line.
   "action": "ask",
   "operationId": "NEW-UUID",
   "create": true,
+  "model": "gpt-6-luna",
+  "effort": "low",
   "workspace": "C:/path/to/project",
   "messageFile": "C:/private/task.txt",
   "mode": "review"
@@ -30,7 +32,12 @@ Keep prompt text in an absolute UTF-8 `messageFile`, not in the command line.
 ```
 
 For an existing Codex peer replace `create` with `threadId`. Keep the exact returned
-thread ID for follow-ups. For Claude use `peer: "claude"` and optionally a prior
+thread ID for follow-ups. New Codex peers accept optional `model` values
+`gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6.1-terra`, and `effort` values
+`low`, `medium`, `high`, `xhigh`. Omission preserves GPT-6.1 Sol and the runtime's
+default effort. Unlisted values, including `max` and `ultra`, fail before dispatch
+and are journaled. Existing threads never receive model or effort overrides.
+For Claude use `peer: "claude"` and optionally a prior
 `sessionId`. Omitted mode defaults to `review`. `mode: "review"` limits a new Codex peer to read-only and a Claude peer
 to planning and read tools. Existing Codex permissions are never overridden;
 read-only review is part of the delivered task scope. `implement` requests retain

@@ -28,14 +28,14 @@ class Client extends EventEmitter {
 const routeFactory = () => ({ verifyRuntime() {}, async prepareDesktopThread() { throw new Error('A loaded task must not be reloaded.'); } });
 test('idle task starts once without overriding its settings or resuming its owner', async () => {
   const client = new Client(), record = {};
-  const result = await sendPeer({ client, runtime, request: { threadId: 'chosen', operationId: randomUUID() }, message: 'review authentication', record, persist() {}, routeFactory });
+  const result = await sendPeer({ client, runtime, request: { threadId: 'chosen', model: 'gpt-6-luna', effort: 'low', operationId: randomUUID() }, message: 'review authentication', record, persist() {}, routeFactory });
   assert.equal(result.turnId, 'new-turn');
   const mutations = client.calls.filter(([m]) => !['thread/read', 'thread/goal/get', 'thread/turns/list'].includes(m));
   assert.deepEqual(mutations, [['turn/start', { threadId: 'chosen', input: [{ type: 'text', text: 'review authentication', text_elements: [] }] }]]);
 });
 test('active task steers the observed exact turn', async () => {
   const client = new Client({ active: true });
-  await sendPeer({ client, runtime, request: { threadId: 'chosen', operationId: randomUUID() }, message: 'check rollback', record: {}, persist() {}, routeFactory });
+  await sendPeer({ client, runtime, request: { threadId: 'chosen', create: true, model: 'gpt-6-luna', effort: 'low', operationId: randomUUID() }, message: 'check rollback', record: {}, persist() {}, routeFactory });
   assert.deepEqual(client.calls.at(-1), ['turn/steer', { threadId: 'chosen', expectedTurnId: 'running-turn', input: [{ type: 'text', text: 'check rollback', text_elements: [] }] }]);
 });
 test('a paused goal prevents delivery', async () => {
@@ -85,7 +85,54 @@ test('a newly created empty thread receives its first message without a resume o
   const result = await sendPeer({ client, runtime, request: { create: true, workspace, mode: 'review', operationId: randomUUID() }, message: 'first message', record: {}, persist() {}, routeFactory });
   assert.equal(result.threadId, 'new-peer');
   assert.equal(client.calls.filter(([method]) => method === 'thread/start').length, 1);
+  assert.deepEqual(client.calls.find(([method]) => method === 'thread/start'), ['thread/start', { cwd: workspace, model: 'gpt-6.1-sol', sandbox: 'read-only' }]);
   assert.deepEqual(client.calls.at(-1), ['turn/start', { threadId: 'new-peer', input: [{ type: 'text', text: 'first message', text_elements: [] }] }]);
+});
+
+test('new peers accept the allowed models and efforts only at creation', async () => {
+  for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra']) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh']) {
+      const client = new Client();
+      await sendPeer({ client, runtime, request: { create: true, workspace, model, effort, mode: 'review', operationId: randomUUID() }, message: 'bounded review', record: {}, persist() {}, routeFactory });
+      assert.deepEqual(client.calls.find(([method]) => method === 'thread/start'), ['thread/start', {
+        cwd: workspace, model, config: { model_reasoning_effort: effort }, sandbox: 'read-only',
+      }]);
+      assert.deepEqual(client.calls.at(-1), ['turn/start', { threadId: 'new-peer', input: [{ type: 'text', text: 'bounded review', text_elements: [] }] }]);
+    }
+  }
+});
+
+test('model and effort can each be omitted independently without changing other defaults', async () => {
+  for (const [settings, expected] of [
+    [{ model: 'gpt-6-luna' }, { model: 'gpt-6-luna' }],
+    [{ effort: 'medium' }, { model: 'gpt-6.1-sol', config: { model_reasoning_effort: 'medium' } }],
+  ]) {
+    const client = new Client();
+    await sendPeer({ client, runtime, request: { create: true, workspace, mode: 'implement', ...settings, operationId: randomUUID() }, message: 'bounded implementation', record: {}, persist() {}, routeFactory });
+    assert.deepEqual(client.calls.find(([method]) => method === 'thread/start'), ['thread/start', { cwd: workspace, ...expected }]);
+  }
+});
+
+test('invalid peer settings are rejected before dispatch and retained in the operation journal', async t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-settings-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const messageFile = path.join(temporary, 'input.txt'); fs.writeFileSync(messageFile, 'bounded task');
+  for (const [key, values] of [
+    ['model', ['gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-invented', '', null, 1, {}]],
+    ['effort', ['max', 'ultra', 'minimal', 'HIGH', '', null, 1, {}]],
+  ]) {
+    for (const value of values) {
+      const client = new Client(), operationId = randomUUID();
+      const request = { peer: 'codex', create: true, workspace, messageFile, operationId, [key]: value };
+      const result = await runRequest(request, { stateRoot: temporary, connect: async () => ({ client, runtime }) });
+      assert.equal(result.phase, 'failed');
+      assert.match(result.error, new RegExp(key + ' must be one of'));
+      assert.deepEqual(client.calls, []);
+      const saved = JSON.parse(fs.readFileSync(path.join(temporary, operationId, 'result.json'), 'utf8'));
+      assert.equal(saved.phase, 'failed'); assert.equal(saved.error, result.error);
+      assert.deepEqual(saved.requestedSettings, { [key]: value });
+    }
+  }
 });
 test('disconnect while waiting is an error, not completion', async () => {
   const client = new Client({ active: true });
