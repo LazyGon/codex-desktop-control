@@ -73,6 +73,7 @@ export async function sendPeer({ client, runtime, request, message, record, pers
     record.phase = 'creating'; persist(record);
     const result = await client.call('thread/start', {
       cwd: request.workspace, model: request.model ?? 'gpt-6.1-sol',
+      ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
       ...(request.effort !== undefined ? { config: { model_reasoning_effort: request.effort } } : {}),
       ...(request.mode === 'review' ? { sandbox: 'read-only' } : {}),
     });
