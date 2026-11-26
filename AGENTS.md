@@ -1,6 +1,6 @@
 # Codex Desktop Control
 
-本書のdocs/・state/・control/参照はcontrol utility root（C:/Users/lazyg/Documents/ChatGPT/codex desktop control）基準。
+本書のdocs/・state/・control/参照は、Codex homeのinstructions/host-operations.mdで確認した対象PCの正準Control root基準。
 
 ## 必須境界
 正準endpointはlauncher/state/current.json。legacy experiment stateは移行時のfallbackだけ。対象選定前は既存list/catchupを優先する。既存validateSharedRuntime/connectCanonicalを使い、対象thread/最新turnを明示、元workspace/model/approval/sandbox/停止とUNKNOWN無再送を守る。別AppServerやlistener外部公開をしない。control保守でProduct repoを変更しない。
@@ -13,7 +13,7 @@ Discord秘密はDPAPI保護し引数/ログ/source/JSONへ残さず、guild/user
 Ownerが除外しない限り、依頼されたremote更新統合はBridge再起動まで含む。live Bridgeとscheduled taskの所有を確認し正常停止→終了確認→既存Codex Discord Remote taskを一回起動、新PID/Discord readiness/共有接続を検証する。不明操作は再送しない。許可はBridgeのみでDesktop/AppServer/Windows/Ollama/他taskへ広げない。
 
 ## 管理者・再起動
-管理者操作時はglobal規則とadmin-terminal/AGENTS.md、個別許可済みWindows再起動又はDesktop再起動時はdocs/OPERATIONS.md#restart-and-signinを読む。既存保護経路を再利用し新UAC/SYSTEM/秘密保存/他task再開をしない。ARSOはglobalの2026-11-22指定を優先し、旧一回限り経路やOptOut=1への復元を再使用しない。実施前の保存・独立復帰確認・元設定/goal/使用量維持・UNKNOWN無再送を守る。loaded taskのownerを奪わない。
+Codex homeのAGENTS.mdとinstructions/host-operations.mdで対象PCの手順を確認する。管理者操作にはadmin-terminal/AGENTS.mdを、個別に許可された再起動にはdocs/OPERATIONS.md#restart-and-signinも参照する。旧ARSO helperはhost-operations.mdに記録された履歴と限定条件に従う。
 
 ## crash修復
 修復前にdocs/crash-recovery.mdを読む。正準live状態とCodexRecovery/current.json・検証記録を照合し、壊れた原本・新しいUNKNOWN/accepted journalを保全する。旧snapshotで新journalやlive SQLiteを上書きしない。Bridgeの同guild backup復旧を使い空stateで再作成しない。DB復元は実writerの正常停止後だけ行う。
