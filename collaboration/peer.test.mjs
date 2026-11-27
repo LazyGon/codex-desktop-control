@@ -10,7 +10,20 @@ import { runRequest } from './peer.mjs';
 import { claudeArguments } from './claude-peer.mjs';
 
 const workspace = process.cwd();
-const runtime = { statePath: new URL('../launcher/state/current.json', import.meta.url), endpoint: 'ws://127.0.0.1:8798', serverProcessId: 123 };
+const runtimeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-test-runtime-'));
+const runtime = {
+  statePath: path.join(runtimeDirectory, 'current.json'),
+  endpoint: 'ws://127.0.0.1:8798',
+  serverProcessId: 123,
+};
+fs.writeFileSync(runtime.statePath, JSON.stringify({
+  serverProcessId: runtime.serverProcessId,
+  startedAt: '2026-01-01T00:00:00Z',
+}));
+test.after(() => {
+  fs.unlinkSync(runtime.statePath);
+  fs.rmdirSync(runtimeDirectory);
+});
 class Client extends EventEmitter {
   constructor({ active = false, paused = false } = {}) { super(); this.connected = true; this.active = active; this.paused = paused; this.calls = []; }
   async call(method, params) {
